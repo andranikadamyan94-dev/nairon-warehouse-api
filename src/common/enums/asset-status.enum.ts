@@ -1,0 +1,6 @@
+export enum AssetStatus {
+  AVAILABLE = 'AVAILABLE',
+  MAINTENANCE = 'MAINTENANCE',
+  DAMAGED = 'DAMAGED',
+  RETIRED = 'RETIRED',
+}

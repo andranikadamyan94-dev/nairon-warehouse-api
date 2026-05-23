@@ -1,0 +1,274 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ItemType {
+  CONSUMABLE
+  ASSET
+}
+
+enum AssetStatus {
+  AVAILABLE
+  MAINTENANCE
+  DAMAGED
+  RETIRED
+}
+
+enum ResourceReservationStatus {
+  PENDING
+  APPROVED
+  PARTIALLY_ALLOCATED
+  ALLOCATED
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum ReservationAllocationAction {
+  ALLOCATED
+  RELEASED
+  REALLOCATED
+}
+
+model Item {
+  id        Int       @id @default(autoincrement())
+  uuid      String    @unique @default(uuid())
+
+  name      String
+  code      String?   @unique
+
+  type      ItemType
+
+  category  String?
+  unit      String?
+
+  quantity  Float     @default(0)
+
+  notes     String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // RELATIONS
+
+  assets                Asset[]
+
+  inventoryMovements    InventoryMovement[]
+
+  resourceReservations  ResourceReservation[]
+
+  @@index([type])
+}
+
+model Asset {
+  id                    Int          @id @default(autoincrement())
+  uuid                  String       @unique @default(uuid())
+
+  itemId                Int
+
+  serialNumber          String?      @unique
+
+  status                AssetStatus  @default(AVAILABLE)
+
+  responsibleUserId     Int?
+
+  notes                 String?
+
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  // RELATIONS
+
+  item                  Item         @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  maintenanceRecords    MaintenanceRecord[]
+
+  allocations           ReservationAllocation[]
+
+  responsibilities      AssetResponsibility[]
+
+  allocationHistory     ReservationAllocationHistory[]
+
+  @@index([itemId])
+
+  @@index([status])
+}
+
+model InventoryMovement {
+  id            Int       @id @default(autoincrement())
+  uuid          String    @unique @default(uuid())
+
+  itemId        Int
+
+  quantity      Float
+
+  type          String
+
+  taskId        Int?
+
+  performedBy   Int?
+
+  notes         String?
+
+  createdAt     DateTime  @default(now())
+
+  // RELATIONS
+
+  item          Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([itemId])
+
+  @@index([type])
+}
+
+model ResourceReservation {
+  id            Int                          @id @default(autoincrement())
+  uuid          String                       @unique @default(uuid())
+
+  itemId        Int
+
+  taskId        Int
+
+  quantity      Int
+
+  status        ResourceReservationStatus    @default(PENDING)
+
+  startDate     DateTime
+  endDate       DateTime
+
+  notes         String?
+
+  createdAt     DateTime                     @default(now())
+  updatedAt     DateTime                     @updatedAt
+
+  // RELATIONS
+
+  item                Item                           @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  allocations         ReservationAllocation[]
+
+  allocationHistory   ReservationAllocationHistory[]
+
+  @@index([itemId])
+
+  @@index([taskId])
+
+  @@index([status])
+
+  @@index([startDate, endDate])
+}
+
+model ReservationAllocation {
+  id              Int       @id @default(autoincrement())
+  uuid            String    @unique @default(uuid())
+
+  reservationId   Int
+
+  assetId         Int
+
+  allocatedAt     DateTime  @default(now())
+
+  allocatedBy     Int?
+
+  releasedAt      DateTime?
+
+  // RELATIONS
+
+  reservation     ResourceReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  asset           Asset               @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@index([reservationId])
+
+  @@index([assetId])
+
+  @@index([releasedAt])
+}
+
+model ReservationAllocationHistory {
+  id              Int                           @id @default(autoincrement())
+  uuid            String                        @unique @default(uuid())
+
+  reservationId   Int
+
+  assetId         Int
+
+  action          ReservationAllocationAction
+
+  performedBy     Int?
+
+  notes           String?
+
+  performedAt     DateTime                      @default(now())
+
+  // RELATIONS
+
+  reservation     ResourceReservation           @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  asset           Asset                         @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@index([reservationId])
+
+  @@index([assetId])
+
+  @@index([action])
+}
+
+model MaintenanceRecord {
+  id            Int       @id @default(autoincrement())
+  uuid          String    @unique @default(uuid())
+
+  assetId       Int
+
+  startDate     DateTime
+  endDate       DateTime
+
+  type          String?
+
+  notes         String?
+
+  createdBy     Int?
+
+  createdAt     DateTime  @default(now())
+
+  // RELATIONS
+
+  asset         Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@index([assetId])
+
+  @@index([startDate, endDate])
+}
+
+model AssetResponsibility {
+  id              Int       @id @default(autoincrement())
+  uuid            String    @unique @default(uuid())
+
+  assetId         Int
+
+  userId          Int
+
+  assignedAt      DateTime  @default(now())
+  releasedAt      DateTime?
+
+  assignedBy      Int?
+
+  notes           String?
+
+  createdAt       DateTime  @default(now())
+
+  // RELATIONS
+
+  asset           Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@index([assetId])
+
+  @@index([userId])
+
+  @@index([releasedAt])
+}
