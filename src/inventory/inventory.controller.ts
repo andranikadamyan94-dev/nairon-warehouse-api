@@ -1,22 +1,59 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseIntPipe,
+  Post,
+} from '@nestjs/common';
 
-import { InventoryMovementDto } from './dto/inventory-movement.dto';
+import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { InventoryService } from './inventory.service';
 
+import { InventoryMovementDto } from './dto/inventory-movement.dto';
+
+@ApiTags('Inventory')
 @Controller('inventory')
 export class InventoryController {
   constructor(private readonly inventoryService: InventoryService) {}
 
   @Post('movement')
-  createMovement(@Body() dto: InventoryMovementDto) {
+  @ApiOperation({
+    summary: 'Create inventory movement',
+  })
+  @ApiResponse({
+    status: 201,
+  })
+  createMovement(
+    @Body()
+    dto: InventoryMovementDto,
+  ) {
     return this.inventoryService.createMovement(dto);
   }
 
   @Get('movements')
-  getMovements(@Query('itemId') itemId?: string) {
-    return this.inventoryService.getMovements(
-      itemId ? Number(itemId) : undefined,
-    );
+  @ApiOperation({
+    summary: 'Get inventory movements',
+  })
+  @ApiResponse({
+    status: 200,
+  })
+  getMovements() {
+    return this.inventoryService.getMovements();
+  }
+
+  @Get('item/:itemId')
+  @ApiOperation({
+    summary: 'Get item inventory history',
+  })
+  @ApiResponse({
+    status: 200,
+  })
+  getItemMovements(
+    @Param('itemId', ParseIntPipe)
+    itemId: number,
+  ) {
+    return this.inventoryService.getMovements(itemId);
   }
 }

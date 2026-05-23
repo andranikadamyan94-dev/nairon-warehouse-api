@@ -71,7 +71,7 @@ export class AvailabilityService {
 
       const reservedQuantity = overlappingReservations._sum.quantity ?? 0;
 
-      availableQuantity -= reservedQuantity;
+      availableQuantity = Math.max(0, availableQuantity - reservedQuantity);
 
       if (availableQuantity < requestedResource.quantity) {
         unavailableResources.push({

@@ -9,36 +9,73 @@ import {
   Post,
 } from '@nestjs/common';
 
+import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+
 import { CreateItemDto } from './dto/create-item.dto';
 import { UpdateItemDto } from './dto/update-item.dto';
+
 import { ItemsService } from './items.service';
 
+@ApiTags('Items')
 @Controller('items')
 export class ItemsController {
   constructor(private readonly itemsService: ItemsService) {}
 
   @Post()
-  create(@Body() dto: CreateItemDto) {
+  @ApiOperation({
+    summary: 'Create item',
+  })
+  @ApiResponse({
+    status: 201,
+  })
+  create(
+    @Body()
+    dto: CreateItemDto,
+  ) {
     return this.itemsService.create(dto);
   }
 
   @Get()
+  @ApiOperation({
+    summary: 'Get all items',
+  })
   findAll() {
     return this.itemsService.findAll();
   }
 
   @Get(':id')
-  findOne(@Param('id', ParseIntPipe) id: number) {
+  @ApiOperation({
+    summary: 'Get item by id',
+  })
+  findOne(
+    @Param('id', ParseIntPipe)
+    id: number,
+  ) {
     return this.itemsService.findOne(id);
   }
 
   @Patch(':id')
-  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateItemDto) {
+  @ApiOperation({
+    summary: 'Update item',
+  })
+  update(
+    @Param('id', ParseIntPipe)
+    id: number,
+
+    @Body()
+    dto: UpdateItemDto,
+  ) {
     return this.itemsService.update(id, dto);
   }
 
   @Delete(':id')
-  remove(@Param('id', ParseIntPipe) id: number) {
+  @ApiOperation({
+    summary: 'Delete item',
+  })
+  remove(
+    @Param('id', ParseIntPipe)
+    id: number,
+  ) {
     return this.itemsService.remove(id);
   }
 }

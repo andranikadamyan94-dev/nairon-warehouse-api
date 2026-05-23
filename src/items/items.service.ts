@@ -9,16 +9,13 @@ import { UpdateItemDto } from './dto/update-item.dto';
 export class ItemsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(dto: CreateItemDto) {
+  create(dto: CreateItemDto) {
     return this.prisma.item.create({
-      data: {
-        ...dto,
-        quantity: dto.quantity ?? 0,
-      },
+      data: dto,
     });
   }
 
-  async findAll() {
+  findAll() {
     return this.prisma.item.findMany({
       orderBy: {
         createdAt: 'desc',
@@ -32,7 +29,10 @@ export class ItemsService {
     });
 
     if (!item) {
-      throw new NotFoundException('Item not found');
+      throw new NotFoundException({
+        message: 'Item not found',
+        itemId: id,
+      });
     }
 
     return item;

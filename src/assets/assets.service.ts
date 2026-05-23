@@ -1,12 +1,6 @@
-import {
-  BadRequestException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
-
-import { ItemType } from '../common/enums/item-type.enum';
 
 import { CreateAssetDto } from './dto/create-asset.dto';
 import { UpdateAssetDto } from './dto/update-asset.dto';
@@ -15,31 +9,18 @@ import { UpdateAssetDto } from './dto/update-asset.dto';
 export class AssetsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(dto: CreateAssetDto) {
-    const item = await this.prisma.item.findUnique({
-      where: {
-        id: dto.itemId,
-      },
-    });
-
-    if (!item) {
-      throw new NotFoundException('Item not found');
-    }
-
-    if (item.type !== ItemType.ASSET) {
-      throw new BadRequestException('Item is not an asset type');
-    }
-
+  create(dto: CreateAssetDto) {
     return this.prisma.asset.create({
       data: dto,
     });
   }
 
-  async findAll() {
+  findAll() {
     return this.prisma.asset.findMany({
       include: {
         item: true,
       },
+
       orderBy: {
         createdAt: 'desc',
       },
@@ -49,13 +30,20 @@ export class AssetsService {
   async findOne(id: number) {
     const asset = await this.prisma.asset.findUnique({
       where: { id },
+
       include: {
         item: true,
+        maintenanceRecords: true,
+        responsibilities: true,
+        allocations: true,
       },
     });
 
     if (!asset) {
-      throw new NotFoundException('Asset not found');
+      throw new NotFoundException({
+        message: 'Asset not found',
+        assetId: id,
+      });
     }
 
     return asset;

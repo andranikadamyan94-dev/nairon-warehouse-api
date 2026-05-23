@@ -1,11 +1,6 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Param,
-  ParseIntPipe,
-  Post,
-} from '@nestjs/common';
+import { Body, Controller, Delete, Post } from '@nestjs/common';
+
+import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { ReservationsService } from './reservations.service';
 
@@ -14,11 +9,18 @@ import { AllocateReservationDto } from './dto/allocate-reservation.dto';
 import { ReallocateResourceDto } from './dto/reallocate-resource.dto';
 import { ReleaseAllocationDto } from './dto/release-allocation.dto';
 
+@ApiTags('Reservations')
 @Controller('reservations')
 export class ReservationsController {
   constructor(private readonly reservationsService: ReservationsService) {}
 
   @Post()
+  @ApiOperation({
+    summary: 'Create resource reservations',
+  })
+  @ApiResponse({
+    status: 201,
+  })
   create(
     @Body()
     dto: CreateReservationDto,
@@ -27,6 +29,12 @@ export class ReservationsController {
   }
 
   @Post('allocate')
+  @ApiOperation({
+    summary: 'Allocate physical assets to reservations',
+  })
+  @ApiResponse({
+    status: 201,
+  })
   allocate(
     @Body()
     dto: AllocateReservationDto,
@@ -34,7 +42,27 @@ export class ReservationsController {
     return this.reservationsService.allocate(dto);
   }
 
+  @Post('reallocate')
+  @ApiOperation({
+    summary: 'Replace allocated asset',
+  })
+  @ApiResponse({
+    status: 200,
+  })
+  reallocate(
+    @Body()
+    dto: ReallocateResourceDto,
+  ) {
+    return this.reservationsService.reallocate(dto);
+  }
+
   @Delete('allocation')
+  @ApiOperation({
+    summary: 'Release allocation',
+  })
+  @ApiResponse({
+    status: 200,
+  })
   releaseAllocation(
     @Body()
     dto: ReleaseAllocationDto,
@@ -44,13 +72,5 @@ export class ReservationsController {
       undefined,
       dto.reason,
     );
-  }
-
-  @Post('reallocate')
-  reallocate(
-    @Body()
-    dto: ReallocateResourceDto,
-  ) {
-    return this.reservationsService.reallocate(dto);
   }
 }

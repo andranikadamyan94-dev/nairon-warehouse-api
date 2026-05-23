@@ -9,37 +9,70 @@ import {
   Post,
 } from '@nestjs/common';
 
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
+
 import { AssetsService } from './assets.service';
 
 import { CreateAssetDto } from './dto/create-asset.dto';
 import { UpdateAssetDto } from './dto/update-asset.dto';
 
+@ApiTags('Assets')
 @Controller('assets')
 export class AssetsController {
   constructor(private readonly assetsService: AssetsService) {}
 
   @Post()
-  create(@Body() dto: CreateAssetDto) {
+  @ApiOperation({
+    summary: 'Create asset',
+  })
+  create(
+    @Body()
+    dto: CreateAssetDto,
+  ) {
     return this.assetsService.create(dto);
   }
 
   @Get()
+  @ApiOperation({
+    summary: 'Get all assets',
+  })
   findAll() {
     return this.assetsService.findAll();
   }
 
   @Get(':id')
-  findOne(@Param('id', ParseIntPipe) id: number) {
+  @ApiOperation({
+    summary: 'Get asset by id',
+  })
+  findOne(
+    @Param('id', ParseIntPipe)
+    id: number,
+  ) {
     return this.assetsService.findOne(id);
   }
 
   @Patch(':id')
-  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateAssetDto) {
+  @ApiOperation({
+    summary: 'Update asset',
+  })
+  update(
+    @Param('id', ParseIntPipe)
+    id: number,
+
+    @Body()
+    dto: UpdateAssetDto,
+  ) {
     return this.assetsService.update(id, dto);
   }
 
   @Delete(':id')
-  remove(@Param('id', ParseIntPipe) id: number) {
+  @ApiOperation({
+    summary: 'Delete asset',
+  })
+  remove(
+    @Param('id', ParseIntPipe)
+    id: number,
+  ) {
     return this.assetsService.remove(id);
   }
 }

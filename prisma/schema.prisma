@@ -36,239 +36,227 @@ enum ReservationAllocationAction {
 }
 
 model Item {
-  id        Int       @id @default(autoincrement())
-  uuid      String    @unique @default(uuid())
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
 
-  name      String
-  code      String?   @unique
+  name String
+  code String? @unique
 
-  type      ItemType
+  type ItemType
 
-  category  String?
-  unit      String?
+  category String?
+  unit     String?
 
-  quantity  Float     @default(0)
+  quantity Float @default(0)
 
-  notes     String?
+  notes String?
 
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // RELATIONS
 
-  assets                Asset[]
+  assets Asset[]
 
-  inventoryMovements    InventoryMovement[]
+  inventoryMovements InventoryMovement[]
 
-  resourceReservations  ResourceReservation[]
+  resourceReservations ResourceReservation[]
 
   @@index([type])
 }
 
 model Asset {
-  id                    Int          @id @default(autoincrement())
-  uuid                  String       @unique @default(uuid())
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
 
-  itemId                Int
+  itemId Int
 
-  serialNumber          String?      @unique
+  serialNumber String? @unique
 
-  status                AssetStatus  @default(AVAILABLE)
+  status AssetStatus @default(AVAILABLE)
 
-  responsibleUserId     Int?
+  responsibleUserId Int?
 
-  notes                 String?
+  notes String?
 
-  createdAt             DateTime     @default(now())
-  updatedAt             DateTime     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // RELATIONS
 
-  item                  Item         @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
-  maintenanceRecords    MaintenanceRecord[]
+  maintenanceRecords MaintenanceRecord[]
 
-  allocations           ReservationAllocation[]
+  allocations ReservationAllocation[]
 
-  responsibilities      AssetResponsibility[]
+  responsibilities AssetResponsibility[]
 
-  allocationHistory     ReservationAllocationHistory[]
+  allocationHistory ReservationAllocationHistory[]
 
   @@index([itemId])
-
   @@index([status])
 }
 
 model InventoryMovement {
-  id            Int       @id @default(autoincrement())
-  uuid          String    @unique @default(uuid())
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
 
-  itemId        Int
+  itemId Int
 
-  quantity      Float
+  quantity Float
 
-  type          String
+  type String
 
-  taskId        Int?
+  taskId Int?
 
-  performedBy   Int?
+  performedBy Int?
 
-  notes         String?
+  notes String?
 
-  createdAt     DateTime  @default(now())
+  createdAt DateTime @default(now())
 
   // RELATIONS
 
-  item          Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
   @@index([itemId])
-
   @@index([type])
 }
 
 model ResourceReservation {
-  id            Int                          @id @default(autoincrement())
-  uuid          String                       @unique @default(uuid())
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
 
-  itemId        Int
+  itemId Int
 
-  taskId        Int
+  taskId Int
 
-  quantity      Int
+  quantity Int
 
-  status        ResourceReservationStatus    @default(PENDING)
+  status ResourceReservationStatus @default(PENDING)
 
-  startDate     DateTime
-  endDate       DateTime
+  startDate DateTime
+  endDate   DateTime
 
-  notes         String?
+  notes String?
 
-  createdAt     DateTime                     @default(now())
-  updatedAt     DateTime                     @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // RELATIONS
 
-  item                Item                           @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
-  allocations         ReservationAllocation[]
+  allocations ReservationAllocation[]
 
-  allocationHistory   ReservationAllocationHistory[]
+  allocationHistory ReservationAllocationHistory[]
 
   @@index([itemId])
-
   @@index([taskId])
-
   @@index([status])
-
   @@index([startDate, endDate])
 }
 
 model ReservationAllocation {
-  id              Int       @id @default(autoincrement())
-  uuid            String    @unique @default(uuid())
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
 
-  reservationId   Int
+  reservationId Int
 
-  assetId         Int
+  assetId Int
 
-  allocatedAt     DateTime  @default(now())
+  allocatedAt DateTime @default(now())
 
-  allocatedBy     Int?
+  allocatedBy Int?
 
-  releasedAt      DateTime?
+  releasedAt DateTime?
 
   // RELATIONS
 
-  reservation     ResourceReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  reservation ResourceReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
 
-  asset           Asset               @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
   @@index([reservationId])
-
   @@index([assetId])
-
   @@index([releasedAt])
 }
 
 model ReservationAllocationHistory {
-  id              Int                           @id @default(autoincrement())
-  uuid            String                        @unique @default(uuid())
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
 
-  reservationId   Int
+  reservationId Int
 
-  assetId         Int
+  assetId Int
 
-  action          ReservationAllocationAction
+  action ReservationAllocationAction
 
-  performedBy     Int?
+  performedBy Int?
 
-  notes           String?
+  notes String?
 
-  performedAt     DateTime                      @default(now())
+  performedAt DateTime @default(now())
 
   // RELATIONS
 
-  reservation     ResourceReservation           @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  reservation ResourceReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
 
-  asset           Asset                         @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
   @@index([reservationId])
-
   @@index([assetId])
-
   @@index([action])
 }
 
 model MaintenanceRecord {
-  id            Int       @id @default(autoincrement())
-  uuid          String    @unique @default(uuid())
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
 
-  assetId       Int
+  assetId Int
 
-  startDate     DateTime
-  endDate       DateTime
+  startDate DateTime
+  endDate   DateTime
 
-  type          String?
+  type String?
 
-  notes         String?
+  notes String?
 
-  createdBy     Int?
+  createdBy Int?
 
-  createdAt     DateTime  @default(now())
+  createdAt DateTime @default(now())
 
   // RELATIONS
 
-  asset         Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
   @@index([assetId])
-
   @@index([startDate, endDate])
 }
 
 model AssetResponsibility {
-  id              Int       @id @default(autoincrement())
-  uuid            String    @unique @default(uuid())
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
 
-  assetId         Int
+  assetId Int
 
-  userId          Int
+  userId Int
 
-  assignedAt      DateTime  @default(now())
-  releasedAt      DateTime?
+  assignedAt DateTime  @default(now())
+  releasedAt DateTime?
 
-  assignedBy      Int?
+  assignedBy Int?
 
-  notes           String?
+  notes String?
 
-  createdAt       DateTime  @default(now())
+  createdAt DateTime @default(now())
 
   // RELATIONS
 
-  asset           Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
   @@index([assetId])
-
   @@index([userId])
-
   @@index([releasedAt])
 }
