@@ -10,6 +10,7 @@ import { ReservationsModule } from './reservations/reservations.module';
 import { AvailabilityModule } from './availability/availability.module';
 import { MaintenanceModule } from './maintenance/maintenance.module';
 import { ResponsibilitiesModule } from './responsibilities/responsibilities.module';
+import { AllocationsModule } from './allocations/allocations.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { ResponsibilitiesModule } from './responsibilities/responsibilities.modu
     AvailabilityModule,
     MaintenanceModule,
     ResponsibilitiesModule,
+    AllocationsModule,
   ],
 })
 export class AppModule {}

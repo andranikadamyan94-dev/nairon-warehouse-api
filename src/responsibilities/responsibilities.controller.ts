@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  Get,
   Param,
   ParseIntPipe,
   Post,
@@ -46,5 +47,18 @@ export class ResponsibilitiesController {
     id: number,
   ) {
     return this.responsibilitiesService.release(id);
+  }
+
+  @Get()
+  getAll() {
+    return this.responsibilitiesService.getAll();
+  }
+
+  @Get('user/:userId')
+  getUserResponsibilities(
+    @Param('userId')
+    userId: string,
+  ) {
+    return this.responsibilitiesService.getUserResponsibilities(+userId);
   }
 }

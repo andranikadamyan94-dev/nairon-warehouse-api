@@ -404,4 +404,58 @@ export class ReservationsService {
       return newAllocation;
     });
   }
+  async getAll(query: any) {
+    const page = Number(query.page ?? 1);
+
+    const limit = Number(query.limit ?? 10);
+
+    const [data, total] = await Promise.all([
+      this.prisma.resourceReservation.findMany({
+        skip: (page - 1) * limit,
+
+        take: limit,
+
+        include: {
+          item: true,
+
+          allocations: {
+            include: {
+              asset: true,
+            },
+          },
+        },
+
+        orderBy: {
+          createdAt: 'desc',
+        },
+      }),
+
+      this.prisma.resourceReservation.count(),
+    ]);
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+    };
+  }
+
+  async getOne(id: number) {
+    return this.prisma.resourceReservation.findUnique({
+      where: {
+        id,
+      },
+
+      include: {
+        item: true,
+
+        allocations: {
+          include: {
+            asset: true,
+          },
+        },
+      },
+    });
+  }
 }

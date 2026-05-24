@@ -1,4 +1,12 @@
-import { Body, Controller, Delete, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Post,
+  Query,
+} from '@nestjs/common';
 
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
@@ -8,6 +16,7 @@ import { CreateReservationDto } from './dto/create-reservation.dto';
 import { AllocateReservationDto } from './dto/allocate-reservation.dto';
 import { ReallocateResourceDto } from './dto/reallocate-resource.dto';
 import { ReleaseAllocationDto } from './dto/release-allocation.dto';
+import { PaginationQueryDto } from 'src/common/dto/pagination-query.dto';
 
 @ApiTags('Reservations')
 @Controller('reservations')
@@ -72,5 +81,21 @@ export class ReservationsController {
       undefined,
       dto.reason,
     );
+  }
+
+  @Get()
+  getAll(
+    @Query()
+    query: PaginationQueryDto,
+  ) {
+    return this.reservationsService.getAll(query);
+  }
+
+  @Get(':id')
+  getOne(
+    @Param('id')
+    id: string,
+  ) {
+    return this.reservationsService.getOne(+id);
   }
 }

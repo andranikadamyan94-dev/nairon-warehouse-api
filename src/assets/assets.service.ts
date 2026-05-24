@@ -65,4 +65,58 @@ export class AssetsService {
       where: { id },
     });
   }
+
+  async getAvailableAssets(query: {
+    itemId: number;
+    startDate: string;
+    endDate: string;
+  }) {
+    const startDate = new Date(query.startDate);
+
+    const endDate = new Date(query.endDate);
+
+    return this.prisma.asset.findMany({
+      where: {
+        itemId: query.itemId,
+
+        allocations: {
+          none: {
+            reservation: {
+              startDate: {
+                lte: endDate,
+              },
+
+              endDate: {
+                gte: startDate,
+              },
+            },
+          },
+        },
+      },
+
+      include: {
+        item: true,
+      },
+    });
+  }
+
+  async getAssetHistory(assetId: number) {
+    return this.prisma.asset.findUnique({
+      where: {
+        id: assetId,
+      },
+
+      include: {
+        allocations: {
+          include: {
+            reservation: true,
+          },
+        },
+
+        maintenanceRecords: true,
+
+        responsibilities: true,
+      },
+    });
+  }
 }

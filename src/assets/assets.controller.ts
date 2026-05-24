@@ -7,6 +7,7 @@ import {
   ParseIntPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -74,5 +75,31 @@ export class AssetsController {
     id: number,
   ) {
     return this.assetsService.remove(id);
+  }
+
+  @Get('available')
+  getAvailable(
+    @Query('itemId')
+    itemId: string,
+
+    @Query('startDate')
+    startDate: string,
+
+    @Query('endDate')
+    endDate: string,
+  ) {
+    return this.assetsService.getAvailableAssets({
+      itemId: +itemId,
+      startDate,
+      endDate,
+    });
+  }
+
+  @Get(':id/history')
+  getHistory(
+    @Param('id')
+    id: string,
+  ) {
+    return this.assetsService.getAssetHistory(+id);
   }
 }

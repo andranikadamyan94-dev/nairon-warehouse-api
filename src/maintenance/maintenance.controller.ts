@@ -5,6 +5,7 @@ import {
   Param,
   ParseIntPipe,
   Post,
+  Query,
 } from '@nestjs/common';
 
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -12,6 +13,7 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { MaintenanceService } from './maintenance.service';
 
 import { CreateMaintenanceRecordDto } from './dto/create-maintenance-record.dto';
+import { PaginationQueryDto } from 'src/common/dto/pagination-query.dto';
 
 @ApiTags('Maintenance')
 @Controller('maintenance')
@@ -55,5 +57,21 @@ export class MaintenanceController {
     assetId: number,
   ) {
     return this.maintenanceService.getAssetMaintenanceHistory(assetId);
+  }
+
+  @Get()
+  getAll(
+    @Query()
+    query: PaginationQueryDto,
+  ) {
+    return this.maintenanceService.getAll(query);
+  }
+
+  @Get(':id')
+  getOne(
+    @Param('id')
+    id: string,
+  ) {
+    return this.maintenanceService.getOne(+id);
   }
 }

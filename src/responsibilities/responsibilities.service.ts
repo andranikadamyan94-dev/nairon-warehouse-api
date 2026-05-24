@@ -80,4 +80,31 @@ export class ResponsibilitiesService {
       },
     });
   }
+  async getAll() {
+    return this.prisma.assetResponsibility.findMany({
+      include: {
+        asset: true,
+      },
+
+      orderBy: {
+        assignedAt: 'desc',
+      },
+    });
+  }
+
+  async getUserResponsibilities(userId: number) {
+    return this.prisma.assetResponsibility.findMany({
+      where: {
+        userId,
+      },
+
+      include: {
+        asset: true,
+      },
+
+      orderBy: {
+        assignedAt: 'desc',
+      },
+    });
+  }
 }
