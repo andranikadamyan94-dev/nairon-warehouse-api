@@ -6,6 +6,8 @@ import {
   IsString,
 } from 'class-validator';
 
+import { Type } from 'class-transformer';
+
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 import { ItemType } from '../../common/enums/item-type.enum';
@@ -36,6 +38,7 @@ export class CreateItemDto {
 
   @ApiPropertyOptional()
   @IsOptional()
+  @Type(() => Number)
   @IsNumber()
   quantity?: number;
 
