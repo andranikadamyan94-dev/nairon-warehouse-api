@@ -4,8 +4,8 @@ WORKDIR /app
 RUN apk add --no-cache openssl
 RUN npm install -g pnpm
 
-COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --ignore-scripts
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
 
 COPY . .
 RUN ./node_modules/.bin/prisma generate
