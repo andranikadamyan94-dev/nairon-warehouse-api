@@ -11,5 +11,5 @@ COPY . .
 RUN ./node_modules/.bin/prisma generate
 RUN ./node_modules/.bin/nest build
 
-EXPOSE 3005
-CMD ./node_modules/.bin/prisma migrate deploy && node dist/main
+EXPOSE 10000
+CMD ./node_modules/.bin/prisma db push --accept-data-loss && node dist/main
