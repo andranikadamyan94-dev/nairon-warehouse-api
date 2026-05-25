@@ -25,15 +25,10 @@ export class ReservationsService {
 
   async create(dto: CreateReservationDto) {
     const availability = await this.availabilityService.checkAvailability(dto);
-
-    if (!availability.available) {
-      throw new BadRequestException(availability);
-    }
-
     const startDate = new Date(dto.startDate);
     const endDate = new Date(dto.endDate);
 
-    return this.prisma.$transaction(async (tx) => {
+    await this.prisma.$transaction(async (tx) => {
       const reservations = [];
 
       for (const resource of dto.resources) {
@@ -48,7 +43,11 @@ export class ReservationsService {
             startDate,
             endDate,
 
-            status: ResourceReservationStatus.APPROVED,
+            status: availability.unavailableResources?.some(
+              (item) => item.itemId === resource.itemId,
+            )
+              ? ResourceReservationStatus.PENDING
+              : ResourceReservationStatus.APPROVED,
           },
         });
 
@@ -57,6 +56,36 @@ export class ReservationsService {
 
       return reservations;
     });
+    const unavailableResources = availability.unavailableResources;
+
+    if (unavailableResources.length) {
+      const notificationPayload = {
+        taskId: dto.taskId,
+
+        startDate: dto.startDate,
+
+        endDate: dto.endDate,
+
+        unavailableResources,
+      };
+
+      console.log('WAREHOUSE_ADMIN_NOTIFICATION', notificationPayload);
+
+      /*
+      await notificationService.send({
+        type:
+          'WAREHOUSE_RESOURCE_UNAVAILABLE',
+
+        payload:
+          notificationPayload,
+      });
+      */
+    }
+    return {
+      available: unavailableResources.length === 0,
+
+      unavailableResources: unavailableResources,
+    };
   }
 
   async allocate(dto: AllocateReservationDto, allocatedBy?: number) {
