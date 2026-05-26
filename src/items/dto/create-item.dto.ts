@@ -1,6 +1,7 @@
 import {
   IsBoolean,
   IsEnum,
+  IsInt,
   IsNumber,
   IsOptional,
   IsString,
@@ -28,8 +29,8 @@ export class CreateItemDto {
 
   @ApiPropertyOptional()
   @IsOptional()
-  @IsString()
-  category?: string;
+  @IsInt()
+  categoryId?: number;
 
   @ApiPropertyOptional()
   @IsOptional()

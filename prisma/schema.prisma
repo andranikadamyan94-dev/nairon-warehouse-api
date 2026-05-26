@@ -44,8 +44,7 @@ model Item {
 
   type ItemType
 
-  category String?
-  unit     String?
+  unit String?
 
   quantity Float @default(0)
 
@@ -61,6 +60,10 @@ model Item {
   inventoryMovements InventoryMovement[]
 
   resourceReservations ResourceReservation[]
+
+  categoryId Int?
+
+  category ItemCategory? @relation(fields: [categoryId], references: [id])
 
   @@index([type])
 }
@@ -261,4 +264,24 @@ model AssetResponsibility {
   @@index([assetId])
   @@index([userId])
   @@index([releasedAt])
+}
+
+model ItemCategory {
+  id Int @id @default(autoincrement())
+
+  name String
+
+  parentId Int?
+
+  position Int @default(0)
+
+  createdAt DateTime @default(now())
+
+  updatedAt DateTime @updatedAt
+
+  parent ItemCategory? @relation("ItemCategoryHierarchy", fields: [parentId], references: [id])
+
+  children ItemCategory[] @relation("ItemCategoryHierarchy")
+
+  items Item[]
 }

@@ -7,6 +7,7 @@ import {
   ParseIntPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -15,6 +16,7 @@ import { CreateItemDto } from './dto/create-item.dto';
 import { UpdateItemDto } from './dto/update-item.dto';
 
 import { ItemsService } from './items.service';
+import { GetItemsQueryDto } from './dto/get-items-query.dto';
 
 @ApiTags('Items')
 @Controller('items')
@@ -37,10 +39,13 @@ export class ItemsController {
 
   @Get()
   @ApiOperation({
-    summary: 'Get all items',
+    summary: 'Get all items with category filter',
   })
-  findAll() {
-    return this.itemsService.findAll();
+  findAll(
+    @Query()
+    query: GetItemsQueryDto,
+  ) {
+    return this.itemsService.findAll(query);
   }
 
   @Get(':id')

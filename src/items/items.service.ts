@@ -4,10 +4,15 @@ import { PrismaService } from 'prisma/prisma.service';
 
 import { CreateItemDto } from './dto/create-item.dto';
 import { UpdateItemDto } from './dto/update-item.dto';
+import { GetItemsQueryDto } from './dto/get-items-query.dto';
+import { CategoriesService } from 'src/categories/categories.service';
 
 @Injectable()
 export class ItemsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly categoriesService: CategoriesService,
+  ) {}
 
   create(dto: CreateItemDto) {
     return this.prisma.item.create({
@@ -15,10 +20,32 @@ export class ItemsService {
     });
   }
 
-  findAll() {
+  async findAll(query?: GetItemsQueryDto) {
+    let categoryFilter: number[] | undefined;
+
+    if (query?.categoryId) {
+      categoryFilter = await this.categoriesService.getDescendantIds(
+        Number(query.categoryId),
+      );
+    }
+
     return this.prisma.item.findMany({
+      where: {
+        ...(categoryFilter
+          ? {
+              categoryId: {
+                in: categoryFilter,
+              },
+            }
+          : {}),
+      },
+
+      include: {
+        category: true,
+      },
+
       orderBy: {
-        createdAt: 'desc',
+        id: 'desc',
       },
     });
   }
@@ -26,6 +53,9 @@ export class ItemsService {
   async findOne(id: number) {
     const item = await this.prisma.item.findUnique({
       where: { id },
+      include: {
+        category: true,
+      },
     });
 
     if (!item) {
