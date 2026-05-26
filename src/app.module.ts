@@ -12,6 +12,7 @@ import { MaintenanceModule } from './maintenance/maintenance.module';
 import { ResponsibilitiesModule } from './responsibilities/responsibilities.module';
 import { AllocationsModule } from './allocations/allocations.module';
 import { UsersModule } from './users/users.module';
+import { CategoriesModule } from './categories/categories.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { UsersModule } from './users/users.module';
     ResponsibilitiesModule,
     AllocationsModule,
     UsersModule,
+    CategoriesModule,
   ],
 })
 export class AppModule {}

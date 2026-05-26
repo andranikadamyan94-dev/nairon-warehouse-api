@@ -6,6 +6,9 @@ import { PrismaClient } from '@prisma/client';
 export class PrismaService extends PrismaClient implements OnModuleInit {
   async onModuleInit() {
     await this.$connect();
+    setInterval(() => {
+      this.$queryRaw`SELECT 1`.catch(() => {});
+    }, 4 * 60 * 1000);
   }
 
   async enableShutdownHooks(app: INestApplication) {
