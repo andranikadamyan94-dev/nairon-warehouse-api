@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  Patch,
   Post,
   Query,
 } from '@nestjs/common';
@@ -35,6 +36,25 @@ export class ReservationsController {
     dto: CreateReservationDto,
   ) {
     return this.reservationsService.create(dto);
+  }
+
+  @Patch('task/:taskId')
+  updateTaskReservations(
+    @Param('taskId')
+    taskId: string,
+
+    @Body()
+    dto: CreateReservationDto,
+  ) {
+    return this.reservationsService.updateTaskReservations(+taskId, dto);
+  }
+
+  @Get('task/:taskId')
+  getTaskReservations(
+    @Param('taskId')
+    taskId: string,
+  ) {
+    return this.reservationsService.getTaskReservations(+taskId);
   }
 
   @Post('allocate')

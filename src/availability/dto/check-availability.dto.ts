@@ -3,10 +3,12 @@ import {
   IsDateString,
   IsInt,
   IsNumber,
+  IsOptional,
   ValidateNested,
 } from 'class-validator';
 
 import { Type } from 'class-transformer';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class ResourceAvailabilityItemDto {
   @IsInt()
@@ -27,4 +29,9 @@ export class CheckAvailabilityDto {
   @ValidateNested({ each: true })
   @Type(() => ResourceAvailabilityItemDto)
   resources: ResourceAvailabilityItemDto[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  excludeTaskId?: number;
 }

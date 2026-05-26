@@ -487,4 +487,114 @@ export class ReservationsService {
       },
     });
   }
+
+  async updateTaskReservations(taskId: number, dto: CreateReservationDto) {
+    const availability = await this.availabilityService.checkAvailability({
+      ...dto,
+      excludeTaskId: taskId,
+    });
+    const startDate = new Date(dto.startDate);
+
+    const endDate = new Date(dto.endDate);
+
+    return this.prisma.$transaction(async (tx) => {
+      const existingReservations = await tx.resourceReservation.findMany({
+        where: {
+          taskId,
+        },
+      });
+
+      const incomingItemIds = dto.resources.map((x) => x.itemId);
+
+      for (const existing of existingReservations) {
+        if (!incomingItemIds.includes(existing.itemId)) {
+          await tx.resourceReservation.delete({
+            where: {
+              id: existing.id,
+            },
+          });
+        }
+      }
+
+      for (const resource of dto.resources) {
+        const existing = existingReservations.find(
+          (x) => x.itemId === resource.itemId,
+        );
+
+        const unavailable = availability.unavailableResources?.some(
+          (x) => x.itemId === resource.itemId,
+        );
+
+        if (existing) {
+          await tx.resourceReservation.update({
+            where: {
+              id: existing.id,
+            },
+
+            data: {
+              quantity: resource.quantity,
+
+              startDate,
+
+              endDate,
+
+              status: unavailable
+                ? ResourceReservationStatus.PENDING
+                : ResourceReservationStatus.APPROVED,
+            },
+          });
+        } else {
+          await tx.resourceReservation.create({
+            data: {
+              taskId,
+
+              itemId: resource.itemId,
+
+              quantity: resource.quantity,
+
+              startDate,
+
+              endDate,
+
+              status: unavailable
+                ? ResourceReservationStatus.PENDING
+                : ResourceReservationStatus.APPROVED,
+            },
+          });
+        }
+      }
+
+      return {
+        available: availability.unavailableResources.length === 0,
+
+        unavailableResources: availability.unavailableResources,
+      };
+    });
+  }
+
+  async getTaskReservations(taskId: number) {
+    const reservations = await this.prisma.resourceReservation.findMany({
+      where: {
+        taskId,
+      },
+
+      include: {
+        item: true,
+      },
+
+      orderBy: {
+        id: 'asc',
+      },
+    });
+
+    return reservations.map((reservation) => ({
+      itemId: reservation.itemId,
+
+      itemName: reservation.item.name,
+
+      requestedQuantity: reservation.quantity,
+
+      available: reservation.status !== ResourceReservationStatus.PENDING,
+    }));
+  }
 }

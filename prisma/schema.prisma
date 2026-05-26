@@ -69,6 +69,8 @@ model Asset {
   id   Int    @id @default(autoincrement())
   uuid String @unique @default(uuid())
 
+  name String?
+
   itemId Int
 
   serialNumber String? @unique

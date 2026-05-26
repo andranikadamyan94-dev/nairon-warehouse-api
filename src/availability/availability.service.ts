@@ -62,6 +62,14 @@ export class AvailabilityService {
             endDate: {
               gte: startDate,
             },
+
+            ...(dto.excludeTaskId
+              ? {
+                  taskId: {
+                    not: dto.excludeTaskId,
+                  },
+                }
+              : {}),
           },
 
           _sum: {
