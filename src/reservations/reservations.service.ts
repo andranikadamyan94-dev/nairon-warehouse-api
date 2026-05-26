@@ -29,20 +29,14 @@ export class ReservationsService {
     const endDate = new Date(dto.endDate);
 
     await this.prisma.$transaction(async (tx) => {
-      const reservations = [];
-
       for (const resource of dto.resources) {
-        const reservation = await tx.resourceReservation.create({
+        await tx.resourceReservation.create({
           data: {
             itemId: resource.itemId,
-
             quantity: resource.quantity,
-
             taskId: dto.taskId,
-
             startDate,
             endDate,
-
             status: availability.unavailableResources?.some(
               (item) => item.itemId === resource.itemId,
             )
@@ -50,41 +44,21 @@ export class ReservationsService {
               : ResourceReservationStatus.APPROVED,
           },
         });
-
-        reservations.push(reservation);
       }
-
-      return reservations;
     });
-    const unavailableResources = availability.unavailableResources;
 
-    if (unavailableResources.length) {
-      const notificationPayload = {
+    if (availability.unavailableResources.length) {
+      console.log('WAREHOUSE_ADMIN_NOTIFICATION', {
         taskId: dto.taskId,
-
         startDate: dto.startDate,
-
         endDate: dto.endDate,
-
-        unavailableResources,
-      };
-
-      console.log('WAREHOUSE_ADMIN_NOTIFICATION', notificationPayload);
-
-      /*
-      await notificationService.send({
-        type:
-          'WAREHOUSE_RESOURCE_UNAVAILABLE',
-
-        payload:
-          notificationPayload,
+        unavailableResources: availability.unavailableResources,
       });
-      */
     }
-    return {
-      available: unavailableResources.length === 0,
 
-      unavailableResources: unavailableResources,
+    return {
+      available: availability.unavailableResources.length === 0,
+      unavailableResources: availability.unavailableResources,
     };
   }
 
@@ -448,9 +422,15 @@ export class ReservationsService {
           item: true,
 
           allocations: {
+            where: { releasedAt: null },
             include: {
               asset: true,
             },
+          },
+
+          allocationHistory: {
+            include: { asset: true },
+            orderBy: { performedAt: 'asc' },
           },
         },
 
@@ -462,8 +442,26 @@ export class ReservationsService {
       this.prisma.resourceReservation.count(),
     ]);
 
+    const enriched = await Promise.all(
+      data.map(async (reservation) => {
+        const otherReserved = await this.prisma.resourceReservation.aggregate({
+          where: {
+            itemId: reservation.itemId,
+            taskId: { not: reservation.taskId },
+            startDate: { lte: reservation.endDate },
+            endDate: { gte: reservation.startDate },
+          },
+          _sum: { quantity: true },
+        });
+        const totalQuantity = reservation.item?.quantity ?? 0;
+        const reserved = otherReserved._sum.quantity ?? 0;
+        const freeQuantity = Math.max(0, totalQuantity - reserved);
+        return { ...reservation, freeQuantity };
+      }),
+    );
+
     return {
-      data,
+      data: enriched,
       total,
       page,
       limit,
@@ -595,6 +593,10 @@ export class ReservationsService {
       requestedQuantity: reservation.quantity,
 
       available: reservation.status !== ResourceReservationStatus.PENDING,
+
+      startDate: reservation.startDate,
+
+      endDate: reservation.endDate,
     }));
   }
 }

@@ -3,6 +3,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from 'prisma/prisma.service';
 
 import { AssetStatus } from '../common/enums/asset-status.enum';
+import { ItemType } from '../common/enums/item-type.enum';
 
 import { CheckAvailabilityDto } from './dto/check-availability.dto';
 
@@ -17,6 +18,10 @@ export class AvailabilityService {
     const unavailableResources = [];
 
     for (const requestedResource of dto.resources) {
+      const item = await this.prisma.item.findUnique({
+        where: { id: requestedResource.itemId },
+      });
+
       const assets = await this.prisma.asset.findMany({
         where: {
           itemId: requestedResource.itemId,
@@ -31,23 +36,18 @@ export class AvailabilityService {
         },
       });
 
-      let availableQuantity = 0;
+      // Start from item.quantity as total stock
+      let availableQuantity = item?.quantity ?? 0;
 
-      for (const asset of assets) {
-        const overlappingMaintenance = asset.maintenanceRecords.find(
-          (maintenance) => {
-            return (
-              maintenance.startDate <= endDate &&
-              maintenance.endDate >= startDate
-            );
-          },
-        );
+      // Subtract assets that are under maintenance in the requested date range
+      if (assets.length > 0) {
+        const underMaintenance = assets.filter((asset) =>
+          asset.maintenanceRecords.some(
+            (m) => m.startDate <= endDate && m.endDate >= startDate,
+          ),
+        ).length;
 
-        if (overlappingMaintenance) {
-          continue;
-        }
-
-        availableQuantity++;
+        availableQuantity = Math.max(0, availableQuantity - underMaintenance);
       }
 
       const overlappingReservations =

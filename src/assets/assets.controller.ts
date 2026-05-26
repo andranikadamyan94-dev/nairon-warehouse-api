@@ -41,6 +41,24 @@ export class AssetsController {
     return this.assetsService.findAll();
   }
 
+  @Get('available')
+  getAvailable(
+    @Query('itemId')
+    itemId: string,
+
+    @Query('startDate')
+    startDate: string,
+
+    @Query('endDate')
+    endDate: string,
+  ) {
+    return this.assetsService.getAvailableAssets({
+      itemId: +itemId,
+      startDate,
+      endDate,
+    });
+  }
+
   @Get(':id')
   @ApiOperation({
     summary: 'Get asset by id',
@@ -75,24 +93,6 @@ export class AssetsController {
     id: number,
   ) {
     return this.assetsService.remove(id);
-  }
-
-  @Get('available')
-  getAvailable(
-    @Query('itemId')
-    itemId: string,
-
-    @Query('startDate')
-    startDate: string,
-
-    @Query('endDate')
-    endDate: string,
-  ) {
-    return this.assetsService.getAvailableAssets({
-      itemId: +itemId,
-      startDate,
-      endDate,
-    });
   }
 
   @Get(':id/history')
