@@ -31,29 +31,17 @@ export class CategoriesService {
     });
   }
 
-  async getAll() {
+  async getAll(entityId?: number) {
     return this.prisma.itemCategory.findMany({
-      orderBy: [
-        {
-          position: 'asc',
-        },
-        {
-          name: 'asc',
-        },
-      ],
+      where: entityId ? { entityId } : undefined,
+      orderBy: [{ position: 'asc' }, { name: 'asc' }],
     });
   }
 
-  async getTree() {
+  async getTree(entityId?: number) {
     const categories = await this.prisma.itemCategory.findMany({
-      orderBy: [
-        {
-          position: 'asc',
-        },
-        {
-          name: 'asc',
-        },
-      ],
+      where: entityId ? { entityId } : undefined,
+      orderBy: [{ position: 'asc' }, { name: 'asc' }],
     });
 
     const map = new Map();

@@ -12,8 +12,13 @@ import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 import { ItemType } from '../../common/enums/item-type.enum';
+import { ItemUnit } from '../../common/enums/item-unit.enum';
 
 export class CreateItemDto {
+  @ApiProperty()
+  @IsInt()
+  entityId: number;
+
   @ApiProperty()
   @IsString()
   name: string;
@@ -32,10 +37,10 @@ export class CreateItemDto {
   @IsInt()
   categoryId?: number;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ enum: ItemUnit })
   @IsOptional()
-  @IsString()
-  unit?: string;
+  @IsEnum(ItemUnit)
+  unit?: ItemUnit;
 
   @ApiPropertyOptional()
   @IsOptional()

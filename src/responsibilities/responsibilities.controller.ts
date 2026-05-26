@@ -6,6 +6,7 @@ import {
   Param,
   ParseIntPipe,
   Post,
+  Query,
 } from '@nestjs/common';
 
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -50,8 +51,8 @@ export class ResponsibilitiesController {
   }
 
   @Get()
-  getAll() {
-    return this.responsibilitiesService.getAll();
+  getAll(@Query('entityId') entityId?: string) {
+    return this.responsibilitiesService.getAll(entityId ? Number(entityId) : undefined);
   }
 
   @Get('user/:userId')

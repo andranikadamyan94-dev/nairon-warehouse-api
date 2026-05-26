@@ -3,6 +3,8 @@ import { ConfigModule } from '@nestjs/config';
 
 import { PrismaModule } from 'prisma/prisma.module';
 
+import { AuthModule } from './auth/auth.module';
+import { EntitiesModule } from './entities/entities.module';
 import { ItemsModule } from './items/items.module';
 import { AssetsModule } from './assets/assets.module';
 import { InventoryModule } from './inventory/inventory.module';
@@ -22,6 +24,8 @@ import { CategoriesModule } from './categories/categories.module';
 
     PrismaModule,
 
+    AuthModule,
+    EntitiesModule,
     ItemsModule,
     AssetsModule,
     InventoryModule,

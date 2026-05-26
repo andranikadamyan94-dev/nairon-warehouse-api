@@ -17,4 +17,9 @@ export class PaginationQueryDto {
   @IsOptional()
   @IsString()
   search?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsNumberString()
+  entityId?: string;
 }

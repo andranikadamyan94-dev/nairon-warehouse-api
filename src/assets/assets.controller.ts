@@ -37,8 +37,8 @@ export class AssetsController {
   @ApiOperation({
     summary: 'Get all assets',
   })
-  findAll() {
-    return this.assetsService.findAll();
+  findAll(@Query('entityId') entityId?: string) {
+    return this.assetsService.findAll(entityId ? Number(entityId) : undefined);
   }
 
   @Get('available')
@@ -51,11 +51,15 @@ export class AssetsController {
 
     @Query('endDate')
     endDate: string,
+
+    @Query('entityId')
+    entityId?: string,
   ) {
     return this.assetsService.getAvailableAssets({
       itemId: +itemId,
       startDate,
       endDate,
+      entityId: entityId ? +entityId : undefined,
     });
   }
 

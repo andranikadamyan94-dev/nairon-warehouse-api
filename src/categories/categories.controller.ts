@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 
 import { ApiTags } from '@nestjs/swagger';
@@ -29,13 +30,13 @@ export class CategoriesController {
   }
 
   @Get()
-  getAll() {
-    return this.categoriesService.getAll();
+  getAll(@Query('entityId') entityId?: string) {
+    return this.categoriesService.getAll(entityId ? Number(entityId) : undefined);
   }
 
   @Get('tree')
-  getTree() {
-    return this.categoriesService.getTree();
+  getTree(@Query('entityId') entityId?: string) {
+    return this.categoriesService.getTree(entityId ? Number(entityId) : undefined);
   }
 
   @Patch(':id')

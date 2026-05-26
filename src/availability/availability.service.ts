@@ -4,97 +4,135 @@ import { PrismaService } from 'prisma/prisma.service';
 
 import { AssetStatus } from '../common/enums/asset-status.enum';
 import { ItemType } from '../common/enums/item-type.enum';
+import { ItemUnit } from '../common/enums/item-unit.enum';
+import { ResourceReservationStatus } from '../common/enums/resource-reservation-status.enum';
+import { splitIntoWorkingDaySlots } from '../common/utils/date.utils';
 
 import { CheckAvailabilityDto } from './dto/check-availability.dto';
+
+const INACTIVE_STATUSES = [
+  ResourceReservationStatus.CANCELLED,
+  ResourceReservationStatus.COMPLETED,
+];
 
 @Injectable()
 export class AvailabilityService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async checkAvailability(dto: CheckAvailabilityDto) {
-    const startDate = new Date(dto.startDate);
-    const endDate = new Date(dto.endDate);
-
-    const unavailableResources = [];
-
-    for (const requestedResource of dto.resources) {
-      const item = await this.prisma.item.findUnique({
-        where: { id: requestedResource.itemId },
-      });
-
-      const assets = await this.prisma.asset.findMany({
+  /**
+   * Check available quantity for a single time window.
+   * Shared by both standard and per-day hourly checks.
+   */
+  private async checkWindow(
+    item: { id: number; type: string; quantity: number; unit: string | null },
+    startDate: Date,
+    endDate: Date,
+    excludeTaskId?: number,
+  ): Promise<number> {
+    const [assets, overlappingReservations] = await Promise.all([
+      this.prisma.asset.findMany({
         where: {
-          itemId: requestedResource.itemId,
-
-          status: {
-            notIn: [AssetStatus.DAMAGED, AssetStatus.RETIRED],
-          },
+          itemId: item.id,
+          status: { notIn: [AssetStatus.DAMAGED, AssetStatus.RETIRED] },
         },
-
         include: {
-          maintenanceRecords: true,
+          maintenanceRecords: {
+            where: {
+              startDate: { lte: endDate },
+              endDate: { gte: startDate },
+            },
+          },
         },
-      });
+      }),
+      this.prisma.resourceReservation.aggregate({
+        where: {
+          itemId: item.id,
+          startDate: { lte: endDate },
+          endDate: { gte: startDate },
+          status: { notIn: INACTIVE_STATUSES },
+          ...(excludeTaskId ? { taskId: { not: excludeTaskId } } : {}),
+        },
+        _sum: { quantity: true },
+      }),
+    ]);
 
-      // Start from item.quantity as total stock
-      let availableQuantity = item?.quantity ?? 0;
+    let available =
+      item.type === ItemType.ASSET ? assets.length : (item.quantity ?? 0);
 
-      // Subtract assets that are under maintenance in the requested date range
-      if (assets.length > 0) {
-        const underMaintenance = assets.filter((asset) =>
-          asset.maintenanceRecords.some(
-            (m) => m.startDate <= endDate && m.endDate >= startDate,
-          ),
-        ).length;
+    const underMaintenance = assets.filter(
+      (a) => a.maintenanceRecords.length > 0,
+    ).length;
 
-        availableQuantity = Math.max(0, availableQuantity - underMaintenance);
-      }
+    available = Math.max(0, available - underMaintenance);
+    available = Math.max(
+      0,
+      available - (overlappingReservations._sum.quantity ?? 0),
+    );
 
-      const overlappingReservations =
-        await this.prisma.resourceReservation.aggregate({
-          where: {
-            itemId: requestedResource.itemId,
+    return available;
+  }
 
-            startDate: {
-              lte: endDate,
-            },
+  async checkAvailability(dto: CheckAvailabilityDto) {
+    const unavailableResources: {
+      itemId: number;
+      available: number;
+      requested: number;
+      date?: string;
+    }[] = [];
 
-            endDate: {
-              gte: startDate,
-            },
-
-            ...(dto.excludeTaskId
-              ? {
-                  taskId: {
-                    not: dto.excludeTaskId,
-                  },
-                }
-              : {}),
-          },
-
-          _sum: {
-            quantity: true,
-          },
+    await Promise.all(
+      dto.resources.map(async (requestedResource) => {
+        const item = await this.prisma.item.findUnique({
+          where: { id: requestedResource.itemId },
         });
 
-      const reservedQuantity = overlappingReservations._sum.quantity ?? 0;
+        if (!item) return;
 
-      availableQuantity = Math.max(0, availableQuantity - reservedQuantity);
+        if (item.unit === ItemUnit.HOUR) {
+          // Per-day check: each day is an independent availability window
+          const slots = splitIntoWorkingDaySlots(dto.startDate, dto.endDate);
 
-      if (availableQuantity < requestedResource.quantity) {
-        unavailableResources.push({
-          itemId: requestedResource.itemId,
+          await Promise.all(
+            slots.map(async (slot) => {
+              const available = await this.checkWindow(
+                item,
+                slot.startDate,
+                slot.endDate,
+                dto.excludeTaskId,
+              );
 
-          available: availableQuantity,
+              if (available < requestedResource.quantity) {
+                unavailableResources.push({
+                  itemId: requestedResource.itemId,
+                  date: slot.yerevanDate,
+                  available,
+                  requested: requestedResource.quantity,
+                });
+              }
+            }),
+          );
+        } else {
+          // Standard single-window check
+          const available = await this.checkWindow(
+            item,
+            new Date(dto.startDate),
+            new Date(dto.endDate),
+            dto.excludeTaskId,
+          );
 
-          requested: requestedResource.quantity,
-        });
-      }
-    }
+          if (available < requestedResource.quantity) {
+            unavailableResources.push({
+              itemId: requestedResource.itemId,
+              available,
+              requested: requestedResource.quantity,
+            });
+          }
+        }
+      }),
+    );
 
     return {
       available: unavailableResources.length === 0,
-
       unavailableResources,
     };
   }

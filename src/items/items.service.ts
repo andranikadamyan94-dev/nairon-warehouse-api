@@ -31,17 +31,17 @@ export class ItemsService {
 
     return this.prisma.item.findMany({
       where: {
-        ...(categoryFilter
-          ? {
-              categoryId: {
-                in: categoryFilter,
-              },
-            }
+        ...(query?.entityId ? { entityId: query.entityId } : {}),
+        ...(categoryFilter ? { categoryId: { in: categoryFilter } } : {}),
+        ...(query?.type ? { type: query.type } : {}),
+        ...(query?.search
+          ? { name: { contains: query.search, mode: 'insensitive' } }
           : {}),
       },
 
       include: {
         category: true,
+        _count: { select: { assets: true } },
       },
 
       orderBy: {
@@ -55,6 +55,7 @@ export class ItemsService {
       where: { id },
       include: {
         category: true,
+        _count: { select: { assets: true } },
       },
     });
 

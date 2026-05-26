@@ -15,15 +15,11 @@ export class AssetsService {
     });
   }
 
-  findAll() {
+  findAll(entityId?: number) {
     return this.prisma.asset.findMany({
-      include: {
-        item: true,
-      },
-
-      orderBy: {
-        createdAt: 'desc',
-      },
+      where: entityId ? { item: { entityId } } : undefined,
+      include: { item: true },
+      orderBy: { createdAt: 'desc' },
     });
   }
 
@@ -70,6 +66,7 @@ export class AssetsService {
     itemId: number;
     startDate: string;
     endDate: string;
+    entityId?: number;
   }) {
     const startDate = new Date(query.startDate);
 
@@ -78,6 +75,7 @@ export class AssetsService {
     return this.prisma.asset.findMany({
       where: {
         itemId: query.itemId,
+        ...(query.entityId ? { item: { entityId: query.entityId } } : {}),
 
         allocations: {
           none: {

@@ -49,24 +49,18 @@ export class ResponsibilitiesService {
     return responsibility;
   }
 
-  async release(assetId: number) {
+  async release(id: number) {
+    const r = await this.prisma.assetResponsibility.findUnique({ where: { id } });
+    if (!r) throw new NotFoundException('Responsibility not found');
+
     await this.prisma.assetResponsibility.updateMany({
-      where: {
-        assetId,
-        releasedAt: null,
-      },
-      data: {
-        releasedAt: new Date(),
-      },
+      where: { assetId: r.assetId, releasedAt: null },
+      data: { releasedAt: new Date() },
     });
 
     return this.prisma.asset.update({
-      where: {
-        id: assetId,
-      },
-      data: {
-        responsibleUserId: null,
-      },
+      where: { id: r.assetId },
+      data: { responsibleUserId: null },
     });
   }
 
@@ -80,15 +74,11 @@ export class ResponsibilitiesService {
       },
     });
   }
-  async getAll() {
+  async getAll(entityId?: number) {
     return this.prisma.assetResponsibility.findMany({
-      include: {
-        asset: true,
-      },
-
-      orderBy: {
-        assignedAt: 'desc',
-      },
+      where: entityId ? { asset: { item: { entityId } } } : undefined,
+      include: { asset: { include: { item: true } } },
+      orderBy: { assignedAt: 'desc' },
     });
   }
 
