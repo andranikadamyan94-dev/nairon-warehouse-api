@@ -58,7 +58,7 @@ model Item {
 
   notes String?
 
-  entityId Int
+  entityId Int @default(1)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -282,7 +282,7 @@ model ItemCategory {
 
   name String
 
-  entityId Int
+  entityId Int @default(1)
 
   parentId Int?
 
