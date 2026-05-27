@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 
@@ -35,12 +36,17 @@ const ALLOCATABLE_STATUSES = [
 
 @Injectable()
 export class ReservationsService {
+  private readonly logger = new Logger(ReservationsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly availabilityService: AvailabilityService,
   ) {}
 
   async create(dto: CreateReservationDto) {
+    this.logger.log(
+      `CREATE reservation | taskId=${dto.taskId} startDate=${dto.startDate} endDate=${dto.endDate} resources=${JSON.stringify(dto.resources)}`,
+    );
     // Fetch item units to determine which resources need hourly logic
     const itemIds = dto.resources.map((r) => r.itemId);
     const items = await this.prisma.item.findMany({
@@ -109,12 +115,11 @@ export class ReservationsService {
     });
 
     if (availability.unavailableResources.length) {
-      console.log('WAREHOUSE_ADMIN_NOTIFICATION', {
-        taskId: dto.taskId,
-        startDate: dto.startDate,
-        endDate: dto.endDate,
-        unavailableResources: availability.unavailableResources,
-      });
+      this.logger.warn(
+        `CREATE reservation taskId=${dto.taskId} | unavailable resources: ${JSON.stringify(availability.unavailableResources)}`,
+      );
+    } else {
+      this.logger.log(`CREATE reservation taskId=${dto.taskId} | all resources available`);
     }
 
     return {
@@ -480,6 +485,9 @@ export class ReservationsService {
   }
 
   async updateTaskReservations(taskId: number, dto: CreateReservationDto) {
+    this.logger.log(
+      `UPDATE reservation | taskId=${taskId} startDate=${dto.startDate} endDate=${dto.endDate} resources=${JSON.stringify(dto.resources)}`,
+    );
     // Fetch item units to determine which resources need hourly logic
     const itemIds = dto.resources.map((r) => r.itemId);
     const items = await this.prisma.item.findMany({
@@ -679,16 +687,26 @@ export class ReservationsService {
         }
       }
 
-      return {
+      const result = {
         available: availability.unavailableResources.length === 0,
         unavailableResources: availability.unavailableResources,
       };
+
+      if (availability.unavailableResources.length) {
+        this.logger.warn(
+          `UPDATE reservation taskId=${taskId} | unavailable resources: ${JSON.stringify(availability.unavailableResources)}`,
+        );
+      } else {
+        this.logger.log(`UPDATE reservation taskId=${taskId} | completed successfully`);
+      }
+
+      return result;
     });
   }
 
   async getTaskReservations(taskId: number) {
     const reservations = await this.prisma.resourceReservation.findMany({
-      where: { taskId },
+      where: { taskId, status: { notIn: INACTIVE_STATUSES } },
       include: { item: true },
       orderBy: { id: 'asc' },
     });
