@@ -268,10 +268,35 @@ export class ReservationsService {
     }
 
     return this.prisma.$transaction(async (tx) => {
+      await tx.reservationAllocation.create({
+        data: { reservationId, quantity: reservation.quantity },
+      });
+
+      await tx.reservationAllocationHistory.create({
+        data: { reservationId, action: 'ALLOCATED', performedBy, notes: 'Consumable approved' },
+      });
+
+      await tx.item.update({
+        where: { id: reservation.item.id },
+        data: { quantity: { decrement: reservation.quantity } },
+      });
+
+      await tx.inventoryMovement.create({
+        data: {
+          itemId: reservation.item.id,
+          quantity: -reservation.quantity,
+          type: 'OUT',
+          taskId: reservation.taskId,
+          performedBy,
+          notes: `Reservation #${reservationId} approved`,
+        },
+      });
+
       await tx.resourceReservation.update({
         where: { id: reservationId },
         data: { status: ResourceReservationStatus.ALLOCATED },
       });
+
       await this.writeStatusHistory(
         tx,
         reservationId,
@@ -279,6 +304,7 @@ export class ReservationsService {
         ResourceReservationStatus.ALLOCATED,
         { performedBy },
       );
+
       return { success: true };
     });
   }
@@ -413,10 +439,12 @@ export class ReservationsService {
   async releaseAllocation(allocationId: number, releasedBy?: number, reason?: string) {
     const allocation = await this.prisma.reservationAllocation.findUnique({
       where: { id: allocationId },
-      include: { reservation: true },
+      include: { reservation: { include: { item: true } } },
     });
 
     if (!allocation) throw new NotFoundException('Allocation not found');
+
+    const isConsumable = allocation.reservation.item.type === ItemType.CONSUMABLE;
 
     return this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.update({
@@ -433,14 +461,33 @@ export class ReservationsService {
         },
       });
 
-      const activeAllocationCount = await tx.reservationAllocation.count({
-        where: { reservationId: allocation.reservationId, releasedAt: null },
-      });
+      let newStatus: ResourceReservationStatus;
 
-      const newStatus =
-        activeAllocationCount === 0
-          ? ResourceReservationStatus.APPROVED
-          : ResourceReservationStatus.PARTIALLY_ALLOCATED;
+      if (isConsumable) {
+        await tx.item.update({
+          where: { id: allocation.reservation.itemId },
+          data: { quantity: { increment: allocation.quantity } },
+        });
+        await tx.inventoryMovement.create({
+          data: {
+            itemId: allocation.reservation.itemId,
+            quantity: allocation.quantity,
+            type: 'IN',
+            taskId: allocation.reservation.taskId,
+            performedBy: releasedBy,
+            notes: reason ?? `Reservation #${allocation.reservationId} allocation cancelled`,
+          },
+        });
+        newStatus = ResourceReservationStatus.PENDING;
+      } else {
+        const activeAllocationCount = await tx.reservationAllocation.count({
+          where: { reservationId: allocation.reservationId, releasedAt: null },
+        });
+        newStatus =
+          activeAllocationCount === 0
+            ? ResourceReservationStatus.APPROVED
+            : ResourceReservationStatus.PARTIALLY_ALLOCATED;
+      }
 
       await tx.resourceReservation.update({
         where: { id: allocation.reservationId },
@@ -627,18 +674,29 @@ export class ReservationsService {
         status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.COMPLETED] },
         replacedByReservationId: null,
       },
-      include: { item: true },
+      include: {
+        item: true,
+        allocations: { where: { releasedAt: null } },
+      },
       orderBy: { id: 'asc' },
     });
 
-    return reservations.map((reservation) => ({
-      itemId: reservation.itemId,
-      itemName: reservation.item.name,
-      requestedQuantity: reservation.quantity,
-      available: reservation.status !== ResourceReservationStatus.PENDING,
-      startDate: reservation.startDate,
-      endDate: reservation.endDate,
-    }));
+    return reservations.map((reservation) => {
+      const allocatedQuantity = reservation.allocations.reduce(
+        (sum, a) => sum + (a.quantity ?? 1),
+        0,
+      );
+      return {
+        itemId: reservation.itemId,
+        itemName: reservation.item.name,
+        requestedQuantity: reservation.quantity,
+        allocatedQuantity,
+        status: reservation.status,
+        available: reservation.status !== ResourceReservationStatus.PENDING,
+        startDate: reservation.startDate,
+        endDate: reservation.endDate,
+      };
+    });
   }
 
   // ─── updateTaskReservations ──────────────────────────────────────────────────

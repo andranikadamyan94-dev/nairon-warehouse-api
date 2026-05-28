@@ -216,7 +216,9 @@ model ReservationAllocation {
 
   reservationId Int
 
-  assetId Int
+  assetId Int?
+
+  quantity Int @default(1)
 
   allocatedAt DateTime @default(now())
 
@@ -228,7 +230,7 @@ model ReservationAllocation {
 
   reservation ResourceReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
 
-  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  asset Asset? @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
   @@index([reservationId])
   @@index([assetId])
@@ -241,7 +243,7 @@ model ReservationAllocationHistory {
 
   reservationId Int
 
-  assetId Int
+  assetId Int?
 
   action ReservationAllocationAction
 
@@ -255,7 +257,7 @@ model ReservationAllocationHistory {
 
   reservation ResourceReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
 
-  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  asset Asset? @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
   @@index([reservationId])
   @@index([assetId])
