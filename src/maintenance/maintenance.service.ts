@@ -113,18 +113,14 @@ export class MaintenanceService {
   async getAll(query: any) {
     const page = Number(query.page ?? 1);
     const limit = Number(query.limit ?? 10);
-    const entityId = query.entityId ? Number(query.entityId) : undefined;
-    const where = entityId ? { asset: { item: { entityId } } } : undefined;
-
     const [data, total] = await Promise.all([
       this.prisma.maintenanceRecord.findMany({
-        where,
         skip: (page - 1) * limit,
         take: limit,
         include: { asset: { include: { item: true } } },
         orderBy: { startDate: 'desc' },
       }),
-      this.prisma.maintenanceRecord.count({ where }),
+      this.prisma.maintenanceRecord.count(),
     ]);
 
     return {

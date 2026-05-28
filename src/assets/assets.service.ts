@@ -15,9 +15,8 @@ export class AssetsService {
     });
   }
 
-  findAll(entityId?: number) {
+  findAll() {
     return this.prisma.asset.findMany({
-      where: entityId ? { item: { entityId } } : undefined,
       include: { item: true },
       orderBy: { createdAt: 'desc' },
     });
@@ -66,7 +65,7 @@ export class AssetsService {
     itemId: number;
     startDate: string;
     endDate: string;
-    entityId?: number;
+    reservationId?: number;
   }) {
     const startDate = new Date(query.startDate);
 
@@ -75,18 +74,17 @@ export class AssetsService {
     return this.prisma.asset.findMany({
       where: {
         itemId: query.itemId,
-        ...(query.entityId ? { item: { entityId: query.entityId } } : {}),
 
         allocations: {
           none: {
+            releasedAt: null,
+            // Exclude this reservation's own allocations so they still appear as selectable
+            ...(query.reservationId
+              ? { reservationId: { not: query.reservationId } }
+              : {}),
             reservation: {
-              startDate: {
-                lte: endDate,
-              },
-
-              endDate: {
-                gte: startDate,
-              },
+              startDate: { lte: endDate },
+              endDate: { gte: startDate },
             },
           },
         },

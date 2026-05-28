@@ -51,8 +51,8 @@ export class ResponsibilitiesController {
   }
 
   @Get()
-  getAll(@Query('entityId') entityId?: string) {
-    return this.responsibilitiesService.getAll(entityId ? Number(entityId) : undefined);
+  getAll() {
+    return this.responsibilitiesService.getAll();
   }
 
   @Get('user/:userId')

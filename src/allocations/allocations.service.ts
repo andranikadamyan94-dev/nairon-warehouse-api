@@ -10,12 +10,8 @@ export class AllocationsService {
   async getAll(query: any) {
     const page = Number(query.page ?? 1);
     const limit = Number(query.limit ?? 10);
-    const entityId = query.entityId ? Number(query.entityId) : undefined;
-    const where = entityId ? { reservation: { item: { entityId } } } : undefined;
-
     const [data, total] = await Promise.all([
       this.prisma.reservationAllocation.findMany({
-        where,
         skip: (page - 1) * limit,
         take: limit,
         include: {
@@ -23,7 +19,7 @@ export class AllocationsService {
           reservation: { include: { item: true } },
         },
       }),
-      this.prisma.reservationAllocation.count({ where }),
+      this.prisma.reservationAllocation.count(),
     ]);
 
     return { data, total, page, limit };

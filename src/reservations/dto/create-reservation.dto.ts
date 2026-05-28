@@ -3,12 +3,14 @@ import {
   IsDateString,
   IsInt,
   IsNumber,
+  IsOptional,
+  IsString,
   ValidateNested,
 } from 'class-validator';
 
 import { Type } from 'class-transformer';
 
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class ResourceReservationItemDto {
   @ApiProperty()
@@ -21,9 +23,30 @@ export class ResourceReservationItemDto {
 }
 
 export class CreateReservationDto {
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsInt()
-  taskId: number;
+  taskId?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  projectId?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  projectName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  entityId?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  entityName?: string;
 
   @ApiProperty()
   @IsDateString()
@@ -33,9 +56,7 @@ export class CreateReservationDto {
   @IsDateString()
   endDate: string;
 
-  @ApiProperty({
-    type: [ResourceReservationItemDto],
-  })
+  @ApiProperty({ type: [ResourceReservationItemDto] })
   @IsArray()
   @ValidateNested({ each: true })
   @Type(() => ResourceReservationItemDto)

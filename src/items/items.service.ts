@@ -31,7 +31,6 @@ export class ItemsService {
 
     return this.prisma.item.findMany({
       where: {
-        ...(query?.entityId ? { entityId: query.entityId } : {}),
         ...(categoryFilter ? { categoryId: { in: categoryFilter } } : {}),
         ...(query?.type ? { type: query.type } : {}),
         ...(query?.search

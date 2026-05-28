@@ -37,29 +37,22 @@ export class AssetsController {
   @ApiOperation({
     summary: 'Get all assets',
   })
-  findAll(@Query('entityId') entityId?: string) {
-    return this.assetsService.findAll(entityId ? Number(entityId) : undefined);
+  findAll() {
+    return this.assetsService.findAll();
   }
 
   @Get('available')
   getAvailable(
-    @Query('itemId')
-    itemId: string,
-
-    @Query('startDate')
-    startDate: string,
-
-    @Query('endDate')
-    endDate: string,
-
-    @Query('entityId')
-    entityId?: string,
+    @Query('itemId') itemId: string,
+    @Query('startDate') startDate: string,
+    @Query('endDate') endDate: string,
+    @Query('reservationId') reservationId?: string,
   ) {
     return this.assetsService.getAvailableAssets({
       itemId: +itemId,
       startDate,
       endDate,
-      entityId: entityId ? +entityId : undefined,
+      reservationId: reservationId ? +reservationId : undefined,
     });
   }
 

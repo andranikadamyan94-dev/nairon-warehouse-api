@@ -16,10 +16,6 @@ import { ItemUnit } from '../../common/enums/item-unit.enum';
 
 export class CreateItemDto {
   @ApiProperty()
-  @IsInt()
-  entityId: number;
-
-  @ApiProperty()
   @IsString()
   name: string;
 

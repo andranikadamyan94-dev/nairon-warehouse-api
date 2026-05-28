@@ -74,9 +74,8 @@ export class ResponsibilitiesService {
       },
     });
   }
-  async getAll(entityId?: number) {
+  async getAll() {
     return this.prisma.assetResponsibility.findMany({
-      where: entityId ? { asset: { item: { entityId } } } : undefined,
       include: { asset: { include: { item: true } } },
       orderBy: { assignedAt: 'desc' },
     });

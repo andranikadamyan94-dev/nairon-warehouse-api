@@ -24,9 +24,9 @@ enum ResourceReservationStatus {
   APPROVED
   PARTIALLY_ALLOCATED
   ALLOCATED
-  ACTIVE
   COMPLETED
   CANCELLED
+  REJECTED
 }
 
 enum ReservationAllocationAction {
@@ -58,8 +58,6 @@ model Item {
 
   notes String?
 
-  entityId Int @default(1)
-
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -76,7 +74,6 @@ model Item {
   category ItemCategory? @relation(fields: [categoryId], references: [id])
 
   @@index([type])
-  @@index([entityId])
 }
 
 model Asset {
@@ -146,7 +143,12 @@ model ResourceReservation {
 
   itemId Int
 
-  taskId Int
+  taskId    Int?
+  projectId Int?
+  projectName String?
+
+  entityId   Int?
+  entityName String?
 
   quantity Int
 
@@ -157,6 +159,8 @@ model ResourceReservation {
 
   notes String?
 
+  replacedByReservationId Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -164,14 +168,46 @@ model ResourceReservation {
 
   item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
+  replacedBy ResourceReservation?  @relation("ReservationReplacement", fields: [replacedByReservationId], references: [id])
+  replaces   ResourceReservation[] @relation("ReservationReplacement")
+
   allocations ReservationAllocation[]
 
   allocationHistory ReservationAllocationHistory[]
 
+  statusHistory ReservationStatusHistory[]
+
   @@index([itemId])
   @@index([taskId])
+  @@index([projectId])
+  @@index([entityId])
   @@index([status])
   @@index([startDate, endDate])
+}
+
+model ReservationStatusHistory {
+  id Int @id @default(autoincrement())
+
+  reservationId Int
+
+  fromStatus ResourceReservationStatus?
+  toStatus   ResourceReservationStatus
+
+  previousQuantity Int?
+  newQuantity      Int?
+
+  performedBy Int?
+
+  reason String?
+
+  performedAt DateTime @default(now())
+
+  // RELATIONS
+
+  reservation ResourceReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  @@index([reservationId])
+  @@index([performedAt])
 }
 
 model ReservationAllocation {

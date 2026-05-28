@@ -8,12 +8,6 @@ export class GetItemsQueryDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
-  entityId?: number;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
   categoryId?: number;
 
   @ApiPropertyOptional({ enum: ItemType })

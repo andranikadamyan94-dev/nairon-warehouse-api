@@ -13,6 +13,7 @@ import { CheckAvailabilityDto } from './dto/check-availability.dto';
 const INACTIVE_STATUSES = [
   ResourceReservationStatus.CANCELLED,
   ResourceReservationStatus.COMPLETED,
+  ResourceReservationStatus.REJECTED,
 ];
 
 @Injectable()
