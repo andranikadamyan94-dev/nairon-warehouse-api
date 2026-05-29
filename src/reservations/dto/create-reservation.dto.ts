@@ -20,6 +20,16 @@ export class ResourceReservationItemDto {
   @ApiProperty()
   @IsNumber()
   quantity: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  startTime?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  endTime?: string;
 }
 
 export class CreateReservationDto {

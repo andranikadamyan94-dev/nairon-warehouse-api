@@ -4,6 +4,7 @@ import {
   IsInt,
   IsNumber,
   IsOptional,
+  IsString,
   ValidateNested,
 } from 'class-validator';
 
@@ -16,6 +17,16 @@ export class ResourceAvailabilityItemDto {
 
   @IsNumber()
   quantity: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  startTime?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  endTime?: string;
 }
 
 export class CheckAvailabilityDto {

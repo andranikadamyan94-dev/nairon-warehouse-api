@@ -35,6 +35,21 @@ const ALLOCATABLE_STATUSES = [
   ResourceReservationStatus.PARTIALLY_ALLOCATED,
 ];
 
+const YEREVAN_UTC_OFFSET = 4;
+
+function parseCustomTime(resource: { startTime?: string; endTime?: string }) {
+  if (!resource.startTime || !resource.endTime) return undefined;
+  const [startHour, startMinute] = resource.startTime.split(':').map(Number);
+  const [endHour, endMinute] = resource.endTime.split(':').map(Number);
+  return { startHour, startMinute, endHour, endMinute };
+}
+
+function formatUTCasYerevan(d: Date): string {
+  const h = (d.getUTCHours() + YEREVAN_UTC_OFFSET) % 24;
+  const m = d.getUTCMinutes();
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
 @Injectable()
 export class ReservationsService {
   private readonly logger = new Logger(ReservationsService.name);
@@ -85,7 +100,7 @@ export class ReservationsService {
       if (itemUnitMap.get(resource.itemId) === ItemUnit.HOUR) {
         hourlySlots.set(
           resource.itemId,
-          splitIntoWorkingDaySlots(dto.startDate, dto.endDate),
+          splitIntoWorkingDaySlots(dto.startDate, dto.endDate, parseCustomTime(resource)),
         );
       }
     }
@@ -478,7 +493,10 @@ export class ReservationsService {
             notes: reason ?? `Reservation #${allocation.reservationId} allocation cancelled`,
           },
         });
-        newStatus = ResourceReservationStatus.PENDING;
+        const restoredQty = (allocation.reservation.item?.quantity ?? 0) + (allocation.quantity ?? 0);
+        newStatus = restoredQty >= allocation.reservation.quantity
+          ? ResourceReservationStatus.APPROVED
+          : ResourceReservationStatus.PENDING;
       } else {
         const activeAllocationCount = await tx.reservationAllocation.count({
           where: { reservationId: allocation.reservationId, releasedAt: null },
@@ -581,7 +599,7 @@ export class ReservationsService {
     const limit = Number(query.limit ?? 10);
 
     const where = {
-      status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.COMPLETED] },
+      status: { not: ResourceReservationStatus.COMPLETED },
     };
 
     const [data, total] = await Promise.all([
@@ -599,8 +617,11 @@ export class ReservationsService {
             include: { asset: true },
             orderBy: { performedAt: 'asc' },
           },
+          statusHistory: {
+            orderBy: { performedAt: 'asc' },
+          },
         },
-        orderBy: { taskId: 'asc' },
+        orderBy: [{ createdAt: 'desc' }, { taskId: 'asc' }],
       }),
       this.prisma.resourceReservation.count({ where }),
     ]);
@@ -609,7 +630,7 @@ export class ReservationsService {
 
     const itemIds = [...new Set(data.map((r) => r.itemId))];
 
-    const [assetCounts, activeReservations] = await Promise.all([
+    const [assetCounts, activeReservations, maintenanceRecords] = await Promise.all([
       this.prisma.asset.groupBy({
         by: ['itemId'],
         where: {
@@ -625,27 +646,52 @@ export class ReservationsService {
         },
         select: { id: true, itemId: true, taskId: true, quantity: true, startDate: true, endDate: true },
       }),
+      this.prisma.maintenanceRecord.findMany({
+        where: { asset: { itemId: { in: itemIds } } },
+        select: { assetId: true, startDate: true, endDate: true, asset: { select: { itemId: true } } },
+      }),
     ]);
 
     const assetCountMap = new Map(assetCounts.map((a) => [a.itemId, a._count.id]));
 
     const enriched = data.map((reservation) => {
+      const overlapping = (r: { itemId: number; startDate: Date; endDate: Date }) =>
+        r.itemId === reservation.itemId &&
+        r.startDate < reservation.endDate &&
+        r.endDate > reservation.startDate;
+
+      const assetsUnderMaintenance =
+        reservation.item?.type === ItemType.ASSET
+          ? new Set(
+              maintenanceRecords
+                .filter(
+                  (m) =>
+                    m.asset?.itemId === reservation.itemId &&
+                    m.startDate < reservation.endDate &&
+                    m.endDate > reservation.startDate,
+                )
+                .map((m) => m.assetId),
+            ).size
+          : 0;
+
       const totalQuantity =
         reservation.item?.type === ItemType.ASSET
-          ? (assetCountMap.get(reservation.itemId) ?? 0)
+          ? Math.max(0, (assetCountMap.get(reservation.itemId) ?? 0) - assetsUnderMaintenance)
           : (reservation.item?.quantity ?? 0);
 
-      const reserved = activeReservations
-        .filter(
-          (r) =>
-            r.itemId === reservation.itemId &&
-            r.taskId !== reservation.taskId &&
-            r.startDate <= reservation.endDate &&
-            r.endDate >= reservation.startDate,
-        )
+      const reservedByOthers = activeReservations
+        .filter((r) => r.taskId !== reservation.taskId && overlapping(r))
         .reduce((sum, r) => sum + r.quantity, 0);
 
-      return { ...reservation, freeQuantity: Math.max(0, totalQuantity - reserved) };
+      const reservedAll = activeReservations
+        .filter(overlapping)
+        .reduce((sum, r) => sum + r.quantity, 0);
+
+      return {
+        ...reservation,
+        freeQuantity: Math.max(0, totalQuantity - reservedByOthers),
+        globalFreeQuantity: Math.max(0, totalQuantity - reservedAll),
+      };
     });
 
     return { data: enriched, total, page, limit };
@@ -677,26 +723,104 @@ export class ReservationsService {
       include: {
         item: true,
         allocations: { where: { releasedAt: null } },
+        statusHistory: { orderBy: { performedAt: 'asc' } },
       },
       orderBy: { id: 'asc' },
     });
 
-    return reservations.map((reservation) => {
-      const allocatedQuantity = reservation.allocations.reduce(
-        (sum, a) => sum + (a.quantity ?? 1),
+    // Group by itemId — HOUR items have one DB row per working day
+    const byItem = new Map<number, typeof reservations>();
+    for (const r of reservations) {
+      if (!byItem.has(r.itemId)) byItem.set(r.itemId, []);
+      byItem.get(r.itemId)!.push(r);
+    }
+
+    const groups = Array.from(byItem.values());
+    if (groups.length === 0) return [];
+
+    // Real-time availability check (excludes this task's own reservations)
+    const allDates = groups.flatMap((g) => g.map((r) => r.startDate));
+    const allEndDates = groups.flatMap((g) => g.map((r) => r.endDate));
+    const overallStart = getYerevanDateKey(allDates.reduce((min, d) => (d < min ? d : min)));
+    const overallEnd = getYerevanDateKey(allEndDates.reduce((max, d) => (d > max ? d : max)));
+
+    const availabilityResult = await this.availabilityService.checkAvailability({
+      startDate: overallStart,
+      endDate: overallEnd,
+      resources: groups.map((group) => {
+        const first = group[0];
+        const isHourly = first.item.unit === ItemUnit.HOUR;
+        return {
+          itemId: first.itemId,
+          quantity: first.quantity,
+          startTime: isHourly ? formatUTCasYerevan(first.startDate) : undefined,
+          endTime: isHourly ? formatUTCasYerevan(first.endDate) : undefined,
+        };
+      }),
+      excludeTaskId: taskId,
+    });
+
+    const unavailableItemIds = new Set(availabilityResult.unavailableResources.map((r) => r.itemId));
+
+    const items = groups.flatMap((group) => {
+      const first = group[0];
+      const isHourly = first.item.unit === ItemUnit.HOUR;
+
+      if (isHourly) {
+        // Return one entry per day slot so the CRM can show per-date status
+        return group.map((r) => ({
+          itemId: r.itemId,
+          itemName: r.item.name,
+          unit: r.item.unit ?? undefined,
+          requestedQuantity: r.quantity,
+          allocatedQuantity: r.allocations.reduce((s, a) => s + (a.quantity ?? 1), 0),
+          status: r.status,
+          startTime: formatUTCasYerevan(r.startDate),
+          endTime: formatUTCasYerevan(r.endDate),
+          available: !unavailableItemIds.has(r.itemId),
+          startDate: r.startDate,
+          endDate: r.endDate,
+        }));
+      }
+
+      const startDate = group.reduce((min, r) => r.startDate < min ? r.startDate : min, first.startDate);
+      const endDate = group.reduce((max, r) => r.endDate > max ? r.endDate : max, first.endDate);
+      const allocatedQuantity = group.reduce(
+        (sum, r) => sum + r.allocations.reduce((s, a) => s + (a.quantity ?? 1), 0),
         0,
       );
-      return {
-        itemId: reservation.itemId,
-        itemName: reservation.item.name,
-        requestedQuantity: reservation.quantity,
+      return [{
+        itemId: first.itemId,
+        itemName: first.item.name,
+        unit: first.item.unit ?? undefined,
+        requestedQuantity: first.quantity,
         allocatedQuantity,
-        status: reservation.status,
-        available: reservation.status !== ResourceReservationStatus.PENDING,
-        startDate: reservation.startDate,
-        endDate: reservation.endDate,
-      };
+        status: first.status,
+        startTime: undefined,
+        endTime: undefined,
+        available: !unavailableItemIds.has(first.itemId),
+        startDate,
+        endDate,
+      }];
     });
+
+    // Aggregate status history across all reservations, sorted by time
+    const history = reservations
+      .flatMap((r) =>
+        (r.statusHistory ?? []).map((h) => ({
+          reservationId: r.id,
+          itemName: r.item.name,
+          fromStatus: h.fromStatus ?? undefined,
+          toStatus: h.toStatus,
+          performedAt: h.performedAt,
+          reason: h.reason ?? undefined,
+          previousQuantity: h.previousQuantity ?? undefined,
+          newQuantity: h.newQuantity ?? undefined,
+        })),
+      )
+      .sort((a, b) => new Date(a.performedAt).getTime() - new Date(b.performedAt).getTime());
+
+    return { items, history };
   }
 
   // ─── updateTaskReservations ──────────────────────────────────────────────────
@@ -716,7 +840,7 @@ export class ReservationsService {
     const hourlySlots = new Map<number, DaySlot[]>();
     for (const resource of dto.resources) {
       if (itemUnitMap.get(resource.itemId) === ItemUnit.HOUR) {
-        hourlySlots.set(resource.itemId, splitIntoWorkingDaySlots(dto.startDate, dto.endDate));
+        hourlySlots.set(resource.itemId, splitIntoWorkingDaySlots(dto.startDate, dto.endDate, parseCustomTime(resource)));
       }
     }
 
@@ -989,6 +1113,6 @@ export class ReservationsService {
       }
 
       return result;
-    });
+    }, { timeout: 30000 });
   }
 }

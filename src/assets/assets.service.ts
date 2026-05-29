@@ -88,6 +88,13 @@ export class AssetsService {
             },
           },
         },
+
+        maintenanceRecords: {
+          none: {
+            startDate: { lte: endDate },
+            endDate: { gte: startDate },
+          },
+        },
       },
 
       include: {

@@ -91,7 +91,16 @@ export class AvailabilityService {
 
         if (item.unit === ItemUnit.HOUR) {
           // Per-day check: each day is an independent availability window
-          const slots = splitIntoWorkingDaySlots(dto.startDate, dto.endDate);
+          const customTime =
+            requestedResource.startTime && requestedResource.endTime
+              ? {
+                  startHour: parseInt(requestedResource.startTime.split(':')[0], 10),
+                  startMinute: parseInt(requestedResource.startTime.split(':')[1], 10),
+                  endHour: parseInt(requestedResource.endTime.split(':')[0], 10),
+                  endMinute: parseInt(requestedResource.endTime.split(':')[1], 10),
+                }
+              : undefined;
+          const slots = splitIntoWorkingDaySlots(dto.startDate, dto.endDate, customTime);
 
           await Promise.all(
             slots.map(async (slot) => {

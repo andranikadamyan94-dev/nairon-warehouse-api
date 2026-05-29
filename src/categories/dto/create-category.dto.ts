@@ -3,9 +3,10 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsInt, IsOptional, IsString } from 'class-validator';
 
 export class CreateCategoryDto {
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsInt()
-  entityId: number;
+  entityId?: number;
 
   @ApiProperty()
   @IsString()

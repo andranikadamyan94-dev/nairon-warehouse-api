@@ -146,4 +146,30 @@ export class MaintenanceService {
       },
     });
   }
+
+  async update(id: number, dto: Partial<CreateMaintenanceRecordDto>) {
+    const record = await this.prisma.maintenanceRecord.findUnique({ where: { id } });
+    if (!record) throw new NotFoundException('Maintenance record not found');
+
+    const startDate = dto.startDate ? new Date(dto.startDate) : record.startDate;
+    const endDate = dto.endDate ? new Date(dto.endDate) : record.endDate;
+
+    if (startDate >= endDate) throw new BadRequestException('Invalid maintenance dates');
+
+    return this.prisma.maintenanceRecord.update({
+      where: { id },
+      data: {
+        startDate,
+        endDate,
+        type: dto.type ?? record.type,
+        notes: dto.notes !== undefined ? dto.notes : record.notes,
+      },
+    });
+  }
+
+  async remove(id: number) {
+    const record = await this.prisma.maintenanceRecord.findUnique({ where: { id } });
+    if (!record) throw new NotFoundException('Maintenance record not found');
+    return this.prisma.maintenanceRecord.delete({ where: { id } });
+  }
 }

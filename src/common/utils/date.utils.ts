@@ -43,14 +43,16 @@ function makeUTCSlotStart(y: number, m: number, d: number, hour: number, min: nu
 /**
  * Split a Yerevan date range into daily working-hour slots for HOUR unit items.
  *
- * - Single-day with explicit time → use those Yerevan times (validated within 09:00–16:00).
- * - All other cases (date-only or multi-day) → full working hours (09:00–16:00 Yerevan) per day.
+ * - customTime provided → use those Yerevan times for every day.
+ * - Single-day with explicit time in the date string → use those Yerevan times.
+ * - All other cases → full working hours (09:00–16:00 Yerevan) per day.
  *
  * All returned dates are in UTC.
  */
 export function splitIntoWorkingDaySlots(
   startDateStr: string,
   endDateStr: string,
+  customTime?: { startHour: number; startMinute: number; endHour: number; endMinute: number },
 ): DaySlot[] {
   const start = parseYerevanComponents(startDateStr);
   const end = parseYerevanComponents(endDateStr);
@@ -96,17 +98,21 @@ export function splitIntoWorkingDaySlots(
     const isFirst = current.getTime() === startDayUTC.getTime();
     const isLast = current.getTime() === endDayUTC.getTime();
 
-    // Single-day with explicit time: use provided times; all other cases: full working hours
-    const useExplicitStart = isSingleDay && start.hasTime;
-    const useExplicitEnd = isSingleDay && end.hasTime;
+    // Priority: customTime > single-day explicit time > default working hours
+    const useExplicitStart = !customTime && isSingleDay && start.hasTime;
+    const useExplicitEnd = !customTime && isSingleDay && end.hasTime;
 
-    const slotStart = useExplicitStart
-      ? makeUTCSlotStart(y, m, d, start.hour, start.minute)
-      : new Date(Date.UTC(y, m, d, WORKING_START_UTC, 0, 0));
+    const slotStart = customTime
+      ? makeUTCSlotStart(y, m, d, customTime.startHour, customTime.startMinute)
+      : useExplicitStart
+        ? makeUTCSlotStart(y, m, d, start.hour, start.minute)
+        : new Date(Date.UTC(y, m, d, WORKING_START_UTC, 0, 0));
 
-    const slotEnd = useExplicitEnd
-      ? makeUTCSlotStart(y, m, d, end.hour, end.minute)
-      : new Date(Date.UTC(y, m, d, WORKING_END_UTC, 0, 0));
+    const slotEnd = customTime
+      ? makeUTCSlotStart(y, m, d, customTime.endHour, customTime.endMinute)
+      : useExplicitEnd
+        ? makeUTCSlotStart(y, m, d, end.hour, end.minute)
+        : new Date(Date.UTC(y, m, d, WORKING_END_UTC, 0, 0));
 
     const yerevanDate = `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 
