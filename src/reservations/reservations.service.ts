@@ -95,19 +95,23 @@ export class ReservationsService {
     });
     const itemUnitMap = new Map(items.map((i) => [i.id, i.unit]));
 
+    const startDate = new Date(dto.startDate);
+    const endDate = dto.endDate ? new Date(dto.endDate) : null;
+
+    // Hourly slots only make sense for bounded reservations
     const hourlySlots = new Map<number, DaySlot[]>();
-    for (const resource of dto.resources) {
-      if (itemUnitMap.get(resource.itemId) === ItemUnit.HOUR) {
-        hourlySlots.set(
-          resource.itemId,
-          splitIntoWorkingDaySlots(dto.startDate, dto.endDate, parseCustomTime(resource)),
-        );
+    if (endDate) {
+      for (const resource of dto.resources) {
+        if (itemUnitMap.get(resource.itemId) === ItemUnit.HOUR) {
+          hourlySlots.set(
+            resource.itemId,
+            splitIntoWorkingDaySlots(dto.startDate, dto.endDate, parseCustomTime(resource)),
+          );
+        }
       }
     }
 
     const availability = await this.availabilityService.checkAvailability(dto);
-    const startDate = new Date(dto.startDate);
-    const endDate = new Date(dto.endDate);
 
     await this.prisma.$transaction(async (tx) => {
       for (const resource of dto.resources) {
@@ -209,25 +213,27 @@ export class ReservationsService {
         if (activeAllocationCount >= reservation.quantity)
           throw new BadRequestException('Reservation already fully allocated');
 
+        const allocationOverlapFilter = reservation.endDate
+          ? {
+              OR: [
+                { reservation: { endDate: null, startDate: { lte: reservation.endDate } } },
+                { reservation: { startDate: { lte: reservation.endDate }, endDate: { gte: reservation.startDate } } },
+              ],
+            }
+          : { reservation: { endDate: null } };
+
         const overlappingAllocation = await tx.reservationAllocation.findFirst({
-          where: {
-            assetId: allocation.assetId,
-            releasedAt: null,
-            reservation: {
-              startDate: { lte: reservation.endDate },
-              endDate: { gte: reservation.startDate },
-            },
-          },
+          where: { assetId: allocation.assetId, releasedAt: null, ...allocationOverlapFilter },
         });
         if (overlappingAllocation)
           throw new BadRequestException(`Asset ${asset.id} already allocated`);
 
+        const maintenanceOverlapFilter = reservation.endDate
+          ? { startDate: { lte: reservation.endDate }, endDate: { gte: reservation.startDate } }
+          : { startDate: { gte: reservation.startDate } };
+
         const overlappingMaintenance = await tx.maintenanceRecord.findFirst({
-          where: {
-            assetId: allocation.assetId,
-            startDate: { lte: reservation.endDate },
-            endDate: { gte: reservation.startDate },
-          },
+          where: { assetId: allocation.assetId, ...maintenanceOverlapFilter },
         });
         if (overlappingMaintenance)
           throw new BadRequestException(`Asset ${asset.id} under maintenance`);
@@ -539,24 +545,29 @@ export class ReservationsService {
     if (newAsset.itemId !== allocation.reservation.itemId)
       throw new BadRequestException('Asset item type mismatch');
 
+    const resEndDate = allocation.reservation.endDate;
+    const resStartDate = allocation.reservation.startDate;
+
+    const reallocOverlapFilter = resEndDate
+      ? {
+          OR: [
+            { reservation: { endDate: null, startDate: { lte: resEndDate } } },
+            { reservation: { startDate: { lte: resEndDate }, endDate: { gte: resStartDate } } },
+          ],
+        }
+      : { reservation: { endDate: null } };
+
     const overlappingAllocation = await this.prisma.reservationAllocation.findFirst({
-      where: {
-        assetId: dto.newAssetId,
-        releasedAt: null,
-        reservation: {
-          startDate: { lte: allocation.reservation.endDate },
-          endDate: { gte: allocation.reservation.startDate },
-        },
-      },
+      where: { assetId: dto.newAssetId, releasedAt: null, ...reallocOverlapFilter },
     });
     if (overlappingAllocation) throw new BadRequestException('Asset already allocated');
 
+    const reallocMaintenanceFilter = resEndDate
+      ? { startDate: { lte: resEndDate }, endDate: { gte: resStartDate } }
+      : { startDate: { gte: resStartDate } };
+
     const overlappingMaintenance = await this.prisma.maintenanceRecord.findFirst({
-      where: {
-        assetId: dto.newAssetId,
-        startDate: { lte: allocation.reservation.endDate },
-        endDate: { gte: allocation.reservation.startDate },
-      },
+      where: { assetId: dto.newAssetId, ...reallocMaintenanceFilter },
     });
     if (overlappingMaintenance) throw new BadRequestException('Asset under maintenance');
 
@@ -790,8 +801,10 @@ export class ReservationsService {
         0,
       );
       return [{
+        reservationId: first.id,
         itemId: first.itemId,
         itemName: first.item.name,
+        itemType: first.item.type,
         unit: first.item.unit ?? undefined,
         requestedQuantity: first.quantity,
         allocatedQuantity,

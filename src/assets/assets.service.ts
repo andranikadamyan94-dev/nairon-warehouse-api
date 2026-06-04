@@ -64,39 +64,46 @@ export class AssetsService {
   async getAvailableAssets(query: {
     itemId: number;
     startDate: string;
-    endDate: string;
+    endDate?: string;
     reservationId?: number;
   }) {
     const startDate = new Date(query.startDate);
+    const endDate = query.endDate ? new Date(query.endDate) : null;
 
-    const endDate = new Date(query.endDate);
+    const ownReservationFilter = query.reservationId
+      ? { reservationId: { not: query.reservationId } }
+      : {};
+
+    // An active allocation blocks this asset if:
+    //   - it is open-ended (endDate = null), OR
+    //   - its reservation overlaps the requested window
+    const overlapFilter = endDate
+      ? {
+          OR: [
+            { reservation: { endDate: null } },
+            { reservation: { startDate: { lte: endDate }, endDate: { gte: startDate } } },
+          ],
+        }
+      : { reservation: { endDate: null } }; // requesting open-ended: only blocked by other open-ended
+
+    const maintenanceFilter = endDate
+      ? { startDate: { lte: endDate }, endDate: { gte: startDate } }
+      : { startDate: { gte: startDate } }; // open-ended: blocked by any future maintenance
 
     return this.prisma.asset.findMany({
       where: {
         itemId: query.itemId,
-
         allocations: {
           none: {
             releasedAt: null,
-            // Exclude this reservation's own allocations so they still appear as selectable
-            ...(query.reservationId
-              ? { reservationId: { not: query.reservationId } }
-              : {}),
-            reservation: {
-              startDate: { lte: endDate },
-              endDate: { gte: startDate },
-            },
+            ...ownReservationFilter,
+            ...overlapFilter,
           },
         },
-
         maintenanceRecords: {
-          none: {
-            startDate: { lte: endDate },
-            endDate: { gte: startDate },
-          },
+          none: maintenanceFilter,
         },
       },
-
       include: {
         item: true,
       },

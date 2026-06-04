@@ -16,6 +16,9 @@ import { ResponsibilitiesModule } from './responsibilities/responsibilities.modu
 import { AllocationsModule } from './allocations/allocations.module';
 import { UsersModule } from './users/users.module';
 import { CategoriesModule } from './categories/categories.module';
+import { SuppliersModule } from './suppliers/suppliers.module';
+import { ProcurementModule } from './procurement/procurement.module';
+import { ResourceReturnsModule } from './resource-returns/resource-returns.module';
 
 @Module({
   imports: [
@@ -37,6 +40,9 @@ import { CategoriesModule } from './categories/categories.module';
     AllocationsModule,
     UsersModule,
     CategoriesModule,
+    SuppliersModule,
+    ProcurementModule,
+    ResourceReturnsModule,
   ],
 })
 export class AppModule implements NestModule {

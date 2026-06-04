@@ -12,6 +12,12 @@ enum ItemType {
   ASSET
 }
 
+enum ResourceReturnStatus {
+  PENDING
+  RECEIVED
+  CANCELLED
+}
+
 enum AssetStatus {
   AVAILABLE
   MAINTENANCE
@@ -33,6 +39,14 @@ enum ReservationAllocationAction {
   ALLOCATED
   RELEASED
   REALLOCATED
+  RETURNED
+}
+
+enum ProcurementOrderStatus {
+  DRAFT
+  ORDERED
+  RECEIVED
+  CANCELLED
 }
 
 enum ItemUnit {
@@ -68,6 +82,8 @@ model Item {
   inventoryMovements InventoryMovement[]
 
   resourceReservations ResourceReservation[]
+
+  procurementOrderItems ProcurementOrderItem[]
 
   categoryId Int?
 
@@ -155,7 +171,7 @@ model ResourceReservation {
   status ResourceReservationStatus @default(PENDING)
 
   startDate DateTime
-  endDate   DateTime
+  endDate   DateTime?
 
   notes String?
 
@@ -176,6 +192,8 @@ model ResourceReservation {
   allocationHistory ReservationAllocationHistory[]
 
   statusHistory ReservationStatusHistory[]
+
+  returns ResourceReturn[]
 
   @@index([itemId])
   @@index([taskId])
@@ -315,6 +333,60 @@ model AssetResponsibility {
   @@index([releasedAt])
 }
 
+model Supplier {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  name    String
+  email   String?
+  phone   String?
+  address String?
+  notes   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  procurementOrders ProcurementOrder[]
+}
+
+model ProcurementOrder {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  status ProcurementOrderStatus @default(DRAFT)
+
+  supplierId Int?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id])
+
+  notes     String?
+  createdBy Int?
+
+  receivedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items ProcurementOrderItem[]
+
+  @@index([supplierId])
+  @@index([status])
+}
+
+model ProcurementOrderItem {
+  id      Int @id @default(autoincrement())
+  orderId Int
+  itemId  Int
+
+  quantity  Float
+  unitPrice Float?
+
+  order ProcurementOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  item  Item              @relation(fields: [itemId],  references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([itemId])
+}
+
 model ItemCategory {
   id Int @id @default(autoincrement())
 
@@ -337,4 +409,30 @@ model ItemCategory {
   items Item[]
 
   @@index([entityId])
+}
+
+model ResourceReturn {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  reservationId Int
+  reservation   ResourceReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  quantity Int
+
+  status ResourceReturnStatus @default(PENDING)
+
+  notes String?
+
+  requestedBy Int?
+  receivedBy  Int?
+
+  requestedAt DateTime  @default(now())
+  receivedAt  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([reservationId])
+  @@index([status])
 }

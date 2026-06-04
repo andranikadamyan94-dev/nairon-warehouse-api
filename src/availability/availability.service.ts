@@ -27,9 +27,24 @@ export class AvailabilityService {
   private async checkWindow(
     item: { id: number; type: string; quantity: number; unit: string | null },
     startDate: Date,
-    endDate: Date,
+    endDate: Date | null,
     excludeTaskId?: number,
   ): Promise<number> {
+    // Open-ended reservations (endDate = null) conflict with any window that starts after them.
+    // For bounded windows, also include open-ended reservations that started before the window ends.
+    const reservationOverlapFilter = endDate
+      ? {
+          OR: [
+            { endDate: null, startDate: { lte: endDate } },
+            { startDate: { lte: endDate }, endDate: { gte: startDate } },
+          ],
+        }
+      : { startDate: { lte: startDate } }; // open-ended request: only open-ended existing ones conflict
+
+    const maintenanceFilter = endDate
+      ? { startDate: { lte: endDate }, endDate: { gte: startDate } }
+      : { startDate: { gte: startDate } };
+
     const [assets, overlappingReservations] = await Promise.all([
       this.prisma.asset.findMany({
         where: {
@@ -38,18 +53,14 @@ export class AvailabilityService {
         },
         include: {
           maintenanceRecords: {
-            where: {
-              startDate: { lte: endDate },
-              endDate: { gte: startDate },
-            },
+            where: maintenanceFilter,
           },
         },
       }),
       this.prisma.resourceReservation.aggregate({
         where: {
           itemId: item.id,
-          startDate: { lte: endDate },
-          endDate: { gte: startDate },
+          ...reservationOverlapFilter,
           status: { notIn: INACTIVE_STATUSES },
           ...(excludeTaskId ? { taskId: { not: excludeTaskId } } : {}),
         },
@@ -89,8 +100,10 @@ export class AvailabilityService {
 
         if (!item) return;
 
-        if (item.unit === ItemUnit.HOUR) {
-          // Per-day check: each day is an independent availability window
+        const endDate = dto.endDate ? new Date(dto.endDate) : null;
+
+        if (item.unit === ItemUnit.HOUR && endDate) {
+          // Per-day check: each day is an independent availability window (not valid open-ended)
           const customTime =
             requestedResource.startTime && requestedResource.endTime
               ? {
@@ -122,11 +135,11 @@ export class AvailabilityService {
             }),
           );
         } else {
-          // Standard single-window check
+          // Standard single-window check (including open-ended: endDate = null)
           const available = await this.checkWindow(
             item,
             new Date(dto.startDate),
-            new Date(dto.endDate),
+            endDate,
             dto.excludeTaskId,
           );
 

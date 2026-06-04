@@ -62,9 +62,10 @@ export class CreateReservationDto {
   @IsDateString()
   startDate: string;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsDateString()
-  endDate: string;
+  endDate?: string;
 
   @ApiProperty({ type: [ResourceReservationItemDto] })
   @IsArray()

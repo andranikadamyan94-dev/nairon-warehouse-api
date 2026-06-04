@@ -10,7 +10,22 @@ import { PrismaService } from 'prisma/prisma.service';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  app.enableCors();
+  app.enableCors({
+    origin: [
+      'http://localhost:3000',
+      'http://localhost:4001',
+      'http://localhost:4002',
+      'http://localhost:4003',
+      'http://localhost:4004',
+      'https://gateway.nairon.am',
+      'https://nairon.am',
+      'https://www.nairon.am',
+      process.env.FRONTEND_URL,
+    ].filter(Boolean),
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+  });
 
   app.setGlobalPrefix('api');
 

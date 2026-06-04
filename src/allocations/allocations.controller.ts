@@ -1,10 +1,28 @@
-import { Controller, Delete, Get, Param, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
 
-import { ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { IsArray, IsInt, IsOptional, IsNumber, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 
 import { AllocationsService } from './allocations.service';
 
 import { PaginationQueryDto } from '../common/dto/pagination-query.dto';
+
+class ReturnItemDto {
+  @IsInt()
+  allocationId: number;
+
+  @IsOptional()
+  @IsNumber()
+  quantity?: number;
+}
+
+class ReturnAllocationsDto {
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ReturnItemDto)
+  returns: ReturnItemDto[];
+}
 
 @ApiTags('Allocations')
 @Controller('allocations')
@@ -33,5 +51,11 @@ export class AllocationsController {
     id: string,
   ) {
     return this.allocationsService.remove(+id);
+  }
+
+  @Post('return')
+  @ApiOperation({ summary: 'Return allocated resources back to warehouse' })
+  returnAllocations(@Body() dto: ReturnAllocationsDto) {
+    return this.allocationsService.returnAllocations(dto.returns);
   }
 }

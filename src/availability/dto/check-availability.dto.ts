@@ -33,8 +33,10 @@ export class CheckAvailabilityDto {
   @IsDateString()
   startDate: string;
 
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsDateString()
-  endDate: string;
+  endDate?: string;
 
   @IsArray()
   @ValidateNested({ each: true })
