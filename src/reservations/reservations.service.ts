@@ -665,11 +665,14 @@ export class ReservationsService {
 
     const assetCountMap = new Map(assetCounts.map((a) => [a.itemId, a._count.id]));
 
+    const FAR_FUTURE = new Date(8640000000000000);
+
     const enriched = data.map((reservation) => {
-      const overlapping = (r: { itemId: number; startDate: Date; endDate: Date }) =>
+      const resEnd = reservation.endDate ?? FAR_FUTURE;
+      const overlapping = (r: { itemId: number; startDate: Date; endDate: Date | null }) =>
         r.itemId === reservation.itemId &&
-        r.startDate < reservation.endDate &&
-        r.endDate > reservation.startDate;
+        r.startDate < resEnd &&
+        (r.endDate === null || r.endDate > reservation.startDate);
 
       const assetsUnderMaintenance =
         reservation.item?.type === ItemType.ASSET
@@ -678,7 +681,7 @@ export class ReservationsService {
                 .filter(
                   (m) =>
                     m.asset?.itemId === reservation.itemId &&
-                    m.startDate < reservation.endDate &&
+                    m.startDate < resEnd &&
                     m.endDate > reservation.startDate,
                 )
                 .map((m) => m.assetId),
@@ -751,9 +754,11 @@ export class ReservationsService {
 
     // Real-time availability check (excludes this task's own reservations)
     const allDates = groups.flatMap((g) => g.map((r) => r.startDate));
-    const allEndDates = groups.flatMap((g) => g.map((r) => r.endDate));
+    const allEndDates = groups.flatMap((g) => g.map((r) => r.endDate)).filter((d): d is Date => d !== null);
     const overallStart = getYerevanDateKey(allDates.reduce((min, d) => (d < min ? d : min)));
-    const overallEnd = getYerevanDateKey(allEndDates.reduce((max, d) => (d > max ? d : max)));
+    const overallEnd = allEndDates.length > 0
+      ? getYerevanDateKey(allEndDates.reduce((max, d) => (d > max ? d : max)))
+      : undefined;
 
     const availabilityResult = await this.availabilityService.checkAvailability({
       startDate: overallStart,
@@ -765,7 +770,7 @@ export class ReservationsService {
           itemId: first.itemId,
           quantity: first.quantity,
           startTime: isHourly ? formatUTCasYerevan(first.startDate) : undefined,
-          endTime: isHourly ? formatUTCasYerevan(first.endDate) : undefined,
+          endTime: isHourly && first.endDate ? formatUTCasYerevan(first.endDate) : undefined,
         };
       }),
       excludeTaskId: taskId,
