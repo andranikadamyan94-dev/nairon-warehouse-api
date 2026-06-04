@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { PrismaService } from 'prisma/prisma.service';
 import { CreateReturnDto } from './dto/create-return.dto';
 import { ResourceReturnStatus } from '../common/enums/resource-return-status.enum';
+import { ResourceReservationStatus } from '../common/enums/resource-reservation-status.enum';
 import { ItemType } from '../common/enums/item-type.enum';
 
 @Injectable()
@@ -86,7 +87,7 @@ export class ResourceReturnsService {
         where: { id: ret.reservationId },
         data: {
           quantity: newQty <= 0 ? 0 : newQty,
-          status: newQty <= 0 ? 'COMPLETED' : undefined,
+          status: newQty <= 0 ? ResourceReservationStatus.COMPLETED : undefined,
         },
       });
 
