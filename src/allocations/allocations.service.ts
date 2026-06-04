@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
 import { ItemType } from '../common/enums/item-type.enum';
@@ -51,6 +51,12 @@ export class AllocationsService {
 
         const isConsumable = allocation.reservation.item.type === ItemType.CONSUMABLE;
         const returnQty = entry.quantity ?? allocation.quantity;
+
+        if (entry.quantity !== undefined && entry.quantity > allocation.quantity) {
+          throw new BadRequestException(
+            `Cannot return ${entry.quantity} units — allocation only contains ${allocation.quantity}`,
+          );
+        }
 
         if (isConsumable) {
           const remaining = allocation.quantity - returnQty;

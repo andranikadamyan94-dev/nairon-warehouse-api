@@ -143,6 +143,22 @@ export class ReservationsService {
             await this.writeStatusHistory(tx, created.id, null, status);
           }
         } else {
+          // For open-ended reservations, re-check inside the transaction to prevent race conditions
+          if (!endDate) {
+            const existingOpenEnded = await tx.resourceReservation.count({
+              where: {
+                itemId: resource.itemId,
+                endDate: null,
+                status: { notIn: INACTIVE_STATUSES },
+              },
+            });
+            if (existingOpenEnded > 0) {
+              throw new BadRequestException(
+                `Item ${resource.itemId} already has an active open-ended reservation`,
+              );
+            }
+          }
+
           const isUnavailable = availability.unavailableResources.some(
             (r) => r.itemId === resource.itemId && !r.date,
           );
@@ -285,6 +301,12 @@ export class ReservationsService {
     if (!approvableStatuses.includes(reservation.status as ResourceReservationStatus)) {
       throw new BadRequestException(
         `Reservation ${reservationId} has status ${reservation.status} and cannot be approved`,
+      );
+    }
+
+    if (reservation.item.quantity < reservation.quantity) {
+      throw new BadRequestException(
+        `Insufficient stock: ${reservation.item.quantity} available, ${reservation.quantity} requested`,
       );
     }
 
