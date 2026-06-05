@@ -14,6 +14,7 @@ async function bootstrap() {
   app.enableCors({
     origin: [
       'http://localhost:3000',
+      'http://localhost:3004',
       'http://localhost:4001',
       'http://localhost:4002',
       'http://localhost:4003',
@@ -21,6 +22,9 @@ async function bootstrap() {
       'https://gateway.nairon.am',
       'https://nairon.am',
       'https://www.nairon.am',
+      'https://warehouse.nairon.am',
+      'https://crm.nairon.am',
+      'https://finance.nairon.am',
       process.env.FRONTEND_URL,
     ].filter(Boolean),
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
