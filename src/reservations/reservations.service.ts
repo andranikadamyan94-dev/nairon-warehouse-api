@@ -677,7 +677,7 @@ export class ReservationsService {
           itemId: { in: itemIds },
           status: { notIn: INACTIVE_STATUSES },
         },
-        select: { id: true, itemId: true, taskId: true, quantity: true, startDate: true, endDate: true },
+        select: { id: true, itemId: true, taskId: true, quantity: true, startDate: true, endDate: true, status: true },
       }),
       this.prisma.maintenanceRecord.findMany({
         where: { asset: { itemId: { in: itemIds } } },
@@ -715,8 +715,16 @@ export class ReservationsService {
           ? Math.max(0, (assetCountMap.get(reservation.itemId) ?? 0) - assetsUnderMaintenance)
           : (reservation.item?.quantity ?? 0);
 
+      // For consumables, ALLOCATED reservations already had their quantity deducted
+      // from item.quantity, so counting them again in reservedByOthers would double-subtract.
       const reservedByOthers = activeReservations
-        .filter((r) => r.taskId !== reservation.taskId && overlapping(r))
+        .filter((r) => {
+          if (r.taskId === reservation.taskId || !overlapping(r)) return false;
+          if (reservation.item?.type === ItemType.CONSUMABLE) {
+            return (r as any).status !== ResourceReservationStatus.ALLOCATED;
+          }
+          return true;
+        })
         .reduce((sum, r) => sum + r.quantity, 0);
 
       const reservedAll = activeReservations
