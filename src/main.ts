@@ -9,6 +9,7 @@ import { PrismaService } from 'prisma/prisma.service';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  app.getHttpServer().maxHeaderSize = 65536;
 
   app.enableCors({
     origin: [
