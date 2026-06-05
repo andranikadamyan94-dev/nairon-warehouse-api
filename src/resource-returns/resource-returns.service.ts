@@ -23,22 +23,17 @@ export class ResourceReturnsService {
 
     if (!reservation) throw new NotFoundException('Reservation not found');
 
-    if (reservation.item.type !== ItemType.CONSUMABLE) {
-      throw new BadRequestException('Only consumable reservations can be returned this way');
-    }
-
-    const pendingQty = await this.prisma.resourceReturn.aggregate({
-      where: { reservationId: dto.reservationId, status: ResourceReturnStatus.PENDING },
-      _sum: { quantity: true },
-    });
-
-    const allocatedQty = reservation.quantity;
-    const alreadyPending = pendingQty._sum.quantity ?? 0;
-
-    if (dto.quantity + alreadyPending > allocatedQty) {
-      throw new BadRequestException(
-        `Cannot return ${dto.quantity} units — only ${allocatedQty - alreadyPending} units remain available for return`,
-      );
+    if (reservation.item.type === ItemType.CONSUMABLE) {
+      const pendingQty = await this.prisma.resourceReturn.aggregate({
+        where: { reservationId: dto.reservationId, status: ResourceReturnStatus.PENDING },
+        _sum: { quantity: true },
+      });
+      const alreadyPending = pendingQty._sum.quantity ?? 0;
+      if (dto.quantity + alreadyPending > reservation.quantity) {
+        throw new BadRequestException(
+          `Cannot return ${dto.quantity} units — only ${reservation.quantity - alreadyPending} units remain available for return`,
+        );
+      }
     }
 
     return this.prisma.resourceReturn.create({
@@ -74,38 +69,49 @@ export class ResourceReturnsService {
       throw new BadRequestException('Return is not in PENDING status');
     }
 
+    const isAsset = ret.reservation.item.type === ItemType.ASSET;
+
     return this.prisma.$transaction(async (tx) => {
-      // 1. Restore stock
-      await tx.item.update({
-        where: { id: ret.reservation.itemId },
-        data: { quantity: { increment: ret.quantity } },
-      });
-
-      // 2. Reduce the reservation quantity; complete it if fully returned
-      const newQty = ret.reservation.quantity - ret.quantity;
-      await tx.resourceReservation.update({
-        where: { id: ret.reservationId },
-        data: {
-          quantity: newQty <= 0 ? 0 : newQty,
-          status: newQty <= 0 ? ResourceReservationStatus.COMPLETED : undefined,
-        },
-      });
-
-      // 3. Reduce or release the active allocation for this reservation
-      const allocation = await tx.reservationAllocation.findFirst({
-        where: { reservationId: ret.reservationId, releasedAt: null },
-      });
-      if (allocation) {
-        const remainingAlloc = allocation.quantity - ret.quantity;
-        await tx.reservationAllocation.update({
-          where: { id: allocation.id },
-          data: remainingAlloc <= 0
-            ? { releasedAt: new Date() }
-            : { quantity: remainingAlloc },
+      if (isAsset) {
+        // Assets are tracked individually — release all active allocations for this reservation
+        await tx.reservationAllocation.updateMany({
+          where: { reservationId: ret.reservationId, releasedAt: null },
+          data: { releasedAt: new Date() },
         });
+        await tx.resourceReservation.update({
+          where: { id: ret.reservationId },
+          data: { status: ResourceReservationStatus.COMPLETED },
+        });
+      } else {
+        // Consumable: restore item stock
+        await tx.item.update({
+          where: { id: ret.reservation.itemId },
+          data: { quantity: { increment: ret.quantity } },
+        });
+
+        const newQty = ret.reservation.quantity - ret.quantity;
+        await tx.resourceReservation.update({
+          where: { id: ret.reservationId },
+          data: {
+            quantity: newQty <= 0 ? 0 : newQty,
+            status: newQty <= 0 ? ResourceReservationStatus.COMPLETED : undefined,
+          },
+        });
+
+        const allocation = await tx.reservationAllocation.findFirst({
+          where: { reservationId: ret.reservationId, releasedAt: null },
+        });
+        if (allocation) {
+          const remainingAlloc = allocation.quantity - ret.quantity;
+          await tx.reservationAllocation.update({
+            where: { id: allocation.id },
+            data: remainingAlloc <= 0
+              ? { releasedAt: new Date() }
+              : { quantity: remainingAlloc },
+          });
+        }
       }
 
-      // 4. Inventory movement record
       await tx.inventoryMovement.create({
         data: {
           itemId: ret.reservation.itemId,
