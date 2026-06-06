@@ -96,6 +96,12 @@ export class ProcurementService {
     if (order.status === ProcurementOrderStatus.CANCELLED) {
       throw new BadRequestException('Order is cancelled');
     }
+    if (order.status === ProcurementOrderStatus.PENDING_FINANCE_APPROVAL) {
+      throw new BadRequestException('Order is awaiting finance approval');
+    }
+    if (order.status === ProcurementOrderStatus.DRAFT) {
+      throw new BadRequestException('Order must be finance-approved before receiving');
+    }
 
     return this.prisma.$transaction(async (tx) => {
       for (const line of order.items) {
@@ -129,6 +135,63 @@ export class ProcurementService {
         },
         include,
       });
+    });
+  }
+
+  async finalize(id: number) {
+    const order = await this.findOne(id);
+    if (order.status !== ProcurementOrderStatus.DRAFT) {
+      throw new BadRequestException('Only DRAFT orders can be finalized');
+    }
+
+    const total = order.items.reduce(
+      (sum, i) => sum + i.quantity * (i.unitPrice ?? 0),
+      0,
+    );
+
+    const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
+    let financeTransferId: number | undefined;
+    try {
+      const res = await fetch(`${financeUrl}/api/transfer/external`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount: total,
+          description: `Procurement order #${id}${order.supplier ? ` — ${order.supplier.name}` : ''}`,
+          natureId: 1,
+          externalRef: `warehouse_procurement:${id}`,
+        }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { id: number };
+        financeTransferId = data.id;
+      }
+    } catch {}
+
+    return this.prisma.procurementOrder.update({
+      where: { id },
+      data: {
+        status: ProcurementOrderStatus.PENDING_FINANCE_APPROVAL,
+        ...(financeTransferId ? { financeTransferId } : {}),
+      },
+      include,
+    });
+  }
+
+  async financeCallback(id: number, status: 'APPROVED' | 'REJECTED') {
+    const order = await this.findOne(id);
+    if (order.status !== ProcurementOrderStatus.PENDING_FINANCE_APPROVAL) {
+      throw new BadRequestException('Order is not pending finance approval');
+    }
+    return this.prisma.procurementOrder.update({
+      where: { id },
+      data: {
+        status:
+          status === 'APPROVED'
+            ? ProcurementOrderStatus.FINANCE_APPROVED
+            : ProcurementOrderStatus.DRAFT,
+      },
+      include,
     });
   }
 

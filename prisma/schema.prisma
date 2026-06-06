@@ -45,6 +45,8 @@ enum ReservationAllocationAction {
 enum ProcurementOrderStatus {
   DRAFT
   ORDERED
+  PENDING_FINANCE_APPROVAL
+  FINANCE_APPROVED
   RECEIVED
   CANCELLED
 }
@@ -367,7 +369,8 @@ model ProcurementOrder {
   notes     String?
   createdBy Int?
 
-  receivedAt DateTime?
+  financeTransferId Int?
+  receivedAt        DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
