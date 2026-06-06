@@ -1,9 +1,11 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ProcurementService } from './procurement.service';
 import { CreateProcurementDto } from './dto/create-procurement.dto';
 import { UpdateProcurementDto } from './dto/update-procurement.dto';
 import { ProcurementOrderStatus } from '../common/enums/procurement-order-status.enum';
+import { Public } from '../auth/decorators/public.decorator';
+import { InternalGuard } from '../auth/guards/internal.guard';
 
 @ApiTags('Procurement')
 @Controller('procurement')
@@ -44,6 +46,23 @@ export class ProcurementController {
   @ApiOperation({ summary: 'Cancel procurement order' })
   cancel(@Param('id', ParseIntPipe) id: number) {
     return this.procurementService.updateStatus(id, ProcurementOrderStatus.CANCELLED);
+  }
+
+  @Post(':id/finalize')
+  @ApiOperation({ summary: 'Finalize order — sends to finance for approval' })
+  finalize(@Param('id', ParseIntPipe) id: number) {
+    return this.procurementService.finalize(id);
+  }
+
+  @Public()
+  @UseGuards(InternalGuard)
+  @Post(':id/finance-callback')
+  @ApiOperation({ summary: 'Finance approval callback (called by finance API)' })
+  financeCallback(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { status: 'APPROVED' | 'REJECTED' },
+  ) {
+    return this.procurementService.financeCallback(id, body.status);
   }
 
   @Delete(':id')
