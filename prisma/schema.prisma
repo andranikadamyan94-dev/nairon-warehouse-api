@@ -337,11 +337,17 @@ model Supplier {
   id   Int    @id @default(autoincrement())
   uuid String @unique @default(uuid())
 
-  name    String
-  email   String?
-  phone   String?
-  address String?
-  notes   String?
+  name              String
+  email             String?
+  phone             String?
+  address           String?
+  actingAddress     String?
+  managers          Json?
+  bankName          String?
+  bankAccount       String?
+  registryNumber    String?
+  deadline          DateTime?
+  notes             String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
