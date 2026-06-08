@@ -18,12 +18,19 @@ export class SuppliersService {
   }
 
   create(dto: CreateSupplierDto) {
-    return this.prisma.supplier.create({ data: dto });
+    const { managers, ...rest } = dto;
+    return this.prisma.supplier.create({
+      data: { ...rest, ...(managers !== undefined && { managers: managers as any }) },
+    });
   }
 
   async update(id: number, dto: UpdateSupplierDto) {
     await this.findOne(id);
-    return this.prisma.supplier.update({ where: { id }, data: dto });
+    const { managers, ...rest } = dto;
+    return this.prisma.supplier.update({
+      where: { id },
+      data: { ...rest, ...(managers !== undefined && { managers: managers as any }) },
+    });
   }
 
   async remove(id: number) {
