@@ -56,6 +56,14 @@ export class ProcurementController {
 
   @Public()
   @UseGuards(InternalGuard)
+  @Get(':id/internal')
+  @ApiOperation({ summary: 'Get procurement order details (internal, called by finance API)' })
+  findOneInternal(@Param('id', ParseIntPipe) id: number) {
+    return this.procurementService.findOne(id);
+  }
+
+  @Public()
+  @UseGuards(InternalGuard)
   @Post(':id/finance-callback')
   @ApiOperation({ summary: 'Finance approval callback (called by finance API)' })
   financeCallback(
