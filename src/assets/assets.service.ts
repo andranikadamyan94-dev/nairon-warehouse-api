@@ -129,4 +129,19 @@ export class AssetsService {
       },
     });
   }
+
+  getItemHistory(itemId: number) {
+    return this.prisma.asset.findMany({
+      where: { itemId },
+      orderBy: { createdAt: 'asc' },
+      include: {
+        allocations: {
+          include: { reservation: { select: { id: true, taskId: true, projectName: true, startDate: true, endDate: true, notes: true } } },
+          orderBy: { allocatedAt: 'asc' },
+        },
+        maintenanceRecords: { orderBy: { startDate: 'asc' } },
+        responsibilities: { orderBy: { id: 'asc' } },
+      },
+    });
+  }
 }
