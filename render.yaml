@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: nairon-warehouse-api
+    branch: develop
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_URL_UNPOOLED
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: INTERNAL_API_KEY
+        sync: false

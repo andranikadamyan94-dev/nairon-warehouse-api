@@ -12,4 +12,4 @@ RUN ./node_modules/.bin/prisma generate
 RUN ./node_modules/.bin/nest build
 
 EXPOSE 10000
-CMD ./node_modules/.bin/prisma db push --accept-data-loss && node --max-http-header-size=65536 dist/src/main
+CMD sh -c './node_modules/.bin/prisma db push --accept-data-loss && node --max-http-header-size=65536 dist/src/main'

@@ -5,6 +5,7 @@
   "scripts": {
     "build": "nest build",
     "start": "nest start",
+    "prestart:dev": "npx kill-port 3005",
     "start:dev": "set NODE_OPTIONS=--max-http-header-size=65536&&nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
