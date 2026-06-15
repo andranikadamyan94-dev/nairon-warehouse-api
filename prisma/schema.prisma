@@ -87,6 +87,8 @@ model Item {
 
   procurementOrderItems ProcurementOrderItem[]
 
+  supplierItems SupplierItem[]
+
   categoryId Int?
 
   category ItemCategory? @relation(fields: [categoryId], references: [id])
@@ -359,6 +361,21 @@ model Supplier {
 
   procurementOrders  ProcurementOrder[]
   inventoryMovements InventoryMovement[]
+  supplierItems      SupplierItem[]
+}
+
+model SupplierItem {
+  id         Int   @id @default(autoincrement())
+  supplierId Int
+  itemId     Int
+  unitPrice  Float
+
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  item     Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([supplierId, itemId])
+  @@index([supplierId])
+  @@index([itemId])
 }
 
 model ProcurementOrder {
