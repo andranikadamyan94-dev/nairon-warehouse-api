@@ -19,13 +19,17 @@ jobs:
           script: |
             set -e
             BRANCH="${{ github.ref_name }}"
-            SRC_BRANCH=$([ "$BRANCH" = "main" ] && echo "main" || echo "staging")
-            git -C /opt/nairon/nairon-warehouse-api fetch origin
-            git -C /opt/nairon/nairon-warehouse-api checkout $SRC_BRANCH
-            git -C /opt/nairon/nairon-warehouse-api pull origin $SRC_BRANCH
-
-            ENV=$([ "$BRANCH" = "main" ] && echo "production" || echo "staging")
-            cd /opt/nairon/$ENV
+            if [ "$BRANCH" = "main" ]; then
+              REPO_DIR=/opt/nairon/nairon-warehouse-api
+              ENV_DIR=/opt/nairon/production
+            else
+              REPO_DIR=/opt/nairon/staging-src/nairon-warehouse-api
+              ENV_DIR=/opt/nairon/staging
+            fi
+            git -C $REPO_DIR fetch origin
+            git -C $REPO_DIR checkout $BRANCH
+            git -C $REPO_DIR pull origin $BRANCH
+            cd $ENV_DIR
             docker compose build warehouse-api
             docker compose up -d --no-deps warehouse-api
-            echo "Deployed warehouse-api to $ENV"
+            echo "Deployed warehouse-api to $BRANCH"
