@@ -86,6 +86,7 @@ export class InventoryService {
         : undefined,
       include: {
         item: true,
+        supplier: { select: { id: true, name: true } },
       },
       orderBy: {
         createdAt: 'desc',

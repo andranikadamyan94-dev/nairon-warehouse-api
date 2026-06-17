@@ -154,12 +154,12 @@ export class ProcurementService {
     try {
       const res = await fetch(`${financeUrl}/api/transfer/external`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-internal-key': process.env.INTERNAL_API_KEY || '' },
         body: JSON.stringify({
           amount: total,
           description: `Procurement order #${id}${order.supplier ? ` — ${order.supplier.name}` : ''}`,
-          natureId: 1,
           externalRef: `warehouse_procurement:${id}`,
+          date: new Date().toISOString(),
         }),
       });
       if (res.ok) {

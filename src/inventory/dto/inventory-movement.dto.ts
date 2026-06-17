@@ -24,6 +24,10 @@ export class InventoryMovementDto {
 
   @IsOptional()
   @IsInt()
+  supplierId?: number;
+
+  @IsOptional()
+  @IsInt()
   performedBy?: number;
 
   @IsOptional()

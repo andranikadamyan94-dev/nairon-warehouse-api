@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, IsDateString, IsArray, ValidateNested } from 'class-validator';
+import { IsOptional, IsString, IsArray, IsNumber, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class SupplierManagerDto {
@@ -9,6 +9,14 @@ export class SupplierManagerDto {
   @IsOptional()
   @IsString()
   phone?: string;
+}
+
+export class SupplierItemDto {
+  @IsNumber()
+  itemId: number;
+
+  @IsNumber()
+  unitPrice: number;
 }
 
 export class CreateSupplierDto {
@@ -60,11 +68,13 @@ export class CreateSupplierDto {
 
   @ApiPropertyOptional()
   @IsOptional()
-  @IsDateString()
-  deadline?: string;
-
-  @ApiPropertyOptional()
-  @IsOptional()
   @IsString()
   notes?: string;
+
+  @ApiPropertyOptional({ type: [SupplierItemDto] })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => SupplierItemDto)
+  items?: SupplierItemDto[];
 }

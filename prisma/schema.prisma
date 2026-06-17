@@ -87,6 +87,8 @@ model Item {
 
   procurementOrderItems ProcurementOrderItem[]
 
+  supplierItems SupplierItem[]
+
   categoryId Int?
 
   category ItemCategory? @relation(fields: [categoryId], references: [id])
@@ -141,6 +143,8 @@ model InventoryMovement {
 
   taskId Int?
 
+  supplierId Int?
+
   performedBy Int?
 
   notes String?
@@ -149,7 +153,8 @@ model InventoryMovement {
 
   // RELATIONS
 
-  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  item     Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  supplier Supplier? @relation(fields: [supplierId], references: [id])
 
   @@index([itemId])
   @@index([type])
@@ -339,22 +344,38 @@ model Supplier {
   id   Int    @id @default(autoincrement())
   uuid String @unique @default(uuid())
 
-  name              String
-  email             String?
-  phone             String?
-  address           String?
-  actingAddress     String?
-  managers          Json?
-  bankName          String?
-  bankAccount       String?
-  registryNumber    String?
-  deadline          DateTime?
-  notes             String?
+  name           String
+  email          String?
+  phone          String?
+  address        String?
+  actingAddress  String?
+  managers       Json?
+  bankName       String?
+  bankAccount    String?
+  registryNumber String?
+  deadline       DateTime?
+  notes          String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  procurementOrders ProcurementOrder[]
+  procurementOrders  ProcurementOrder[]
+  inventoryMovements InventoryMovement[]
+  supplierItems      SupplierItem[]
+}
+
+model SupplierItem {
+  id         Int   @id @default(autoincrement())
+  supplierId Int
+  itemId     Int
+  unitPrice  Float
+
+  supplier Supplier @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  item     Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([supplierId, itemId])
+  @@index([supplierId])
+  @@index([itemId])
 }
 
 model ProcurementOrder {
@@ -366,11 +387,11 @@ model ProcurementOrder {
   supplierId Int?
   supplier   Supplier? @relation(fields: [supplierId], references: [id])
 
-  notes     String?
-  createdBy Int?
-
+  notes             String?
+  createdBy         Int?
   financeTransferId Int?
-  receivedAt        DateTime?
+
+  receivedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -41,6 +41,11 @@ export class AssetsController {
     return this.assetsService.findAll();
   }
 
+  @Get('item/:itemId')
+  getItemHistory(@Param('itemId', ParseIntPipe) itemId: number) {
+    return this.assetsService.getItemHistory(itemId);
+  }
+
   @Get('available')
   getAvailable(
     @Query('itemId') itemId: string,
