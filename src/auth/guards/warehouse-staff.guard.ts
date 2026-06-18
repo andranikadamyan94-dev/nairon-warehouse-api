@@ -1,4 +1,5 @@
 import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
+import { UsersPrismaService } from '../../common/users-prisma.service';
 
 const WAREHOUSE_PERMISSIONS = [
   'manage_warehouse',
@@ -8,18 +9,20 @@ const WAREHOUSE_PERMISSIONS = [
 
 @Injectable()
 export class WarehouseStaffGuard implements CanActivate {
-  canActivate(context: ExecutionContext): boolean {
+  constructor(private usersPrisma: UsersPrismaService) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const user = context.switchToHttp().getRequest().user;
     if (!user) throw new ForbiddenException('Access denied');
 
     if (user.isAdmin) return true;
 
-    const userPermissions: string[] = (user.roles ?? []).flatMap((r: any) =>
-      (r.role?.permissions ?? []).map((p: any) => p.permission?.name ?? p.name).filter(Boolean),
-    );
+    const { isSuperAdmin, permissionNames } = await this.usersPrisma.getUserAccessInfo(user.id);
+    if (isSuperAdmin) return true;
 
-    const hasAccess = WAREHOUSE_PERMISSIONS.some((p) => userPermissions.includes(p));
-    if (!hasAccess) throw new ForbiddenException('Warehouse staff access required');
+    if (!WAREHOUSE_PERMISSIONS.some((p) => permissionNames.includes(p))) {
+      throw new ForbiddenException('Warehouse staff access required');
+    }
     return true;
   }
 }

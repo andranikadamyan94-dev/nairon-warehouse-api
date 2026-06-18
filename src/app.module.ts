@@ -1,6 +1,7 @@
-import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { MiddlewareConsumer, Global, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { LoggingMiddleware } from './common/middleware/logging.middleware';
+import { UsersPrismaService } from './common/users-prisma.service';
 
 import { PrismaModule } from 'prisma/prisma.module';
 
@@ -20,6 +21,7 @@ import { SuppliersModule } from './suppliers/suppliers.module';
 import { ProcurementModule } from './procurement/procurement.module';
 import { ResourceReturnsModule } from './resource-returns/resource-returns.module';
 
+@Global()
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -44,6 +46,8 @@ import { ResourceReturnsModule } from './resource-returns/resource-returns.modul
     ProcurementModule,
     ResourceReturnsModule,
   ],
+  providers: [UsersPrismaService],
+  exports: [UsersPrismaService],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
