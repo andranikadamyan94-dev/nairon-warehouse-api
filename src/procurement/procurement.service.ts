@@ -174,11 +174,15 @@ export class ProcurementService {
     );
 
     const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
+    const internalKey = process.env.INTERNAL_API_KEY || '';
+    console.log(`[procurement:finalize] calling finance-api: POST ${financeUrl}/api/transfer/external | key_set=${!!internalKey} | key_len=${internalKey.length}`);
+
     let financeTransferId: number | undefined;
+    let financeError: string | undefined;
     try {
       const res = await fetch(`${financeUrl}/api/transfer/external`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-internal-key': process.env.INTERNAL_API_KEY || '' },
+        headers: { 'Content-Type': 'application/json', 'x-internal-key': internalKey },
         body: JSON.stringify({
           amount: total,
           description: `Procurement order #${id}${order.supplier ? ` — ${order.supplier.name}` : ''}`,
@@ -186,11 +190,21 @@ export class ProcurementService {
           date: new Date().toISOString(),
         }),
       });
+      const body = await res.text();
+      console.log(`[procurement:finalize] finance-api response: status=${res.status} body=${body}`);
       if (res.ok) {
-        const data = (await res.json()) as { id: number };
-        financeTransferId = data.id;
+        financeTransferId = JSON.parse(body).id;
+      } else {
+        financeError = `finance-api ${res.status}: ${body}`;
       }
-    } catch {}
+    } catch (e: any) {
+      financeError = `network error reaching ${financeUrl}: ${e?.message ?? e}`;
+      console.error(`[procurement:finalize] ${financeError}`);
+    }
+
+    if (financeError) {
+      throw new BadRequestException(`Finance notification failed — ${financeError}`);
+    }
 
     return this.prisma.procurementOrder.update({
       where: { id },
