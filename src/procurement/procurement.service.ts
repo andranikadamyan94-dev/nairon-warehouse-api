@@ -13,11 +13,35 @@ const include = {
 export class ProcurementService {
   constructor(private readonly prisma: PrismaService) {}
 
-  findAll() {
-    return this.prisma.procurementOrder.findMany({
-      include,
-      orderBy: { createdAt: 'desc' },
-    });
+  async findAll(query?: { status?: string; supplierId?: string; search?: string; page?: string; limit?: string; sortBy?: string; sortOrder?: string }) {
+    const page = Number(query?.page ?? 1);
+    const limit = Number(query?.limit ?? 20);
+
+    const where: any = {};
+    if (query?.status) where.status = query.status;
+    if (query?.supplierId) where.supplierId = Number(query.supplierId);
+    if (query?.search) {
+      where.OR = [
+        { supplier: { name: { contains: query.search, mode: 'insensitive' } } },
+        { notes: { contains: query.search, mode: 'insensitive' } },
+      ];
+    }
+
+    const order: 'asc' | 'desc' = query?.sortOrder === 'asc' ? 'asc' : 'desc';
+    const orderBy: any = query?.sortBy === 'status' ? { status: order } : { createdAt: query?.sortBy === 'createdAt' ? order : 'desc' };
+
+    const [data, total] = await Promise.all([
+      this.prisma.procurementOrder.findMany({
+        where,
+        include,
+        orderBy,
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.procurementOrder.count({ where }),
+    ]);
+
+    return { data, total, page, limit };
   }
 
   async findOne(id: number) {

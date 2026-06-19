@@ -631,9 +631,28 @@ export class ReservationsService {
     const page = Number(query.page ?? 1);
     const limit = Number(query.limit ?? 10);
 
-    const where = {
-      status: { not: ResourceReservationStatus.COMPLETED },
-    };
+    const where: any = {};
+
+    if (query.status) {
+      where.status = query.status;
+    } else {
+      where.status = { not: ResourceReservationStatus.COMPLETED };
+    }
+
+    if (query.search) {
+      where.OR = [
+        { item: { name: { contains: query.search, mode: 'insensitive' } } },
+        { entityName: { contains: query.search, mode: 'insensitive' } },
+      ];
+    }
+
+    const order: 'asc' | 'desc' = query.sortOrder === 'asc' ? 'asc' : 'desc';
+    const orderBy: any =
+      query.sortBy === 'startDate' ? { startDate: order }
+      : query.sortBy === 'entityName' ? { entityName: order }
+      : query.sortBy === 'status' ? { status: order }
+      : query.sortBy === 'createdAt' ? { createdAt: order }
+      : [{ createdAt: 'desc' }, { taskId: 'asc' }];
 
     const [data, total] = await Promise.all([
       this.prisma.resourceReservation.findMany({
@@ -654,7 +673,7 @@ export class ReservationsService {
             orderBy: { performedAt: 'asc' },
           },
         },
-        orderBy: [{ createdAt: 'desc' }, { taskId: 'asc' }],
+        orderBy,
       }),
       this.prisma.resourceReservation.count({ where }),
     ]);

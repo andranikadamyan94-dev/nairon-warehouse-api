@@ -15,11 +15,22 @@ export class AssetsService {
     });
   }
 
-  findAll() {
-    return this.prisma.asset.findMany({
-      include: { item: true },
-      orderBy: { createdAt: 'desc' },
-    });
+  findAll(query?: { status?: string; search?: string; sortBy?: string; sortOrder?: string }) {
+    const where: any = {};
+    if (query?.status) where.status = query.status;
+    if (query?.search) {
+      where.OR = [
+        { serialNumber: { contains: query.search, mode: 'insensitive' } },
+        { item: { name: { contains: query.search, mode: 'insensitive' } } },
+      ];
+    }
+    const order: 'asc' | 'desc' = query?.sortOrder === 'asc' ? 'asc' : 'desc';
+    const orderBy: any =
+      query?.sortBy === 'serialNumber' ? { serialNumber: order }
+      : query?.sortBy === 'itemName' ? { item: { name: order } }
+      : query?.sortBy === 'status' ? { status: order }
+      : { createdAt: 'desc' };
+    return this.prisma.asset.findMany({ where, include: { item: true }, orderBy });
   }
 
   async findOne(id: number) {

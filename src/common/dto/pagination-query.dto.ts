@@ -22,4 +22,9 @@ export class PaginationQueryDto {
   @IsOptional()
   @IsNumberString()
   entityId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  status?: string;
 }

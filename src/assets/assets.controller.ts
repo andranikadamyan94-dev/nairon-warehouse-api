@@ -37,8 +37,8 @@ export class AssetsController {
   @ApiOperation({
     summary: 'Get all assets',
   })
-  findAll() {
-    return this.assetsService.findAll();
+  findAll(@Query() query: any) {
+    return this.assetsService.findAll(query);
   }
 
   @Get('item/:itemId')

@@ -113,14 +113,32 @@ export class MaintenanceService {
   async getAll(query: any) {
     const page = Number(query.page ?? 1);
     const limit = Number(query.limit ?? 10);
+    const search = query.search as string | undefined;
+
+    const where: any = search
+      ? {
+          OR: [
+            { asset: { serialNumber: { contains: search, mode: 'insensitive' } } },
+            { asset: { item: { name: { contains: search, mode: 'insensitive' } } } },
+          ],
+        }
+      : {};
+
+    const order: 'asc' | 'desc' = query.sortOrder === 'asc' ? 'asc' : 'desc';
+    const orderBy: any =
+      query.sortBy === 'endDate' ? { endDate: order }
+      : query.sortBy === 'type' ? { type: order }
+      : { startDate: query.sortBy === 'startDate' ? order : 'desc' };
+
     const [data, total] = await Promise.all([
       this.prisma.maintenanceRecord.findMany({
+        where,
         skip: (page - 1) * limit,
         take: limit,
         include: { asset: { include: { item: true } } },
-        orderBy: { startDate: 'desc' },
+        orderBy,
       }),
-      this.prisma.maintenanceRecord.count(),
+      this.prisma.maintenanceRecord.count({ where }),
     ]);
 
     return {

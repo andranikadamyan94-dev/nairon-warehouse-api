@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ProcurementService } from './procurement.service';
 import { CreateProcurementDto } from './dto/create-procurement.dto';
@@ -14,7 +14,7 @@ export class ProcurementController {
 
   @Get()
   @ApiOperation({ summary: 'Get all procurement orders' })
-  findAll() { return this.procurementService.findAll(); }
+  findAll(@Query() query: any) { return this.procurementService.findAll(query); }
 
   @Get(':id')
   @ApiOperation({ summary: 'Get procurement order by id' })

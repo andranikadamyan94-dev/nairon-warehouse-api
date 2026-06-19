@@ -11,8 +11,48 @@ const include = {
 export class SuppliersService {
   constructor(private readonly prisma: PrismaService) {}
 
-  findAll() {
-    return this.prisma.supplier.findMany({ include, orderBy: { name: 'asc' } });
+  async findAll(query?: { search?: string; itemIds?: string; page?: string; limit?: string; sortBy?: string; sortOrder?: string }) {
+    const page = Number(query?.page ?? 1);
+    const limit = Number(query?.limit ?? 20);
+    const search = query?.search;
+    const order: 'asc' | 'desc' = query?.sortOrder === 'asc' ? 'asc' : 'desc';
+    const orderBy: any =
+      query?.sortBy === 'createdAt' ? { createdAt: order } : { name: query?.sortBy === 'name' ? order : 'asc' };
+
+    const itemIds = query?.itemIds
+      ? String(query.itemIds).split(',').map(Number).filter(Boolean)
+      : [];
+
+    const where: any = {};
+
+    if (search) {
+      const rows = await this.prisma.$queryRaw<{ id: number }[]>`
+        SELECT id FROM "Supplier"
+        WHERE name ILIKE ${`%${search}%`}
+           OR phone ILIKE ${`%${search}%`}
+           OR email ILIKE ${`%${search}%`}
+           OR "registryNumber" ILIKE ${`%${search}%`}
+           OR managers::text ILIKE ${`%${search}%`}
+      `;
+      where.id = { in: rows.map((r) => r.id) };
+    }
+
+    if (itemIds.length) {
+      where.supplierItems = { some: { itemId: { in: itemIds } } };
+    }
+
+    const [data, total] = await Promise.all([
+      this.prisma.supplier.findMany({
+        where,
+        include,
+        orderBy,
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.supplier.count({ where }),
+    ]);
+
+    return { data, total, page, limit };
   }
 
   async findOne(id: number) {
