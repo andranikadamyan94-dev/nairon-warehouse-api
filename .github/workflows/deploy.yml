@@ -30,14 +30,6 @@ jobs:
             git -C $REPO_DIR checkout $BRANCH
             git -C $REPO_DIR pull origin $BRANCH
             cd $ENV_DIR
-            # Write override file so Docker Compose injects env vars into the container
-            cat > $ENV_DIR/docker-compose.warehouse-override.yml << 'OVERRIDE'
-services:
-  warehouse-api:
-    environment:
-      FINANCE_API_URL: "${{ secrets.STAGING_FINANCE_API_URL }}"
-      INTERNAL_API_KEY: "${{ secrets.STAGING_INTERNAL_API_KEY }}"
-OVERRIDE
-            docker compose -f docker-compose.yml -f docker-compose.warehouse-override.yml build warehouse-api
-            docker compose -f docker-compose.yml -f docker-compose.warehouse-override.yml up -d --no-deps warehouse-api
+            docker compose build warehouse-api
+            docker compose up -d --no-deps warehouse-api
             echo "Deployed warehouse-api to $BRANCH"
