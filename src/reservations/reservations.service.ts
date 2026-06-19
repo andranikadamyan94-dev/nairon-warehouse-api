@@ -945,7 +945,7 @@ export class ReservationsService {
 
         if (slots) {
           const existingRows = existingReservations.filter((x) => x.itemId === resource.itemId);
-          const existingByDate = new Map(existingRows.map((r) => [getYerevanDateKey(r.startDate), r]));
+          const existingByDate = new Map(existingRows.map((r) => [getYerevanDateKey(r.startDate), r] as [string, typeof r]));
           const newDateKeys = new Set(slots.map((s) => s.yerevanDate));
 
           // Cancel days no longer in range
