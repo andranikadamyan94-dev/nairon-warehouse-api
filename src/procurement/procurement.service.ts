@@ -195,7 +195,7 @@ export class ProcurementService {
       if (res.ok) {
         financeTransferId = JSON.parse(body).id;
       } else {
-        financeError = `finance-api ${res.status}: ${body}`;
+        financeError = `finance-api ${res.status} (url: ${financeUrl}): ${body}`;
       }
     } catch (e: any) {
       financeError = `network error reaching ${financeUrl}: ${e?.message ?? e}`;
