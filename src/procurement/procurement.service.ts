@@ -174,7 +174,7 @@ export class ProcurementService {
     );
 
     const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
-    const internalKey = process.env.INTERNAL_API_KEY || '';
+    const internalKey = process.env.INTERNAL_SECRET || '';
     console.log(`[procurement:finalize] calling finance-api: POST ${financeUrl}/api/transfer/external | key_set=${!!internalKey} | key_len=${internalKey.length}`);
 
     let financeTransferId: number | undefined;
@@ -182,7 +182,7 @@ export class ProcurementService {
     try {
       const res = await fetch(`${financeUrl}/api/transfer/external`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-internal-key': internalKey },
+        headers: { 'Content-Type': 'application/json', 'x-internal-secret': internalKey },
         body: JSON.stringify({
           amount: total,
           description: `Procurement order #${id}${order.supplier ? ` — ${order.supplier.name}` : ''}`,

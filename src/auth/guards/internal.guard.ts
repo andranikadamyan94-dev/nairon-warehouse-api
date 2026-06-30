@@ -4,8 +4,8 @@ import { CanActivate, ExecutionContext, Injectable, ForbiddenException } from '@
 export class InternalGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     const request = context.switchToHttp().getRequest();
-    const key = request.headers['x-internal-key'];
-    if (!key || key !== process.env.INTERNAL_API_KEY) {
+    const key = request.headers['x-internal-secret'];
+    if (!key || key !== process.env.INTERNAL_SECRET) {
       throw new ForbiddenException('Invalid internal service key');
     }
     return true;
