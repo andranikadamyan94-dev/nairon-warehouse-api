@@ -1,15 +1,15 @@
+import * as path from 'path';
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
-
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-
 import { AppModule } from './app.module';
-
 import { PrismaService } from 'prisma/prisma.service';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  app.getHttpServer().maxHeaderSize = 65536;
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  (app.getHttpServer() as any).maxHeaderSize = 65536;
+  app.useStaticAssets(path.join(process.cwd(), 'uploads'), { prefix: '/uploads' });
 
   app.enableCors({
     origin: [

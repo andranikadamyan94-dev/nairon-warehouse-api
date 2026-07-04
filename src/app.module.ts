@@ -18,6 +18,7 @@ import { AllocationsModule } from './allocations/allocations.module';
 import { UsersModule } from './users/users.module';
 import { CategoriesModule } from './categories/categories.module';
 import { SuppliersModule } from './suppliers/suppliers.module';
+import { MaintainersModule } from './maintainers/maintainers.module';
 import { ProcurementModule } from './procurement/procurement.module';
 import { ResourceReturnsModule } from './resource-returns/resource-returns.module';
 
@@ -43,6 +44,7 @@ import { ResourceReturnsModule } from './resource-returns/resource-returns.modul
     UsersModule,
     CategoriesModule,
     SuppliersModule,
+    MaintainersModule,
     ProcurementModule,
     ResourceReturnsModule,
   ],

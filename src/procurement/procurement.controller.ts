@@ -1,5 +1,9 @@
-import { Body, Controller, Delete, Get, Param, ParseIntPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  Body, Controller, Delete, Get, Param, ParseIntPipe,
+  Patch, Post, UploadedFile, UseGuards, UseInterceptors, Query,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ProcurementService } from './procurement.service';
 import { CreateProcurementDto } from './dto/create-procurement.dto';
 import { UpdateProcurementDto } from './dto/update-procurement.dto';
@@ -37,9 +41,14 @@ export class ProcurementController {
   }
 
   @Patch(':id/receive')
-  @ApiOperation({ summary: 'Mark order as RECEIVED and update stock' })
-  receive(@Param('id', ParseIntPipe) id: number) {
-    return this.procurementService.receive(id);
+  @UseInterceptors(FileInterceptor('receipt'))
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Mark order as RECEIVED — requires receipt file upload' })
+  receive(
+    @Param('id', ParseIntPipe) id: number,
+    @UploadedFile() receipt: Express.Multer.File,
+  ) {
+    return this.procurementService.receive(id, receipt);
   }
 
   @Patch(':id/cancel')
@@ -54,10 +63,16 @@ export class ProcurementController {
     return this.procurementService.finalize(id);
   }
 
+  @Post(':id/resubmit')
+  @ApiOperation({ summary: 'Resubmit a finance-rejected order back to DRAFT' })
+  resubmit(@Param('id', ParseIntPipe) id: number) {
+    return this.procurementService.resubmit(id);
+  }
+
   @Public()
   @UseGuards(InternalGuard)
   @Get(':id/internal')
-  @ApiOperation({ summary: 'Get procurement order details (internal, called by finance API)' })
+  @ApiOperation({ summary: 'Get procurement order details (internal)' })
   findOneInternal(@Param('id', ParseIntPipe) id: number) {
     return this.procurementService.findOne(id);
   }

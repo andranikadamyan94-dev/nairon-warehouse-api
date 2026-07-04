@@ -1,19 +1,32 @@
-import { IsDateString, IsInt, IsOptional, IsString } from 'class-validator';
-
+import { IsDateString, IsInt, IsNumber, IsOptional, IsString, Min } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 
 export class CreateMaintenanceRecordDto {
   @ApiProperty()
   @IsInt()
   assetId: number;
 
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  maintainerId?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Type(() => Number)
+  amount?: number;
+
   @ApiProperty()
   @IsDateString()
   startDate: string;
 
-  @ApiProperty()
+  @ApiPropertyOptional()
+  @IsOptional()
   @IsDateString()
-  endDate: string;
+  endDate?: string;
 
   @ApiPropertyOptional()
   @IsOptional()

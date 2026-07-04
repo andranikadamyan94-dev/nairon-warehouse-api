@@ -3,6 +3,7 @@ import { PrismaService } from 'prisma/prisma.service';
 import { ProcurementOrderStatus } from '../common/enums/procurement-order-status.enum';
 import { CreateProcurementDto } from './dto/create-procurement.dto';
 import { UpdateProcurementDto } from './dto/update-procurement.dto';
+import { FileService } from '../common/file.service';
 
 const include = {
   supplier: true,
@@ -11,7 +12,10 @@ const include = {
 
 @Injectable()
 export class ProcurementService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly fileService: FileService,
+  ) {}
 
   async findAll(query?: { status?: string; supplierId?: string; search?: string; page?: string; limit?: string; sortBy?: string; sortOrder?: string }) {
     const page = Number(query?.page ?? 1);
@@ -112,7 +116,7 @@ export class ProcurementService {
     });
   }
 
-  async receive(id: number) {
+  async receive(id: number, receiptFile?: Express.Multer.File) {
     const order = await this.findOne(id);
     if (order.status === ProcurementOrderStatus.RECEIVED) {
       throw new BadRequestException('Order already received');
@@ -126,6 +130,14 @@ export class ProcurementService {
     if (order.status === ProcurementOrderStatus.DRAFT) {
       throw new BadRequestException('Order must be finance-approved before receiving');
     }
+    if (order.status === ProcurementOrderStatus.FINANCE_REJECTED) {
+      throw new BadRequestException('Order was finance-rejected and cannot be received');
+    }
+    if (!receiptFile) {
+      throw new BadRequestException('Receipt file is required when marking an order as received');
+    }
+
+    const receiptUrl = this.fileService.upload(receiptFile);
 
     return this.prisma.$transaction(async (tx) => {
       for (const line of order.items) {
@@ -146,6 +158,7 @@ export class ProcurementService {
             itemId: line.itemId,
             quantity: line.quantity,
             type: 'IN',
+            supplierId: order.supplierId ?? undefined,
             notes: `Procurement order #${id} received`,
           },
         });
@@ -156,9 +169,22 @@ export class ProcurementService {
         data: {
           status: ProcurementOrderStatus.RECEIVED,
           receivedAt: new Date(),
+          receiptUrl,
         },
         include,
       });
+    });
+  }
+
+  async resubmit(id: number) {
+    const order = await this.findOne(id);
+    if (order.status !== ProcurementOrderStatus.FINANCE_REJECTED) {
+      throw new BadRequestException('Only FINANCE_REJECTED orders can be resubmitted');
+    }
+    return this.prisma.procurementOrder.update({
+      where: { id },
+      data: { status: ProcurementOrderStatus.DRAFT },
+      include,
     });
   }
 
@@ -227,7 +253,7 @@ export class ProcurementService {
         status:
           status === 'APPROVED'
             ? ProcurementOrderStatus.FINANCE_APPROVED
-            : ProcurementOrderStatus.DRAFT,
+            : ProcurementOrderStatus.FINANCE_REJECTED,
       },
       include,
     });

@@ -704,7 +704,7 @@ export class ReservationsService {
       }),
     ]);
 
-    const assetCountMap = new Map(assetCounts.map((a) => [a.itemId, a._count.id]));
+    const assetCountMap = new Map<number | null, number>(assetCounts.map((a) => [a.itemId, a._count.id]));
 
     const FAR_FUTURE = new Date(8640000000000000);
 
@@ -964,7 +964,7 @@ export class ReservationsService {
 
         if (slots) {
           const existingRows = existingReservations.filter((x) => x.itemId === resource.itemId);
-          const existingByDate = new Map(existingRows.map((r) => [getYerevanDateKey(r.startDate), r] as [string, typeof r]));
+          const existingByDate = new Map<string, (typeof existingRows)[0]>(existingRows.map((r) => [getYerevanDateKey(r.startDate), r]));
           const newDateKeys = new Set(slots.map((s) => s.yerevanDate));
 
           // Cancel days no longer in range

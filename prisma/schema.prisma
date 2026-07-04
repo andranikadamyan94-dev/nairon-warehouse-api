@@ -47,8 +47,18 @@ enum ProcurementOrderStatus {
   ORDERED
   PENDING_FINANCE_APPROVAL
   FINANCE_APPROVED
+  FINANCE_REJECTED
   RECEIVED
   CANCELLED
+}
+
+enum MaintenanceStatus {
+  DRAFT
+  PENDING_FINANCE
+  FINANCE_APPROVED
+  FINANCE_REJECTED
+  IN_PROGRESS
+  COMPLETED
 }
 
 enum ItemUnit {
@@ -289,14 +299,38 @@ model ReservationAllocationHistory {
   @@index([action])
 }
 
+model Maintainer {
+  id    Int    @id @default(autoincrement())
+  uuid  String @unique @default(uuid())
+
+  name    String
+  phone   String?
+  email   String?
+  address String?
+  notes   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  maintenanceRecords MaintenanceRecord[]
+}
+
 model MaintenanceRecord {
   id   Int    @id @default(autoincrement())
   uuid String @unique @default(uuid())
 
   assetId Int
 
+  maintainerId Int?
+
+  status MaintenanceStatus @default(DRAFT)
+
+  amount Float?
+
+  financeTransferId Int?
+
   startDate DateTime
-  endDate   DateTime
+  endDate   DateTime?
 
   type String?
 
@@ -308,9 +342,11 @@ model MaintenanceRecord {
 
   // RELATIONS
 
-  asset Asset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  asset      Asset       @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  maintainer Maintainer? @relation(fields: [maintainerId], references: [id])
 
   @@index([assetId])
+  @@index([maintainerId])
   @@index([startDate, endDate])
 }
 
@@ -391,6 +427,7 @@ model ProcurementOrder {
   createdBy         Int?
   financeTransferId Int?
 
+  receiptUrl String?
   receivedAt DateTime?
 
   createdAt DateTime @default(now())

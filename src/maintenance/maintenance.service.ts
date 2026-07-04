@@ -3,113 +3,119 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-
 import { PrismaService } from 'prisma/prisma.service';
-
 import { AssetStatus } from '../common/enums/asset-status.enum';
-
 import { CreateMaintenanceRecordDto } from './dto/create-maintenance-record.dto';
+
+const include = {
+  asset: { include: { item: true } },
+  maintainer: true,
+};
 
 @Injectable()
 export class MaintenanceService {
   constructor(private readonly prisma: PrismaService) {}
 
   async createRecord(dto: CreateMaintenanceRecordDto) {
-    const asset = await this.prisma.asset.findUnique({
-      where: {
-        id: dto.assetId,
+    const asset = await this.prisma.asset.findUnique({ where: { id: dto.assetId } });
+    if (!asset) throw new NotFoundException('Asset not found');
+    if (asset.status === AssetStatus.RETIRED) throw new BadRequestException('Cannot maintain retired asset');
+
+    return this.prisma.maintenanceRecord.create({
+      data: {
+        assetId: dto.assetId,
+        maintainerId: dto.maintainerId ?? null,
+        amount: dto.amount ?? null,
+        startDate: new Date(dto.startDate),
+        endDate: dto.endDate ? new Date(dto.endDate) : null,
+        type: dto.type,
+        notes: dto.notes,
+        createdBy: dto.createdBy,
       },
+      include,
     });
+  }
 
-    if (!asset) {
-      throw new NotFoundException('Asset not found');
-    }
+  async finalize(id: number, amount: number) {
+    const record = await this.prisma.maintenanceRecord.findUnique({ where: { id }, include });
+    if (!record) throw new NotFoundException('Maintenance record not found');
+    if (record.status !== 'DRAFT') throw new BadRequestException('Only DRAFT records can be submitted for finance approval');
+    if (!amount || amount <= 0) throw new BadRequestException('Amount is required to request finance approval');
 
-    if (asset.status === AssetStatus.RETIRED) {
-      throw new BadRequestException('Cannot maintain retired asset');
-    }
-
-    const startDate = new Date(dto.startDate);
-
-    const endDate = new Date(dto.endDate);
-
-    if (startDate >= endDate) {
-      throw new BadRequestException('Invalid maintenance dates');
-    }
-
-    return this.prisma.$transaction(async (tx) => {
-      const overlappingMaintenance = await tx.maintenanceRecord.findFirst({
-        where: {
-          assetId: dto.assetId,
-
-          startDate: {
-            lte: endDate,
-          },
-
-          endDate: {
-            gte: startDate,
-          },
-        },
+    const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
+    let financeTransferId: number | undefined;
+    try {
+      const res = await fetch(`${financeUrl}/api/transfer/external`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+        body: JSON.stringify({
+          amount,
+          description: `Maintenance #${id}${record.maintainer ? ` — ${record.maintainer.name}` : ''}`,
+          externalRef: `warehouse_maintenance:${id}`,
+          date: new Date().toISOString(),
+        }),
       });
-
-      if (overlappingMaintenance) {
-        throw new BadRequestException('Overlapping maintenance exists');
+      if (res.ok) {
+        const data = (await res.json()) as { id: number };
+        financeTransferId = data.id;
       }
+    } catch {}
 
-      const record = await tx.maintenanceRecord.create({
-        data: {
-          assetId: dto.assetId,
+    return this.prisma.maintenanceRecord.update({
+      where: { id },
+      data: {
+        amount,
+        status: 'PENDING_FINANCE',
+        ...(financeTransferId ? { financeTransferId } : {}),
+      },
+      include,
+    });
+  }
 
-          startDate,
-          endDate,
+  async financeCallback(id: number, status: 'APPROVED' | 'REJECTED') {
+    const record = await this.prisma.maintenanceRecord.findUnique({ where: { id } });
+    if (!record) throw new NotFoundException('Maintenance record not found');
+    if (record.status !== 'PENDING_FINANCE') throw new BadRequestException('Record is not pending finance approval');
 
-          type: dto.type,
+    return this.prisma.maintenanceRecord.update({
+      where: { id },
+      data: { status: status === 'APPROVED' ? 'FINANCE_APPROVED' : 'FINANCE_REJECTED' },
+      include,
+    });
+  }
 
-          notes: dto.notes,
+  async complete(id: number) {
+    const record = await this.prisma.maintenanceRecord.findUnique({ where: { id } });
+    if (!record) throw new NotFoundException('Maintenance record not found');
+    if (record.status === 'COMPLETED') throw new BadRequestException('Maintenance is already completed');
+    if (record.status === 'DRAFT') throw new BadRequestException('Cannot complete a draft record');
 
-          createdBy: dto.createdBy,
-        },
-      });
-
-      return record;
+    return this.prisma.maintenanceRecord.update({
+      where: { id },
+      data: {
+        status: 'COMPLETED',
+        endDate: new Date(),
+      },
+      include,
     });
   }
 
   async getUpcomingMaintenance() {
-    const today = new Date();
-
     return this.prisma.maintenanceRecord.findMany({
-      where: {
-        endDate: {
-          gte: today,
-        },
-      },
-
-      include: {
-        asset: {
-          include: {
-            item: true,
-          },
-        },
-      },
-
-      orderBy: {
-        startDate: 'asc',
-      },
+      where: { endDate: { gte: new Date() } },
+      include,
+      orderBy: { startDate: 'asc' },
     });
   }
 
   async getAssetMaintenanceHistory(assetId: number) {
     return this.prisma.maintenanceRecord.findMany({
-      where: {
-        assetId,
-      },
-
-      orderBy: {
-        startDate: 'desc',
-      },
+      where: { assetId },
+      include,
+      orderBy: { startDate: 'desc' },
     });
   }
+
   async getAll(query: any) {
     const page = Number(query.page ?? 1);
     const limit = Number(query.limit ?? 10);
@@ -135,53 +141,31 @@ export class MaintenanceService {
         where,
         skip: (page - 1) * limit,
         take: limit,
-        include: { asset: { include: { item: true } } },
+        include,
         orderBy,
       }),
       this.prisma.maintenanceRecord.count({ where }),
     ]);
-
-    return {
-      data,
-      total,
-      page,
-      limit,
-    };
+    return { data, total, page, limit };
   }
 
   async getOne(id: number) {
-    return this.prisma.maintenanceRecord.findUnique({
-      where: {
-        id,
-      },
-
-      include: {
-        asset: {
-          include: {
-            item: true,
-          },
-        },
-      },
-    });
+    return this.prisma.maintenanceRecord.findUnique({ where: { id }, include });
   }
 
   async update(id: number, dto: Partial<CreateMaintenanceRecordDto>) {
     const record = await this.prisma.maintenanceRecord.findUnique({ where: { id } });
     if (!record) throw new NotFoundException('Maintenance record not found');
 
-    const startDate = dto.startDate ? new Date(dto.startDate) : record.startDate;
-    const endDate = dto.endDate ? new Date(dto.endDate) : record.endDate;
-
-    if (startDate >= endDate) throw new BadRequestException('Invalid maintenance dates');
-
     return this.prisma.maintenanceRecord.update({
       where: { id },
       data: {
-        startDate,
-        endDate,
+        startDate: dto.startDate ? new Date(dto.startDate) : record.startDate,
         type: dto.type ?? record.type,
         notes: dto.notes !== undefined ? dto.notes : record.notes,
+        maintainerId: dto.maintainerId !== undefined ? (dto.maintainerId ?? null) : record.maintainerId,
       },
+      include,
     });
   }
 
