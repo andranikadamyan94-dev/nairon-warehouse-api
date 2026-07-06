@@ -53,6 +53,7 @@ export class MaintenanceService {
           description: `Maintenance #${id}${record.maintainer ? ` — ${record.maintainer.name}` : ''}`,
           externalRef: `warehouse_maintenance:${id}`,
           date: new Date().toISOString(),
+          entityId: (record.asset as any).entityId ?? undefined,
         }),
       });
       if (res.ok) {
@@ -121,14 +122,16 @@ export class MaintenanceService {
     const limit = Number(query.limit ?? 10);
     const search = query.search as string | undefined;
 
-    const where: any = search
-      ? {
-          OR: [
-            { asset: { serialNumber: { contains: search, mode: 'insensitive' } } },
-            { asset: { item: { name: { contains: search, mode: 'insensitive' } } } },
-          ],
-        }
-      : {};
+    const entityId = query.entityId ? Number(query.entityId) : undefined;
+    const where: any = {
+      ...(entityId ? { asset: { entityId } } : {}),
+      ...(search ? {
+        OR: [
+          { asset: { serialNumber: { contains: search, mode: 'insensitive' } } },
+          { asset: { item: { name: { contains: search, mode: 'insensitive' } } } },
+        ],
+      } : {}),
+    };
 
     const order: 'asc' | 'desc' = query.sortOrder === 'asc' ? 'asc' : 'desc';
     const orderBy: any =
