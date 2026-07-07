@@ -920,7 +920,7 @@ export class ReservationsService {
 
     return this.prisma.$transaction(async (tx) => {
       const existingReservations = await tx.resourceReservation.findMany({
-        where: { taskId: taskId, status: { notIn: INACTIVE_STATUSES } },
+        where: { taskId: taskId, status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.COMPLETED] } },
       });
 
       const incomingItemIds = dto.resources.map((x) => x.itemId);
