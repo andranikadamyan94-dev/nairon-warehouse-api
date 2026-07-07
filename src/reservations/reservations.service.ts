@@ -780,7 +780,7 @@ export class ReservationsService {
     const reservations = await this.prisma.resourceReservation.findMany({
       where: {
         taskId,
-        status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.COMPLETED, ResourceReservationStatus.REJECTED] },
+        status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.COMPLETED] },
         replacedByReservationId: null,
       },
       include: {
