@@ -780,7 +780,7 @@ export class ReservationsService {
     const reservations = await this.prisma.resourceReservation.findMany({
       where: {
         taskId,
-        status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.COMPLETED] },
+        status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.COMPLETED, ResourceReservationStatus.REJECTED] },
         replacedByReservationId: null,
       },
       include: {
@@ -1013,10 +1013,34 @@ export class ReservationsService {
                 where: { reservationId: existing.id, releasedAt: null },
               });
 
+              if (activeAllocCount > resource.quantity) {
+                const excessAllocs = await tx.reservationAllocation.findMany({
+                  where: { reservationId: existing.id, releasedAt: null },
+                  orderBy: { id: 'desc' },
+                  take: activeAllocCount - resource.quantity,
+                });
+                for (const alloc of excessAllocs) {
+                  await tx.reservationAllocation.update({
+                    where: { id: alloc.id },
+                    data: { releasedAt: new Date() },
+                  });
+                  await tx.reservationAllocationHistory.create({
+                    data: {
+                      reservationId: existing.id,
+                      assetId: alloc.assetId,
+                      action: 'RELEASED',
+                      notes: 'Released due to quantity decrease',
+                    },
+                  });
+                }
+              }
+
+              const effectiveAllocCount = Math.min(activeAllocCount, resource.quantity);
+
               let newStatus: ResourceReservationStatus;
               if (unavailable) newStatus = ResourceReservationStatus.PENDING;
-              else if (activeAllocCount === 0) newStatus = ResourceReservationStatus.APPROVED;
-              else if (activeAllocCount >= resource.quantity) newStatus = ResourceReservationStatus.ALLOCATED;
+              else if (effectiveAllocCount === 0) newStatus = ResourceReservationStatus.APPROVED;
+              else if (effectiveAllocCount >= resource.quantity) newStatus = ResourceReservationStatus.ALLOCATED;
               else newStatus = ResourceReservationStatus.PARTIALLY_ALLOCATED;
 
               const quantityChanged = existing.quantity !== resource.quantity;
@@ -1081,10 +1105,35 @@ export class ReservationsService {
               where: { reservationId: existing.id, releasedAt: null },
             });
 
+            // Release excess allocations when quantity decreases
+            if (activeAllocCount > resource.quantity) {
+              const excessAllocs = await tx.reservationAllocation.findMany({
+                where: { reservationId: existing.id, releasedAt: null },
+                orderBy: { id: 'desc' },
+                take: activeAllocCount - resource.quantity,
+              });
+              for (const alloc of excessAllocs) {
+                await tx.reservationAllocation.update({
+                  where: { id: alloc.id },
+                  data: { releasedAt: new Date() },
+                });
+                await tx.reservationAllocationHistory.create({
+                  data: {
+                    reservationId: existing.id,
+                    assetId: alloc.assetId,
+                    action: 'RELEASED',
+                    notes: 'Released due to quantity decrease',
+                  },
+                });
+              }
+            }
+
+            const effectiveAllocCount = Math.min(activeAllocCount, resource.quantity);
+
             let newStatus: ResourceReservationStatus;
             if (unavailable) newStatus = ResourceReservationStatus.PENDING;
-            else if (activeAllocCount === 0) newStatus = ResourceReservationStatus.APPROVED;
-            else if (activeAllocCount >= resource.quantity) newStatus = ResourceReservationStatus.ALLOCATED;
+            else if (effectiveAllocCount === 0) newStatus = ResourceReservationStatus.APPROVED;
+            else if (effectiveAllocCount >= resource.quantity) newStatus = ResourceReservationStatus.ALLOCATED;
             else newStatus = ResourceReservationStatus.PARTIALLY_ALLOCATED;
 
             const quantityChanged = existing.quantity !== resource.quantity;
