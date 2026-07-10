@@ -44,6 +44,7 @@ export class MaintenanceService {
 
     const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
     let financeTransferId: number | undefined;
+    let financeError: string | undefined;
     try {
       const res = await fetch(`${financeUrl}/api/transfer/external`, {
         method: 'POST',
@@ -55,11 +56,22 @@ export class MaintenanceService {
           date: new Date().toISOString(),
         }),
       });
+      const body = await res.text();
       if (res.ok) {
-        const data = (await res.json()) as { id: number };
-        financeTransferId = data.id;
+        financeTransferId = (JSON.parse(body) as { id: number }).id;
+      } else {
+        financeError = `finance-api ${res.status} (url: ${financeUrl}): ${body}`;
       }
-    } catch {}
+    } catch (e: any) {
+      financeError = `network error reaching ${financeUrl}: ${e?.message ?? e}`;
+    }
+
+    // Same contract as procurement finalize: if finance never received the
+    // transfer, fail the request instead of stranding the record in
+    // PENDING_FINANCE with no matching transfer on the finance side.
+    if (financeError) {
+      throw new BadRequestException(`Finance notification failed — ${financeError}`);
+    }
 
     return this.prisma.maintenanceRecord.update({
       where: { id },
