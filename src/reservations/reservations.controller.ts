@@ -109,12 +109,20 @@ export class ReservationsController {
     return this.reservationsService.reject(+id, undefined, dto.reason);
   }
 
+  @Get('mine')
+  @ApiOperation({ summary: 'Reservations belonging to tasks assigned to the logged-in user' })
+  getMine(@LoggedInUser('id') userId: number, @Query() query: PaginationQueryDto) {
+    return this.reservationsService.getMine(userId, query);
+  }
+
   @Get()
+  @UseGuards(WarehouseStaffGuard)
   getAll(@Query() query: PaginationQueryDto) {
     return this.reservationsService.getAll(query);
   }
 
   @Get(':id')
+  @UseGuards(WarehouseStaffGuard)
   getOne(@Param('id') id: string) {
     return this.reservationsService.getOne(+id);
   }

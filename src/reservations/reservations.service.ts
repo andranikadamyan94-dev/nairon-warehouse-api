@@ -627,11 +627,34 @@ export class ReservationsService {
 
   // ─── getAll ──────────────────────────────────────────────────────────────────
 
-  async getAll(query: any) {
+  async getMine(userId: number, query: any) {
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    let taskIds: number[] = [];
+    try {
+      const res = await fetch(`${crmUrl}/api/project-tasks/internal/assigned/${userId}`, {
+        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { taskIds?: number[] };
+        taskIds = body?.taskIds ?? [];
+      } else {
+        this.logger.warn(`CRM assigned-tasks lookup failed for user ${userId}: ${res.status}`);
+      }
+    } catch (e: any) {
+      this.logger.warn(`CRM assigned-tasks lookup error for user ${userId}: ${e?.message}`);
+    }
+
+    if (!taskIds.length) {
+      return { data: [], total: 0, page: Number(query.page ?? 1), limit: Number(query.limit ?? 10) };
+    }
+    return this.getAll(query, { taskId: { in: taskIds } });
+  }
+
+  async getAll(query: any, extraWhere: any = null) {
     const page = Number(query.page ?? 1);
     const limit = Number(query.limit ?? 10);
 
-    const where: any = {};
+    const where: any = { ...(extraWhere ?? {}) };
 
     if (query.status) {
       where.status = query.status;
