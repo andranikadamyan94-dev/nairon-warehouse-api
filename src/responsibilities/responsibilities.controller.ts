@@ -7,6 +7,7 @@ import {
   ParseIntPipe,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -14,6 +15,7 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { ResponsibilitiesService } from './responsibilities.service';
 
 import { AssignResponsibilityDto } from './dto/assign-responsibility.dto';
+import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 
 @ApiTags('Responsibilities')
 @Controller('responsibilities')
@@ -22,6 +24,8 @@ export class ResponsibilitiesController {
     private readonly responsibilitiesService: ResponsibilitiesService,
   ) {}
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_responsibilities')
   @Post()
   @ApiOperation({
     summary: 'Assign asset responsibility',
@@ -36,6 +40,8 @@ export class ResponsibilitiesController {
     return this.responsibilitiesService.assign(dto);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_responsibilities')
   @Delete(':id')
   @ApiOperation({
     summary: 'Release responsibility',
@@ -50,6 +56,8 @@ export class ResponsibilitiesController {
     return this.responsibilitiesService.release(id);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('view_responsibilities', 'manage_responsibilities')
   @Get()
   getAll() {
     return this.responsibilitiesService.getAll();

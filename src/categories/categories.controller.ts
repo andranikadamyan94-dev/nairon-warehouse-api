@@ -7,6 +7,7 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 
 import { ApiTags } from '@nestjs/swagger';
@@ -15,12 +16,15 @@ import { CategoriesService } from './categories.service';
 
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
+import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 
 @ApiTags('Categories')
 @Controller('categories')
 export class CategoriesController {
   constructor(private readonly categoriesService: CategoriesService) {}
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_categories')
   @Post()
   create(
     @Body()
@@ -39,6 +43,8 @@ export class CategoriesController {
     return this.categoriesService.getTree(entityId ? Number(entityId) : undefined);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_categories')
   @Patch(':id')
   update(
     @Param('id')
@@ -50,6 +56,8 @@ export class CategoriesController {
     return this.categoriesService.update(+id, dto);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_categories')
   @Delete(':id')
   remove(
     @Param('id')

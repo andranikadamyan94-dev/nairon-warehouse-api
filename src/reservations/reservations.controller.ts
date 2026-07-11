@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { WarehouseStaffGuard } from '../auth/guards/warehouse-staff.guard';
+import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { LoggedInUser } from '../auth/decorators/logged-in-user.decorator';
 
 import { ReservationsService } from './reservations.service';
@@ -55,7 +55,8 @@ export class ReservationsController {
   }
 
   @Post('allocate')
-  @UseGuards(WarehouseStaffGuard)
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Allocate physical assets to reservations' })
   @ApiResponse({ status: 201 })
   allocate(@Body() dto: AllocateReservationDto, @LoggedInUser('id') userId: number) {
@@ -63,7 +64,8 @@ export class ReservationsController {
   }
 
   @Post('reallocate')
-  @UseGuards(WarehouseStaffGuard)
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Replace allocated asset' })
   @ApiResponse({ status: 200 })
   reallocate(@Body() dto: ReallocateResourceDto) {
@@ -71,7 +73,8 @@ export class ReservationsController {
   }
 
   @Delete('allocation')
-  @UseGuards(WarehouseStaffGuard)
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Release allocation' })
   @ApiResponse({ status: 200 })
   releaseAllocation(@Body() dto: ReleaseAllocationDto) {
@@ -80,7 +83,8 @@ export class ReservationsController {
 
   // Warehouse staff approves a consumable reservation (no specific asset to assign)
   @Patch(':id/approve')
-  @UseGuards(WarehouseStaffGuard)
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Approve consumable reservation' })
   approveConsumable(@Param('id') id: string, @LoggedInUser('id') userId: number) {
     return this.reservationsService.approveConsumable(+id, userId);
@@ -88,14 +92,16 @@ export class ReservationsController {
 
   // Cancel any active reservation, releasing any allocations
   @Patch(':id/cancel')
-  @UseGuards(WarehouseStaffGuard)
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Cancel a reservation' })
   cancel(@Param('id') id: string, @Body() dto: ReasonDto) {
     return this.reservationsService.cancel(+id, undefined, dto.reason);
   }
 
   @Patch(':id/uncancel')
-  @UseGuards(WarehouseStaffGuard)
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Reactivate a cancelled reservation' })
   uncancel(@Param('id') id: string) {
     return this.reservationsService.uncancel(+id);
@@ -103,7 +109,8 @@ export class ReservationsController {
 
   // Reject a PENDING reservation
   @Patch(':id/reject')
-  @UseGuards(WarehouseStaffGuard)
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Reject a pending reservation' })
   reject(@Param('id') id: string, @Body() dto: ReasonDto) {
     return this.reservationsService.reject(+id, undefined, dto.reason);
@@ -116,13 +123,15 @@ export class ReservationsController {
   }
 
   @Get()
-  @UseGuards(WarehouseStaffGuard)
+  @UseGuards(PermissionGuard)
+  @Permissions('view_reservations', 'manage_reservations')
   getAll(@Query() query: PaginationQueryDto) {
     return this.reservationsService.getAll(query);
   }
 
   @Get(':id')
-  @UseGuards(WarehouseStaffGuard)
+  @UseGuards(PermissionGuard)
+  @Permissions('view_reservations', 'manage_reservations')
   getOne(@Param('id') id: string) {
     return this.reservationsService.getOne(+id);
   }

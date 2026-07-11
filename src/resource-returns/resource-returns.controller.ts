@@ -3,8 +3,9 @@ import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { ResourceReturnsService } from './resource-returns.service';
 import { CreateReturnDto } from './dto/create-return.dto';
 import { ResourceReturnStatus } from '../common/enums/resource-return-status.enum';
-import { WarehouseStaffGuard } from '../auth/guards/warehouse-staff.guard';
+
 import { LoggedInUser } from '../auth/decorators/logged-in-user.decorator';
+import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 
 @ApiTags('resource-returns')
 @ApiBearerAuth()
@@ -29,7 +30,8 @@ export class ResourceReturnsController {
   }
 
   @Patch(':id/receive')
-  @UseGuards(WarehouseStaffGuard)
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_resource_returns')
   receive(@Param('id') id: string, @LoggedInUser('id') userId: number) {
     return this.service.receive(+id, userId);
   }

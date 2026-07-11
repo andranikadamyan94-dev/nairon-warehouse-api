@@ -8,6 +8,7 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -16,12 +17,15 @@ import { AssetsService } from './assets.service';
 
 import { CreateAssetDto } from './dto/create-asset.dto';
 import { UpdateAssetDto } from './dto/update-asset.dto';
+import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 
 @ApiTags('Assets')
 @Controller('assets')
 export class AssetsController {
   constructor(private readonly assetsService: AssetsService) {}
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_assets')
   @Post()
   @ApiOperation({
     summary: 'Create asset',
@@ -33,6 +37,8 @@ export class AssetsController {
     return this.assetsService.create(dto);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('view_assets', 'manage_assets')
   @Get()
   @ApiOperation({
     summary: 'Get all assets',
@@ -41,11 +47,15 @@ export class AssetsController {
     return this.assetsService.findAll(query);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('view_assets', 'manage_assets')
   @Get('item/:itemId')
   getItemHistory(@Param('itemId', ParseIntPipe) itemId: number) {
     return this.assetsService.getItemHistory(itemId);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('view_reservations', 'manage_reservations')
   @Get('available')
   getAvailable(
     @Query('itemId') itemId: string,
@@ -61,6 +71,8 @@ export class AssetsController {
     });
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('view_assets', 'manage_assets')
   @Get(':id')
   @ApiOperation({
     summary: 'Get asset by id',
@@ -72,6 +84,8 @@ export class AssetsController {
     return this.assetsService.findOne(id);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_assets')
   @Patch(':id')
   @ApiOperation({
     summary: 'Update asset',
@@ -86,6 +100,8 @@ export class AssetsController {
     return this.assetsService.update(id, dto);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_assets')
   @Delete(':id')
   @ApiOperation({
     summary: 'Delete asset',
@@ -97,6 +113,8 @@ export class AssetsController {
     return this.assetsService.remove(id);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('view_assets', 'manage_assets')
   @Get(':id/history')
   getHistory(
     @Param('id')

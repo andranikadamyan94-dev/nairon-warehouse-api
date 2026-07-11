@@ -1,4 +1,6 @@
-import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query,
+  UseGuards,
+} from '@nestjs/common';
 
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { IsArray, IsInt, IsOptional, IsNumber, ValidateNested } from 'class-validator';
@@ -7,6 +9,7 @@ import { Type } from 'class-transformer';
 import { AllocationsService } from './allocations.service';
 
 import { PaginationQueryDto } from '../common/dto/pagination-query.dto';
+import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 
 class ReturnItemDto {
   @IsInt()
@@ -29,6 +32,8 @@ class ReturnAllocationsDto {
 export class AllocationsController {
   constructor(private readonly allocationsService: AllocationsService) {}
 
+  @UseGuards(PermissionGuard)
+  @Permissions('view_reservations', 'manage_reservations')
   @Get()
   getAll(
     @Query()
@@ -37,6 +42,8 @@ export class AllocationsController {
     return this.allocationsService.getAll(query);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('view_reservations', 'manage_reservations')
   @Get(':id')
   getOne(
     @Param('id')
@@ -45,6 +52,8 @@ export class AllocationsController {
     return this.allocationsService.getOne(+id);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
   @Delete(':id')
   remove(
     @Param('id')
@@ -53,6 +62,8 @@ export class AllocationsController {
     return this.allocationsService.remove(+id);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
   @Post('return')
   @ApiOperation({ summary: 'Return allocated resources back to warehouse' })
   returnAllocations(@Body() dto: ReturnAllocationsDto) {

@@ -8,6 +8,7 @@ import {
   Patch,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -17,12 +18,15 @@ import { UpdateItemDto } from './dto/update-item.dto';
 
 import { ItemsService } from './items.service';
 import { GetItemsQueryDto } from './dto/get-items-query.dto';
+import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 
 @ApiTags('Items')
 @Controller('items')
 export class ItemsController {
   constructor(private readonly itemsService: ItemsService) {}
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_items')
   @Post()
   @ApiOperation({
     summary: 'Create item',
@@ -59,6 +63,8 @@ export class ItemsController {
     return this.itemsService.findOne(id);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_items')
   @Patch(':id')
   @ApiOperation({
     summary: 'Update item',
@@ -73,6 +79,8 @@ export class ItemsController {
     return this.itemsService.update(id, dto);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_items')
   @Delete(':id')
   @ApiOperation({
     summary: 'Delete item',

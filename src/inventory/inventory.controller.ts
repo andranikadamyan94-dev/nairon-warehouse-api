@@ -5,6 +5,7 @@ import {
   Param,
   ParseIntPipe,
   Post,
+  UseGuards,
 } from '@nestjs/common';
 
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -12,12 +13,15 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { InventoryService } from './inventory.service';
 
 import { InventoryMovementDto } from './dto/inventory-movement.dto';
+import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 
 @ApiTags('Inventory')
 @Controller('inventory')
 export class InventoryController {
   constructor(private readonly inventoryService: InventoryService) {}
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_inventory')
   @Post('movement')
   @ApiOperation({
     summary: 'Create inventory movement',
@@ -32,6 +36,8 @@ export class InventoryController {
     return this.inventoryService.createMovement(dto);
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('view_resources', 'manage_inventory', 'manage_items')
   @Get('movements')
   @ApiOperation({
     summary: 'Get inventory movements',
@@ -43,6 +49,8 @@ export class InventoryController {
     return this.inventoryService.getMovements();
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('view_resources', 'manage_inventory', 'manage_items')
   @Get('item/:itemId')
   @ApiOperation({
     summary: 'Get item inventory history',
