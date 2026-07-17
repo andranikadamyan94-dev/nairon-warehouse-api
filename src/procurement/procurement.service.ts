@@ -139,12 +139,17 @@ export class ProcurementService {
 
     const receiptUrl = this.fileService.upload(receiptFile);
 
+    // Large asset orders (bulk createMany) need more than the 5s default
     return this.prisma.$transaction(async (tx) => {
       for (const line of order.items) {
         if (line.item.type === 'ASSET') {
+          // One bulk insert — creating rows one-by-one blew the transaction
+          // timeout on large orders (e.g. 100k units → 100k round trips).
           const count = Math.round(line.quantity);
-          for (let i = 0; i < count; i++) {
-            await tx.asset.create({ data: { itemId: line.itemId } });
+          if (count > 0) {
+            await tx.asset.createMany({
+              data: Array.from({ length: count }, () => ({ itemId: line.itemId })),
+            });
           }
         } else {
           await tx.item.update({
@@ -173,7 +178,7 @@ export class ProcurementService {
         },
         include,
       });
-    });
+    }, { timeout: 60_000 });
   }
 
   async resubmit(id: number) {
