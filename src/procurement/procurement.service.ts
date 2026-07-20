@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { PrismaService } from 'prisma/prisma.service';
 import { ProcurementOrderStatus } from '../common/enums/procurement-order-status.enum';
 import { CreateProcurementDto } from './dto/create-procurement.dto';
@@ -17,7 +21,15 @@ export class ProcurementService {
     private readonly fileService: FileService,
   ) {}
 
-  async findAll(query?: { status?: string; supplierId?: string; search?: string; page?: string; limit?: string; sortBy?: string; sortOrder?: string }) {
+  async findAll(query?: {
+    status?: string;
+    supplierId?: string;
+    search?: string;
+    page?: string;
+    limit?: string;
+    sortBy?: string;
+    sortOrder?: string;
+  }) {
     const page = Number(query?.page ?? 1);
     const limit = Number(query?.limit ?? 20);
 
@@ -32,7 +44,10 @@ export class ProcurementService {
     }
 
     const order: 'asc' | 'desc' = query?.sortOrder === 'asc' ? 'asc' : 'desc';
-    const orderBy: any = query?.sortBy === 'status' ? { status: order } : { createdAt: query?.sortBy === 'createdAt' ? order : 'desc' };
+    const orderBy: any =
+      query?.sortBy === 'status'
+        ? { status: order }
+        : { createdAt: query?.sortBy === 'createdAt' ? order : 'desc' };
 
     const [data, total] = await Promise.all([
       this.prisma.procurementOrder.findMany({
@@ -49,7 +64,10 @@ export class ProcurementService {
   }
 
   async findOne(id: number) {
-    const order = await this.prisma.procurementOrder.findUnique({ where: { id }, include });
+    const order = await this.prisma.procurementOrder.findUnique({
+      where: { id },
+      include,
+    });
     if (!order) throw new NotFoundException('Procurement order not found');
     return order;
   }
@@ -128,63 +146,76 @@ export class ProcurementService {
       throw new BadRequestException('Order is awaiting finance approval');
     }
     if (order.status === ProcurementOrderStatus.DRAFT) {
-      throw new BadRequestException('Order must be finance-approved before receiving');
+      throw new BadRequestException(
+        'Order must be finance-approved before receiving',
+      );
     }
     if (order.status === ProcurementOrderStatus.FINANCE_REJECTED) {
-      throw new BadRequestException('Order was finance-rejected and cannot be received');
+      throw new BadRequestException(
+        'Order was finance-rejected and cannot be received',
+      );
     }
     if (!receiptFile) {
-      throw new BadRequestException('Receipt file is required when marking an order as received');
+      throw new BadRequestException(
+        'Receipt file is required when marking an order as received',
+      );
     }
 
     const receiptUrl = this.fileService.upload(receiptFile);
 
     // Large asset orders (bulk createMany) need more than the 5s default
-    return this.prisma.$transaction(async (tx) => {
-      for (const line of order.items) {
-        if (line.item.type === 'ASSET') {
-          // One bulk insert — creating rows one-by-one blew the transaction
-          // timeout on large orders (e.g. 100k units → 100k round trips).
-          const count = Math.round(line.quantity);
-          if (count > 0) {
-            await tx.asset.createMany({
-              data: Array.from({ length: count }, () => ({ itemId: line.itemId })),
+    return this.prisma.$transaction(
+      async (tx) => {
+        for (const line of order.items) {
+          if (line.item.type === 'ASSET') {
+            // One bulk insert — creating rows one-by-one blew the transaction
+            // timeout on large orders (e.g. 100k units → 100k round trips).
+            const count = Math.round(line.quantity);
+            if (count > 0) {
+              await tx.asset.createMany({
+                data: Array.from({ length: count }, () => ({
+                  itemId: line.itemId,
+                })),
+              });
+            }
+          } else {
+            await tx.item.update({
+              where: { id: line.itemId },
+              data: { quantity: { increment: line.quantity } },
             });
           }
-        } else {
-          await tx.item.update({
-            where: { id: line.itemId },
-            data: { quantity: { increment: line.quantity } },
+
+          await tx.inventoryMovement.create({
+            data: {
+              itemId: line.itemId,
+              quantity: line.quantity,
+              type: 'IN',
+              supplierId: order.supplierId ?? undefined,
+              notes: `Procurement order #${id} received`,
+            },
           });
         }
 
-        await tx.inventoryMovement.create({
+        return tx.procurementOrder.update({
+          where: { id },
           data: {
-            itemId: line.itemId,
-            quantity: line.quantity,
-            type: 'IN',
-            supplierId: order.supplierId ?? undefined,
-            notes: `Procurement order #${id} received`,
+            status: ProcurementOrderStatus.RECEIVED,
+            receivedAt: new Date(),
+            receiptUrl,
           },
+          include,
         });
-      }
-
-      return tx.procurementOrder.update({
-        where: { id },
-        data: {
-          status: ProcurementOrderStatus.RECEIVED,
-          receivedAt: new Date(),
-          receiptUrl,
-        },
-        include,
-      });
-    }, { timeout: 60_000 });
+      },
+      { timeout: 60_000 },
+    );
   }
 
   async resubmit(id: number) {
     const order = await this.findOne(id);
     if (order.status !== ProcurementOrderStatus.FINANCE_REJECTED) {
-      throw new BadRequestException('Only FINANCE_REJECTED orders can be resubmitted');
+      throw new BadRequestException(
+        'Only FINANCE_REJECTED orders can be resubmitted',
+      );
     }
     return this.prisma.procurementOrder.update({
       where: { id },
@@ -206,23 +237,30 @@ export class ProcurementService {
 
     const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
     const internalKey = process.env.INTERNAL_SECRET || '';
-    console.log(`[procurement:finalize] calling finance-api: POST ${financeUrl}/api/transfer/external | key_set=${!!internalKey} | key_len=${internalKey.length}`);
+    console.log(
+      `[procurement:finalize] calling finance-api: POST ${financeUrl}/api/transfer/external | key_set=${!!internalKey} | key_len=${internalKey.length}`,
+    );
 
     let financeTransferId: number | undefined;
     let financeError: string | undefined;
     try {
       const res = await fetch(`${financeUrl}/api/transfer/external`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-internal-secret': internalKey },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-internal-secret': internalKey,
+        },
         body: JSON.stringify({
           amount: total,
-          description: `Procurement order #${id}${order.supplier ? ` — ${order.supplier.name}` : ''}`,
+          description: `Գնման պատվեր #${id}${order.supplier ? ` — ${order.supplier.name}` : ''}`,
           externalRef: `warehouse_procurement:${id}`,
           date: new Date().toISOString(),
         }),
       });
       const body = await res.text();
-      console.log(`[procurement:finalize] finance-api response: status=${res.status} body=${body}`);
+      console.log(
+        `[procurement:finalize] finance-api response: status=${res.status} body=${body}`,
+      );
       if (res.ok) {
         financeTransferId = JSON.parse(body).id;
       } else {
@@ -234,7 +272,9 @@ export class ProcurementService {
     }
 
     if (financeError) {
-      throw new BadRequestException(`Finance notification failed — ${financeError}`);
+      throw new BadRequestException(
+        `Finance notification failed — ${financeError}`,
+      );
     }
 
     return this.prisma.procurementOrder.update({

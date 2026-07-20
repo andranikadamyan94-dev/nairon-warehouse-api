@@ -89,6 +89,14 @@ export class MaintenanceController {
 
   @Public()
   @UseGuards(InternalGuard)
+  @Get(':id/internal')
+  @ApiOperation({ summary: 'Get maintenance record details (internal)' })
+  getOneInternal(@Param('id', ParseIntPipe) id: number) {
+    return this.maintenanceService.getOne(id);
+  }
+
+  @Public()
+  @UseGuards(InternalGuard)
   @Post(':id/finance-callback')
   @ApiOperation({ summary: 'Finance approval callback (called by finance API)' })
   financeCallback(
