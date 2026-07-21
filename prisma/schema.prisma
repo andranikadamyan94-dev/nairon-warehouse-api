@@ -303,11 +303,16 @@ model Maintainer {
   id    Int    @id @default(autoincrement())
   uuid  String @unique @default(uuid())
 
-  name    String
-  phone   String?
-  email   String?
-  address String?
-  notes   String?
+  name           String
+  phone          String?
+  email          String?
+  address        String?
+  actingAddress  String?
+  managers       Json?
+  bankName       String?
+  bankAccount    String?
+  registryNumber String?
+  notes          String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -18,12 +18,19 @@ export class MaintainersService {
   }
 
   create(dto: CreateMaintainerDto) {
-    return this.prisma.maintainer.create({ data: dto });
+    const { managers, ...rest } = dto;
+    return this.prisma.maintainer.create({
+      data: { ...rest, ...(managers !== undefined && { managers: managers as any }) },
+    });
   }
 
   async update(id: number, dto: UpdateMaintainerDto) {
     await this.findOne(id);
-    return this.prisma.maintainer.update({ where: { id }, data: dto });
+    const { managers, ...rest } = dto;
+    return this.prisma.maintainer.update({
+      where: { id },
+      data: { ...rest, ...(managers !== undefined && { managers: managers as any }) },
+    });
   }
 
   async remove(id: number) {
