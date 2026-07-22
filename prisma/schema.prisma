@@ -394,7 +394,6 @@ model Supplier {
   bankName       String?
   bankAccount    String?
   registryNumber String?
-  deadline       DateTime?
   notes          String?
 
   createdAt DateTime @default(now())
