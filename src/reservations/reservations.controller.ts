@@ -35,6 +35,8 @@ export class ReservationsController {
   constructor(private readonly reservationsService: ReservationsService) {}
 
   @Post()
+  @UseGuards(PermissionGuard)
+  @Permissions('view_warehouse', 'manage_reservations')
   @ApiOperation({ summary: 'Create resource reservations' })
   @ApiResponse({ status: 201 })
   create(@Body() dto: CreateReservationDto) {
@@ -42,6 +44,8 @@ export class ReservationsController {
   }
 
   @Patch('task/:taskId')
+  @UseGuards(PermissionGuard)
+  @Permissions('view_warehouse', 'manage_reservations')
   updateTaskReservations(
     @Param('taskId') taskId: string,
     @Body() dto: CreateReservationDto,

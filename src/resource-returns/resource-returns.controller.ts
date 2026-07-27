@@ -14,6 +14,8 @@ export class ResourceReturnsController {
   constructor(private readonly service: ResourceReturnsService) {}
 
   @Post()
+  @UseGuards(PermissionGuard)
+  @Permissions('view_warehouse', 'manage_resource_returns')
   create(@Body() dto: CreateReturnDto) {
     return this.service.create(dto);
   }
@@ -37,6 +39,8 @@ export class ResourceReturnsController {
   }
 
   @Patch(':id/cancel')
+  @UseGuards(PermissionGuard)
+  @Permissions('view_warehouse', 'manage_resource_returns')
   cancel(@Param('id') id: string) {
     return this.service.cancel(+id);
   }
