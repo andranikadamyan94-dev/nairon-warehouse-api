@@ -48,8 +48,22 @@ enum ProcurementOrderStatus {
   PENDING_FINANCE_APPROVAL
   FINANCE_APPROVED
   FINANCE_REJECTED
+  /// Some but not all of the ordered quantity has arrived.
+  PARTIALLY_RECEIVED
   RECEIVED
+  /// Settled at less than the ordered quantity — the rest is not coming.
+  /// Distinct from RECEIVED so reporting can tell a short settlement from a
+  /// complete one.
+  CLOSED_SHORT
   CANCELLED
+}
+
+/// Reserved for the prepayment (avans) work: an order will be able to carry a
+/// prepayment settled up front and a balance settled once delivery closes.
+/// Only BALANCE is used today.
+enum ProcurementPaymentType {
+  PREPAYMENT
+  BALANCE
 }
 
 enum MaintenanceStatus {
@@ -445,13 +459,23 @@ model ProcurementOrder {
   createdBy         Int?
   financeTransferId Int?
 
+  /// Receipt/receivedAt of the FIRST delivery, kept so existing list views and
+  /// the finance flow keep working unchanged. Per-delivery documents live on
+  /// ProcurementDelivery.
   receiptUrl String?
   receivedAt DateTime?
+
+  /// Set when the order was settled short — the outstanding quantity is not
+  /// coming. Paired with status CLOSED_SHORT.
+  closedShortAt     DateTime?
+  closedShortReason String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  items ProcurementOrderItem[]
+  items      ProcurementOrderItem[]
+  deliveries ProcurementDelivery[]
+  payments   ProcurementPayment[]
 
   @@index([supplierId])
   @@index([status])
@@ -465,11 +489,75 @@ model ProcurementOrderItem {
   quantity  Float
   unitPrice Float?
 
+  /// Cached rollup of this line's ProcurementDeliveryItem quantities. Derivable,
+  /// but kept denormalised so list views and the "remaining" column don't have
+  /// to aggregate deliveries on every read.
+  receivedQuantity Float @default(0)
+
   order ProcurementOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
   item  Item              @relation(fields: [itemId],  references: [id], onDelete: Cascade)
 
+  deliveryItems ProcurementDeliveryItem[]
+
   @@index([orderId])
   @@index([itemId])
+}
+
+/// One physical delivery against an order. Orders can arrive in instalments,
+/// and each instalment comes with its own receipt/waybill — which is why this
+/// is a table rather than a counter on the order.
+model ProcurementDelivery {
+  id      Int @id @default(autoincrement())
+  orderId Int
+
+  receiptUrl String?
+  notes      String?
+  receivedBy Int?
+  receivedAt DateTime @default(now())
+
+  order ProcurementOrder          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  items ProcurementDeliveryItem[]
+
+  @@index([orderId])
+}
+
+model ProcurementDeliveryItem {
+  id          Int @id @default(autoincrement())
+  deliveryId  Int
+  orderItemId Int
+
+  quantity Float
+
+  delivery  ProcurementDelivery  @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  orderItem ProcurementOrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@index([deliveryId])
+  @@index([orderItemId])
+}
+
+/// A settlement against an order. Today an order has at most one BALANCE row;
+/// the prepayment work will add a PREPAYMENT row settled before delivery.
+/// Replaces the single ProcurementOrder.financeTransferId, which could not
+/// represent more than one payment.
+model ProcurementPayment {
+  id      Int @id @default(autoincrement())
+  orderId Int
+
+  type   ProcurementPaymentType
+  amount Float
+
+  /// finance-api Transfer id. The finance callback identifies which payment it
+  /// refers to by this, since both payments call back on the same order URL.
+  financeTransferId Int?
+  status            String  @default("PENDING")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order ProcurementOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([financeTransferId])
 }
 
 model ItemCategory {

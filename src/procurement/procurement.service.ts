@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { PrismaService } from 'prisma/prisma.service';
@@ -10,14 +11,23 @@ import { UpdateProcurementDto } from './dto/update-procurement.dto';
 import { FileService } from '../common/file.service';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
+import { ReceiveDeliveryDto } from './dto/receive-delivery.dto';
 
 const include = {
   supplier: true,
   items: { include: { item: true } },
+  // Delivery history — an order can arrive in instalments, each with its own
+  // receipt document.
+  deliveries: {
+    orderBy: { receivedAt: 'desc' as const },
+    include: { items: true },
+  },
 };
 
 @Injectable()
 export class ProcurementService {
+  private readonly logger = new Logger(ProcurementService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly fileService: FileService,
@@ -138,10 +148,26 @@ export class ProcurementService {
     });
   }
 
-  async receive(id: number, receiptFile?: Express.Multer.File) {
+  /**
+   * Record a delivery against an order. Orders can arrive in instalments, so
+   * this takes per-line quantities; omitting `lines` delivers the whole
+   * outstanding remainder, which is what the old all-or-nothing receive did.
+   *
+   * Stock, assets and inventory movements all follow what actually ARRIVED —
+   * never the ordered quantity.
+   */
+  async receive(
+    id: number,
+    receiptFile?: Express.Multer.File,
+    dto?: ReceiveDeliveryDto,
+    receivedBy?: number,
+  ) {
     const order = await this.findOne(id);
     if (order.status === ProcurementOrderStatus.RECEIVED) {
       throw new BadRequestException('Order already received');
+    }
+    if (order.status === ProcurementOrderStatus.CLOSED_SHORT) {
+      throw new BadRequestException('Order was closed short and cannot receive more');
     }
     if (order.status === ProcurementOrderStatus.CANCELLED) {
       throw new BadRequestException('Order is cancelled');
@@ -161,51 +187,111 @@ export class ProcurementService {
     }
     if (!receiptFile) {
       throw new BadRequestException(
-        'Receipt file is required when marking an order as received',
+        'Receipt file is required when recording a delivery',
       );
     }
 
+    const remaining = (line: { quantity: number; receivedQuantity: number }) =>
+      line.quantity - (line.receivedQuantity ?? 0);
+
+    // No explicit lines → deliver everything still outstanding.
+    const requested = dto?.lines?.length
+      ? dto.lines
+      : order.items
+          .filter((l) => remaining(l) > 0)
+          .map((l) => ({ orderItemId: l.id, quantity: remaining(l) }));
+
+    if (!requested.length) {
+      throw new BadRequestException('Nothing outstanding on this order');
+    }
+
+    // Validate before touching anything — a delivery is all-or-nothing.
+    const byId = new Map(order.items.map((l) => [l.id, l]));
+    const planned: { line: (typeof order.items)[number]; quantity: number }[] = [];
+    for (const entry of requested) {
+      const line = byId.get(entry.orderItemId);
+      if (!line) {
+        throw new BadRequestException(`Line ${entry.orderItemId} is not on order #${id}`);
+      }
+      if (entry.quantity <= 0) {
+        throw new BadRequestException(`Delivered quantity must be greater than 0`);
+      }
+      // Over-delivery is rejected: silently absorbing extra stock would break
+      // reconciliation against what finance was billed.
+      if (entry.quantity > remaining(line) + 1e-9) {
+        throw new BadRequestException(
+          `Cannot receive ${entry.quantity} of "${line.item.name}" — only ${remaining(line)} outstanding`,
+        );
+      }
+      planned.push({ line, quantity: entry.quantity });
+    }
+
     const receiptUrl = this.fileService.upload(receiptFile);
+    const isFirstDelivery = !order.receivedAt;
 
     // Large asset orders (bulk createMany) need more than the 5s default
-    const received = await this.prisma.$transaction(
+    const result = await this.prisma.$transaction(
       async (tx) => {
-        for (const line of order.items) {
+        const delivery = await tx.procurementDelivery.create({
+          data: {
+            orderId: id,
+            receiptUrl,
+            notes: dto?.notes,
+            receivedBy,
+          },
+        });
+
+        for (const { line, quantity } of planned) {
+          await tx.procurementDeliveryItem.create({
+            data: { deliveryId: delivery.id, orderItemId: line.id, quantity },
+          });
+
           if (line.item.type === 'ASSET') {
             // One bulk insert — creating rows one-by-one blew the transaction
             // timeout on large orders (e.g. 100k units → 100k round trips).
-            const count = Math.round(line.quantity);
+            // Counts the DELIVERED quantity, not the ordered one.
+            const count = Math.round(quantity);
             if (count > 0) {
               await tx.asset.createMany({
-                data: Array.from({ length: count }, () => ({
-                  itemId: line.itemId,
-                })),
+                data: Array.from({ length: count }, () => ({ itemId: line.itemId })),
               });
             }
           } else {
             await tx.item.update({
               where: { id: line.itemId },
-              data: { quantity: { increment: line.quantity } },
+              data: { quantity: { increment: quantity } },
             });
           }
+
+          await tx.procurementOrderItem.update({
+            where: { id: line.id },
+            data: { receivedQuantity: { increment: quantity } },
+          });
 
           await tx.inventoryMovement.create({
             data: {
               itemId: line.itemId,
-              quantity: line.quantity,
+              quantity,
               type: 'IN',
               supplierId: order.supplierId ?? undefined,
-              notes: `Procurement order #${id} received`,
+              notes: `Procurement order #${id}, delivery #${delivery.id}`,
             },
           });
         }
 
+        // Complete only when every line is fully satisfied.
+        const lines = await tx.procurementOrderItem.findMany({ where: { orderId: id } });
+        const complete = lines.every((l) => l.receivedQuantity >= l.quantity - 1e-9);
+
         return tx.procurementOrder.update({
           where: { id },
           data: {
-            status: ProcurementOrderStatus.RECEIVED,
-            receivedAt: new Date(),
-            receiptUrl,
+            status: complete
+              ? ProcurementOrderStatus.RECEIVED
+              : ProcurementOrderStatus.PARTIALLY_RECEIVED,
+            // The order-level receipt stays the FIRST one, so existing views
+            // and the finance flow keep behaving as before.
+            ...(isFirstDelivery ? { receivedAt: new Date(), receiptUrl } : {}),
           },
           include,
         });
@@ -213,24 +299,187 @@ export class ProcurementService {
       { timeout: 60_000 },
     );
 
-    // Receiving restocks consumables, so this mainly clears the low-stock latch.
+    // Restocking mainly clears the low-stock latch — only for what arrived.
     this.stockAlerts.check(
-      order.items.filter((l) => l.item.type !== 'ASSET').map((l) => l.itemId),
+      planned.filter((p) => p.line.item.type !== 'ASSET').map((p) => p.line.itemId),
     );
 
+    const complete = result.status === ProcurementOrderStatus.RECEIVED;
+
+    // On completion, reconcile finance against what actually arrived. Normally
+    // that equals the ordered value and settleWithFinance is a no-op; it only
+    // does work if quantities ended up differing.
+    if (complete) {
+      await this.settleWithFinance(
+        result,
+        this.deliveredValue(result.items),
+        'Պատվերն ամբողջությամբ ստացվել է',
+      );
+    }
     void this.notifications.send({
       permissions: ['receive_procurement_alerts', 'manage_warehouse'],
-      title: 'Գնման պատվերը ստացվել է',
-      body: `Գնման պատվեր #${id} ստացվել է և պաշարը թարմացվել է։`,
+      title: complete ? 'Գնման պատվերը ստացվել է' : 'Գնման պատվերը ստացվել է մասնակի',
+      body: complete
+        ? `Գնման պատվեր #${id} ամբողջությամբ ստացվել է և պաշարը թարմացվել է։`
+        : `Գնման պատվեր #${id}-ի մի մասը ստացվել է։ Մնացած քանակը դեռ սպասվում է։`,
       path: '/procurement',
       details: [
         { label: 'Պատվեր', value: `#${id}` },
         ...(order.supplier?.name ? [{ label: 'Մատակարար', value: order.supplier.name }] : []),
-        { label: 'Ապրանքատեսակներ', value: String(order.items.length) },
+        { label: 'Ստացված այս անգամ', value: String(planned.length) },
+        ...(complete ? [] : [{ label: 'Կարգավիճակ', value: 'Մասնակի ստացված' }]),
       ],
     });
 
-    return received;
+    return result;
+  }
+
+  /**
+   * Bill finance for what actually arrived.
+   *
+   * The order is authorized at the ordered value when it's finalized, which in
+   * finance terms is a PENDING transfer that finance approves (APPROVED =
+   * planned, not yet booked as expense). Settling corrects that amount to the
+   * delivered value before finance books it, so a short delivery is simply
+   * never paid for — no credit note, nothing to chase.
+   *
+   * Best-effort and never throws: failing to adjust must not block closing the
+   * order. If finance already booked the transfer the adjustment is refused,
+   * and that discrepancy is surfaced to a human rather than silently rewritten.
+   */
+  private async settleWithFinance(order: any, deliveredValue: number, reason: string) {
+    const transferId = order.financeTransferId;
+    if (!transferId) return;
+
+    const orderedValue = order.items.reduce(
+      (sum: number, l: any) => sum + l.quantity * (l.unitPrice ?? 0),
+      0,
+    );
+    if (Math.abs(orderedValue - deliveredValue) < 0.005) return; // nothing to correct
+
+    const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
+    try {
+      const res = await fetch(`${financeUrl}/api/transfer/external/${transferId}/amount`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-internal-secret': process.env.INTERNAL_SECRET || '',
+        },
+        body: JSON.stringify({ amount: deliveredValue, reason }),
+      });
+
+      if (res.ok) {
+        await this.prisma.procurementPayment.create({
+          data: {
+            orderId: order.id,
+            type: 'BALANCE',
+            amount: deliveredValue,
+            financeTransferId: transferId,
+            status: 'ADJUSTED',
+          },
+        });
+        this.logger.log(
+          `Order #${order.id}: finance transfer ${transferId} corrected ${orderedValue} → ${deliveredValue}`,
+        );
+        return;
+      }
+
+      // 409 = already booked. Anything else is a genuine failure; both need a person.
+      const detail = await res.text().catch(() => '');
+      this.logger.error(
+        `Order #${order.id}: could not correct finance transfer ${transferId} (${res.status}) ${detail}`,
+      );
+      void this.notifications.send({
+        permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+        title: 'Ֆինանսական գումարը չհամապատասխանեց',
+        body:
+          `Գնման պատվեր #${order.id}-ի գումարը չհաջողվեց ճշգրտել։ ` +
+          `Հաստատվել է ${Math.round(orderedValue).toLocaleString('hy-AM')} ֏, ` +
+          `փաստացի ստացվել է ${Math.round(deliveredValue).toLocaleString('hy-AM')} ֏ արժեքով։ ` +
+          `Անհրաժեշտ է ձեռքով ճշգրտում ֆինանսների հետ։`,
+        path: '/procurement',
+        details: [
+          { label: 'Պատվեր', value: `#${order.id}` },
+          { label: 'Ֆինանսական փոխանցում', value: `#${transferId}` },
+        ],
+      });
+    } catch (e: any) {
+      this.logger.error(`Order #${order.id}: finance adjust error — ${e?.message ?? e}`);
+    }
+  }
+
+  /** Value of what has actually been received on an order. */
+  private deliveredValue(items: any[]): number {
+    return items.reduce((sum, l) => sum + (l.receivedQuantity ?? 0) * (l.unitPrice ?? 0), 0);
+  }
+
+  /**
+   * Settle an order at less than the ordered quantity — the rest is not coming.
+   * Without this, partially delivered orders would sit outstanding forever.
+   * Creates no stock: only what actually arrived was ever added.
+   */
+  async closeShort(id: number, reason?: string) {
+    const order = await this.findOne(id);
+    if (
+      ![
+        ProcurementOrderStatus.PARTIALLY_RECEIVED,
+        ProcurementOrderStatus.ORDERED,
+        ProcurementOrderStatus.FINANCE_APPROVED,
+      ].includes(order.status as ProcurementOrderStatus)
+    ) {
+      throw new BadRequestException(
+        `An order with status ${order.status} cannot be closed short`,
+      );
+    }
+
+    const shortfallValue = order.items.reduce(
+      (sum, l) => sum + (l.quantity - (l.receivedQuantity ?? 0)) * (l.unitPrice ?? 0),
+      0,
+    );
+    const shortLines = order.items.filter(
+      (l) => (l.receivedQuantity ?? 0) < l.quantity - 1e-9,
+    );
+
+    const closed = await this.prisma.procurementOrder.update({
+      where: { id },
+      data: {
+        status: ProcurementOrderStatus.CLOSED_SHORT,
+        closedShortAt: new Date(),
+        closedShortReason: reason,
+      },
+      include,
+    });
+
+    // Pay only for what arrived — the authorized amount covered the full order.
+    await this.settleWithFinance(
+      order,
+      this.deliveredValue(order.items),
+      `Պատվերը փակվել է թերի${reason ? `՝ ${reason}` : ''}`,
+    );
+
+    // Finance was billed on the ordered quantity, so a short close means money
+    // out for goods that never arrived. Surface it rather than adjusting
+    // anything automatically — recovering it is a human negotiation.
+    void this.notifications.send({
+      permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+      title: 'Գնման պատվերը փակվել է թերի',
+      // The amount belongs in the body, not only in `details`: details render
+      // in the email, and email is off unless EMAIL_USER/EMAIL_PASS are set —
+      // the shortfall is the whole point of this alert.
+      body:
+        `Գնման պատվեր #${id} փակվել է չմատակարարված մնացորդով՝ ` +
+        `${Math.round(shortfallValue).toLocaleString('hy-AM')} ֏ արժեքի ${shortLines.length} տող։`,
+      path: '/procurement',
+      details: [
+        { label: 'Պատվեր', value: `#${id}` },
+        ...(order.supplier?.name ? [{ label: 'Մատակարար', value: order.supplier.name }] : []),
+        { label: 'Չմատակարարված տողեր', value: String(shortLines.length) },
+        { label: 'Չմատակարարված գումար', value: `${Math.round(shortfallValue).toLocaleString('hy-AM')} ֏` },
+        ...(reason ? [{ label: 'Պատճառ', value: reason }] : []),
+      ],
+    });
+
+    return closed;
   }
 
   async resubmit(id: number) {
