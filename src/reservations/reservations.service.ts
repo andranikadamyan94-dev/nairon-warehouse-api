@@ -9,6 +9,9 @@ import { PrismaService } from 'prisma/prisma.service';
 
 import { AvailabilityService } from '../availability/availability.service';
 
+import { StockAlertService } from '../common/notifications/stock-alert.service';
+import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
+
 import { AssetStatus } from '../common/enums/asset-status.enum';
 import { ItemType } from '../common/enums/item-type.enum';
 import { ItemUnit } from '../common/enums/item-unit.enum';
@@ -57,6 +60,8 @@ export class ReservationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly availabilityService: AvailabilityService,
+    private readonly stockAlerts: StockAlertService,
+    private readonly notifications: WarehouseNotificationsService,
   ) {}
 
   // ─── helpers ────────────────────────────────────────────────────────────────
@@ -189,6 +194,20 @@ export class ReservationsService {
       this.logger.warn(
         `CREATE reservation taskId=${dto.taskId} | unavailable: ${JSON.stringify(availability.unavailableResources)}`,
       );
+      // Only conflicting requests land in PENDING and need a human decision —
+      // freely available stock is auto-approved and needs no alert.
+      const names = [...new Set(availability.unavailableResources.map((r: any) => r.name ?? `#${r.itemId}`))];
+      void this.notifications.send({
+        permissions: ['receive_reservation_alerts', 'manage_warehouse'],
+        title: 'Ամրագրում սպասում է հաստատման',
+        body: 'Ամրագրման հայտ է ստացվել ռեսուրսի համար, որը հասանելի չէ նշված ժամկետում և սպասում է ձեր որոշմանը։',
+        path: '/reservations',
+        details: [
+          { label: 'Ռեսուրս(ներ)', value: names.join(', ') },
+          ...(dto.projectName ? [{ label: 'Նախագիծ', value: dto.projectName }] : []),
+          ...(dto.taskId ? [{ label: 'Առաջադրանք', value: `#${dto.taskId}` }] : []),
+        ],
+      });
     } else {
       this.logger.log(`CREATE reservation taskId=${dto.taskId} | all available`);
     }
@@ -310,7 +329,7 @@ export class ReservationsService {
       );
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.create({
         data: { reservationId, quantity: reservation.quantity },
       });
@@ -350,6 +369,11 @@ export class ReservationsService {
 
       return { success: true };
     });
+
+    // The main breach path: approving a consumable reservation takes stock out.
+    this.stockAlerts.check([reservation.item.id]);
+
+    return result;
   }
 
   // ─── cancel ──────────────────────────────────────────────────────────────────
@@ -489,7 +513,7 @@ export class ReservationsService {
 
     const isConsumable = allocation.reservation.item.type === ItemType.CONSUMABLE;
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.update({
         where: { id: allocationId },
         data: { releasedAt: new Date() },
@@ -549,6 +573,10 @@ export class ReservationsService {
 
       return { success: true };
     });
+
+    if (isConsumable) this.stockAlerts.check([allocation.reservation.itemId]);
+
+    return result;
   }
 
   // ─── reallocate ──────────────────────────────────────────────────────────────

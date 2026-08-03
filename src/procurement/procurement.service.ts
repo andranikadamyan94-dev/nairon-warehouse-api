@@ -8,6 +8,8 @@ import { ProcurementOrderStatus } from '../common/enums/procurement-order-status
 import { CreateProcurementDto } from './dto/create-procurement.dto';
 import { UpdateProcurementDto } from './dto/update-procurement.dto';
 import { FileService } from '../common/file.service';
+import { StockAlertService } from '../common/notifications/stock-alert.service';
+import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
 
 const include = {
   supplier: true,
@@ -19,6 +21,8 @@ export class ProcurementService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly fileService: FileService,
+    private readonly stockAlerts: StockAlertService,
+    private readonly notifications: WarehouseNotificationsService,
   ) {}
 
   async findAll(query?: {
@@ -164,7 +168,7 @@ export class ProcurementService {
     const receiptUrl = this.fileService.upload(receiptFile);
 
     // Large asset orders (bulk createMany) need more than the 5s default
-    return this.prisma.$transaction(
+    const received = await this.prisma.$transaction(
       async (tx) => {
         for (const line of order.items) {
           if (line.item.type === 'ASSET') {
@@ -208,6 +212,25 @@ export class ProcurementService {
       },
       { timeout: 60_000 },
     );
+
+    // Receiving restocks consumables, so this mainly clears the low-stock latch.
+    this.stockAlerts.check(
+      order.items.filter((l) => l.item.type !== 'ASSET').map((l) => l.itemId),
+    );
+
+    void this.notifications.send({
+      permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+      title: 'Գնման պատվերը ստացվել է',
+      body: `Գնման պատվեր #${id} ստացվել է և պաշարը թարմացվել է։`,
+      path: '/procurement',
+      details: [
+        { label: 'Պատվեր', value: `#${id}` },
+        ...(order.supplier?.name ? [{ label: 'Մատակարար', value: order.supplier.name }] : []),
+        { label: 'Ապրանքատեսակներ', value: String(order.items.length) },
+      ],
+    });
+
+    return received;
   }
 
   async resubmit(id: number) {

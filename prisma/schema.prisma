@@ -82,6 +82,20 @@ model Item {
 
   quantity Float @default(0)
 
+  /// Low-stock threshold. Alerts fire when quantity <= minQuantity.
+  /// NULL means no alerting for this item, so the feature is opt-in rather than
+  /// every item alerting the moment it reaches zero. CONSUMABLE only — an
+  /// ASSET's availability derives from its individual Asset rows, not this
+  /// counter, so a threshold here would be meaningless.
+  minQuantity Float?
+
+  /// Set when a low-stock alert has been sent, cleared when stock recovers
+  /// above the threshold. This is what makes the alert fire once per breach
+  /// instead of on every write while stock sits low — quantity is mutated from
+  /// six different paths, several via increment/decrement inside transactions
+  /// where the previous value isn't available to compare against.
+  lowStockNotifiedAt DateTime?
+
   notes String?
 
   createdAt DateTime @default(now())

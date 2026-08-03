@@ -6,18 +6,23 @@ import { CreateItemDto } from './dto/create-item.dto';
 import { UpdateItemDto } from './dto/update-item.dto';
 import { GetItemsQueryDto } from './dto/get-items-query.dto';
 import { CategoriesService } from 'src/categories/categories.service';
+import { StockAlertService } from '../common/notifications/stock-alert.service';
 
 @Injectable()
 export class ItemsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly categoriesService: CategoriesService,
+    private readonly stockAlerts: StockAlertService,
   ) {}
 
-  create(dto: CreateItemDto) {
-    return this.prisma.item.create({
+  async create(dto: CreateItemDto) {
+    const item = await this.prisma.item.create({
       data: dto,
     });
+    // An item can be created already at or below its threshold.
+    this.stockAlerts.check([item.id]);
+    return item;
   }
 
   async findAll(query?: GetItemsQueryDto) {
@@ -71,10 +76,14 @@ export class ItemsService {
   async update(id: number, dto: UpdateItemDto) {
     await this.findOne(id);
 
-    return this.prisma.item.update({
+    const item = await this.prisma.item.update({
       where: { id },
       data: dto,
     });
+    // Re-evaluate: this edit may have set/raised the threshold or changed the
+    // quantity directly, either of which can put the item below the line.
+    this.stockAlerts.check([id]);
+    return item;
   }
 
   async remove(id: number) {

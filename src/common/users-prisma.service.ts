@@ -45,4 +45,27 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
     ];
     return { isSuperAdmin, permissionNames };
   }
+
+  /**
+   * Everyone who holds any of the given permissions, with the contact details
+   * needed to notify them. Super-admins (role level 0) are always included —
+   * they bypass the permission guard, so they hold every permission in effect.
+   *
+   * One query: the warehouse reads the shared users DB directly rather than
+   * calling auth over HTTP, so there is no per-user round trip.
+   */
+  async getNotificationRecipients(
+    permissions: string[],
+  ): Promise<{ id: number; email: string; firstName: string; lastName: string }[]> {
+    if (!permissions.length) return [];
+    return this.$queryRaw<{ id: number; email: string; firstName: string; lastName: string }[]>`
+      SELECT DISTINCT u.id, u.email, u."firstName", u."lastName"
+      FROM "User" u
+      JOIN "UserRole" ur ON ur."userId" = u.id
+      JOIN "Role" r ON r.id = ur."roleId"
+      LEFT JOIN "RolePermission" rp ON rp."roleId" = r.id
+      LEFT JOIN "Permission" p ON p.id = rp."permissionId"
+      WHERE p.name = ANY(${permissions}::text[]) OR r."level" = 0
+    `;
+  }
 }

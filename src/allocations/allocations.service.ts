@@ -1,12 +1,16 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
+import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { ItemType } from '../common/enums/item-type.enum';
 import { ResourceReservationStatus } from '../common/enums/resource-reservation-status.enum';
 
 @Injectable()
 export class AllocationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly stockAlerts: StockAlertService,
+  ) {}
 
   async getAll(query: any) {
     const page = Number(query.page ?? 1);
@@ -38,7 +42,8 @@ export class AllocationsService {
   }
 
   async returnAllocations(returns: { allocationId: number; quantity?: number }[]) {
-    return this.prisma.$transaction(async (tx) => {
+    const touchedItemIds: number[] = [];
+    const result = await this.prisma.$transaction(async (tx) => {
       for (const entry of returns) {
         const allocation = await tx.reservationAllocation.findUnique({
           where: { id: entry.allocationId },
@@ -77,6 +82,7 @@ export class AllocationsService {
             where: { id: allocation.reservation.itemId },
             data: { quantity: { increment: returnQty } },
           });
+          touchedItemIds.push(allocation.reservation.itemId);
 
           await tx.inventoryMovement.create({
             data: {
@@ -113,6 +119,12 @@ export class AllocationsService {
 
       return { success: true };
     });
+
+    // Stock only goes up here, so this can't breach a threshold — but it can
+    // clear the latch so the next genuine breach alerts again.
+    this.stockAlerts.check(touchedItemIds);
+
+    return result;
   }
 
   async remove(id: number) {
@@ -125,7 +137,7 @@ export class AllocationsService {
 
     const isConsumable = allocation.reservation.item.type === ItemType.CONSUMABLE;
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.update({
         where: { id },
         data: { releasedAt: new Date() },
@@ -177,5 +189,9 @@ export class AllocationsService {
 
       return { success: true };
     });
+
+    if (isConsumable) this.stockAlerts.check([allocation.reservation.itemId]);
+
+    return result;
   }
 }
