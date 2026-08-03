@@ -54,6 +54,16 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
    * One query: the warehouse reads the shared users DB directly rather than
    * calling auth over HTTP, so there is no per-user round trip.
    */
+  /** Contact details for specific users — for notifications aimed at named people. */
+  async getUsersByIds(
+    ids: number[],
+  ): Promise<{ id: number; email: string; firstName: string; lastName: string }[]> {
+    if (!ids.length) return [];
+    return this.$queryRaw<{ id: number; email: string; firstName: string; lastName: string }[]>`
+      SELECT id, email, "firstName", "lastName" FROM "User" WHERE id = ANY(${ids}::int[])
+    `;
+  }
+
   async getNotificationRecipients(
     permissions: string[],
   ): Promise<{ id: number; email: string; firstName: string; lastName: string }[]> {

@@ -46,7 +46,7 @@ export class WarehouseNotificationsService {
     }
   }
 
-  /** Resolve recipients and deliver over both channels. Never throws. */
+  /** Resolve recipients by permission and deliver over both channels. Never throws. */
   async send(n: WarehouseNotification): Promise<void> {
     try {
       const recipients = await this.usersPrisma.getNotificationRecipients(n.permissions);
@@ -54,14 +54,38 @@ export class WarehouseNotificationsService {
         this.logger.warn(`No recipients hold [${n.permissions.join(', ')}] — "${n.title}" not sent`);
         return;
       }
-      const url = this.clientUrl(n.path);
-      await Promise.allSettled([
-        this.sendInApp(recipients.map((r) => r.id), n, url),
-        this.sendEmail(recipients.map((r) => r.email).filter(Boolean), n, url),
-      ]);
+      await this.deliver(recipients, n);
     } catch (e: any) {
       this.logger.error(`Notification "${n.title}" failed: ${e?.message ?? e}`);
     }
+  }
+
+  /**
+   * Deliver to specific users rather than a permission audience — used for
+   * requester-facing alerts, which are routed to the assignees of the linked
+   * CRM task (a reservation itself records no requester).
+   */
+  async sendToUsers(userIds: number[], n: Omit<WarehouseNotification, 'permissions'>): Promise<void> {
+    try {
+      const ids = [...new Set(userIds.filter((id) => Number.isFinite(id)))];
+      if (!ids.length) return;
+      const recipients = await this.usersPrisma.getUsersByIds(ids);
+      if (!recipients.length) return;
+      await this.deliver(recipients, { ...n, permissions: [] });
+    } catch (e: any) {
+      this.logger.error(`Notification "${n.title}" failed: ${e?.message ?? e}`);
+    }
+  }
+
+  private async deliver(
+    recipients: { id: number; email: string }[],
+    n: WarehouseNotification,
+  ): Promise<void> {
+    const url = this.clientUrl(n.path);
+    await Promise.allSettled([
+      this.sendInApp(recipients.map((r) => r.id), n, url),
+      this.sendEmail(recipients.map((r) => r.email).filter(Boolean), n, url),
+    ]);
   }
 
   private clientUrl(path?: string): string {

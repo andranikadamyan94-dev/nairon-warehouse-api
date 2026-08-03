@@ -66,6 +66,56 @@ export class ReservationsService {
 
   // ─── helpers ────────────────────────────────────────────────────────────────
 
+  /**
+   * Who to tell about a reservation's outcome. A reservation records no
+   * requester (ResourceReservation has no createdBy), so the audience is the
+   * assignees of the CRM task it was raised against. Reservations with no
+   * taskId have nobody to notify.
+   */
+  private async taskAssignees(taskId: number | null | undefined): Promise<number[]> {
+    if (!taskId) return [];
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    try {
+      const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
+        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+      });
+      if (!res.ok) {
+        this.logger.warn(`CRM task lookup failed for task ${taskId}: ${res.status}`);
+        return [];
+      }
+      // The internal endpoint resolves assignees to USER objects — `id` is the
+      // user id. (The CRM table column is `userId`; don't reach for that here,
+      // it isn't in the response and would silently yield zero recipients.)
+      const task = (await res.json()) as { assignees?: { id?: number; userId?: number }[] };
+      return (task?.assignees ?? [])
+        .map((a) => a.id ?? a.userId)
+        .filter((id): id is number => Number.isFinite(id));
+    } catch (e: any) {
+      this.logger.warn(`CRM task lookup error for task ${taskId}: ${e?.message}`);
+      return [];
+    }
+  }
+
+  /** Tell the requesting task's assignees what happened to their reservation. */
+  private async notifyRequesters(
+    reservation: { taskId?: number | null; projectName?: string | null },
+    title: string,
+    body: string,
+    details: { label: string; value: string }[] = [],
+  ): Promise<void> {
+    const userIds = await this.taskAssignees(reservation.taskId);
+    if (!userIds.length) return;
+    await this.notifications.sendToUsers(userIds, {
+      title,
+      body,
+      path: '/reservations',
+      details: [
+        ...details,
+        ...(reservation.projectName ? [{ label: 'Նախագիծ', value: reservation.projectName }] : []),
+      ],
+    });
+  }
+
   private async writeStatusHistory(
     tx: any,
     reservationId: number,
@@ -221,7 +271,11 @@ export class ReservationsService {
   // ─── allocate (assets) ───────────────────────────────────────────────────────
 
   async allocate(dto: AllocateReservationDto, allocatedBy?: number) {
-    return this.prisma.$transaction(async (tx) => {
+    // Only reservations that reached ALLOCATED are worth telling the requester
+    // about — a partial allocation isn't yet a usable outcome.
+    const fullyAllocated: { taskId: number | null; projectName: string | null; quantity: number }[] = [];
+
+    const result = await this.prisma.$transaction(async (tx) => {
       for (const allocation of dto.allocations) {
         const reservation = await tx.resourceReservation.findUnique({
           where: { id: allocation.reservationId },
@@ -294,10 +348,29 @@ export class ReservationsService {
           data: { status: newStatus },
         });
         await this.writeStatusHistory(tx, reservation.id, reservation.status as ResourceReservationStatus, newStatus, { performedBy: allocatedBy });
+
+        if (newStatus === ResourceReservationStatus.ALLOCATED) {
+          fullyAllocated.push({
+            taskId: reservation.taskId,
+            projectName: reservation.projectName,
+            quantity: reservation.quantity,
+          });
+        }
       }
 
       return { success: true };
     });
+
+    for (const r of fullyAllocated) {
+      void this.notifyRequesters(
+        r,
+        'Ամրագրումը հաստատվել է',
+        'Ձեր առաջադրանքի համար պահանջված ռեսուրսը տրամադրվել է։',
+        [{ label: 'Քանակ', value: String(r.quantity) }],
+      );
+    }
+
+    return result;
   }
 
   // ─── approve consumable ──────────────────────────────────────────────────────
@@ -372,6 +445,16 @@ export class ReservationsService {
 
     // The main breach path: approving a consumable reservation takes stock out.
     this.stockAlerts.check([reservation.item.id]);
+
+    void this.notifyRequesters(
+      reservation,
+      'Ամրագրումը հաստատվել է',
+      'Ձեր առաջադրանքի համար կատարված ամրագրումը հաստատվել է և ռեսուրսը տրամադրվել է։',
+      [
+        { label: 'Ռեսուրս', value: reservation.item.name },
+        { label: 'Քանակ', value: String(reservation.quantity) },
+      ],
+    );
 
     return result;
   }
@@ -465,7 +548,7 @@ export class ReservationsService {
       throw new BadRequestException(`Reservation is already ${reservation.status}`);
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       const activeAllocations = await tx.reservationAllocation.findMany({
         where: { reservationId, releasedAt: null },
       });
@@ -499,6 +582,15 @@ export class ReservationsService {
       );
       return { success: true };
     });
+
+    void this.notifyRequesters(
+      reservation,
+      'Ամրագրումը մերժվել է',
+      'Ձեր առաջադրանքի համար կատարված ամրագրման հայտը մերժվել է։',
+      reason ? [{ label: 'Պատճառ', value: reason }] : [],
+    );
+
+    return result;
   }
 
   // ─── release allocation ──────────────────────────────────────────────────────
