@@ -559,10 +559,30 @@ export class ProcurementService {
     });
   }
 
+  /**
+   * Called by finance when a transfer is approved or rejected.
+   *
+   * Idempotent on purpose: if the order is already in the state being asked
+   * for, report success instead of failing. Finance treats a non-2xx here as a
+   * hard error and rolls its own approval back, so a strict check turned any
+   * retry into a permanent deadlock — warehouse had already moved on, finance
+   * had rolled back, and every subsequent attempt hit the same 400.
+   */
   async financeCallback(id: number, status: 'APPROVED' | 'REJECTED') {
     const order = await this.findOne(id);
+    const target =
+      status === 'APPROVED'
+        ? ProcurementOrderStatus.FINANCE_APPROVED
+        : ProcurementOrderStatus.FINANCE_REJECTED;
+
+    if (order.status === target) {
+      this.logger.log(`Order #${id} is already ${target} — finance callback treated as a no-op`);
+      return order;
+    }
     if (order.status !== ProcurementOrderStatus.PENDING_FINANCE_APPROVAL) {
-      throw new BadRequestException('Order is not pending finance approval');
+      throw new BadRequestException(
+        `Order #${id} is ${order.status}, not awaiting finance approval`,
+      );
     }
     return this.prisma.procurementOrder.update({
       where: { id },

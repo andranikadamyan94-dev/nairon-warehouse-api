@@ -101,13 +101,24 @@ export class MaintenanceService {
     });
   }
 
+  /**
+   * Idempotent for the same reason as the procurement callback: finance treats
+   * a non-2xx as a hard error and rolls its own approval back, so re-notifying
+   * an already-updated record must not fail.
+   */
   async financeCallback(id: number, status: 'APPROVED' | 'REJECTED') {
     const record = await this.prisma.maintenanceRecord.findUnique({
       where: { id },
     });
     if (!record) throw new NotFoundException('Maintenance record not found');
+
+    const target = status === 'APPROVED' ? 'FINANCE_APPROVED' : 'FINANCE_REJECTED';
+    if (record.status === target) return record;
+
     if (record.status !== 'PENDING_FINANCE')
-      throw new BadRequestException('Record is not pending finance approval');
+      throw new BadRequestException(
+        `Maintenance record #${id} is ${record.status}, not awaiting finance approval`,
+      );
 
     return this.prisma.maintenanceRecord.update({
       where: { id },
