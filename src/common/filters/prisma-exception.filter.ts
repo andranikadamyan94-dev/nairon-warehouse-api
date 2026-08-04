@@ -41,11 +41,14 @@ export class PrismaExceptionFilter implements ExceptionFilter {
 
     let status = HttpStatus.BAD_REQUEST;
     let message = 'Հարցումը սխալ է';
+    // Returned alongside the message so a form can attach the error to the
+    // offending input instead of only raising a toast.
+    let fields: string[] = [];
 
     switch (exception.code) {
       case 'P2002': {
         status = HttpStatus.CONFLICT;
-        const fields = this.fields(exception);
+        fields = this.fields(exception);
         message = fields.length
           ? `«${fields.join('», «')}» դաշտի արժեքն արդեն օգտագործվում է։ Նշեք այլ արժեք։`
           : 'Այս արժեքով գրառում արդեն գոյություն ունի։';
@@ -74,6 +77,7 @@ export class PrismaExceptionFilter implements ExceptionFilter {
       statusCode: status,
       message,
       error: exception.code,
+      ...(fields.length ? { fields } : {}),
     });
   }
 }
