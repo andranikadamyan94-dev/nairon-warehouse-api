@@ -15,9 +15,18 @@ const ALLOWED_MIME_TYPES = new Set([
 ]);
 const SAFE_EXT_RE = /^\.[a-z0-9]+$/i;
 
-function getBaseUrl(): string {
-  return (process.env.PUBLIC_API_URL || `http://localhost:${process.env.PORT || 3005}`).replace(/\/$/, '');
-}
+/**
+ * Stored files are referenced by a path relative to the API root, never by an
+ * absolute URL.
+ *
+ * This used to return `${PUBLIC_API_URL}/uploads/...`, with PUBLIC_API_URL
+ * unset everywhere — so staging persisted `http://localhost:3005/uploads/...`
+ * into the database and every receipt link pointed at the reader's own
+ * machine. Baking a hostname into stored data makes it wrong in every
+ * environment except the one that wrote it; a relative path is correct in all
+ * of them, and the client resolves it against whatever API base it is using.
+ */
+const UPLOADS_PATH = '/uploads';
 
 @Injectable()
 export class FileService {
@@ -35,6 +44,6 @@ export class FileService {
     if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
     const filename = `${crypto.randomUUID()}${ext}`;
     fs.writeFileSync(path.join(UPLOADS_DIR, filename), file.buffer);
-    return `${getBaseUrl()}/uploads/${filename}`;
+    return `${UPLOADS_PATH}/${filename}`;
   }
 }

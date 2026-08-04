@@ -10,7 +10,13 @@ import { PrismaExceptionFilter } from './common/filters/prisma-exception.filter'
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   (app.getHttpServer() as any).maxHeaderSize = 65536;
-  app.useStaticAssets(path.join(process.cwd(), 'uploads'), { prefix: '/uploads' });
+  // Served under both prefixes. The gateway strips its /warehouse segment and
+  // prepends /api before proxying, so a client resolving a stored "/uploads/x"
+  // against its API base arrives here as /api/uploads/x. The bare /uploads
+  // mount is kept so absolute URLs stored before this change still resolve.
+  const uploadsDir = path.join(process.cwd(), 'uploads');
+  app.useStaticAssets(uploadsDir, { prefix: '/uploads' });
+  app.useStaticAssets(uploadsDir, { prefix: '/api/uploads' });
 
   app.enableCors({
     origin: [
