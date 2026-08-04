@@ -10,6 +10,7 @@ import { PrismaService } from 'prisma/prisma.service';
 import { AvailabilityService } from '../availability/availability.service';
 
 import { StockAlertService } from '../common/notifications/stock-alert.service';
+import { UsersPrismaService } from '../common/users-prisma.service';
 import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
 
 import { AssetStatus } from '../common/enums/asset-status.enum';
@@ -62,7 +63,156 @@ export class ReservationsService {
     private readonly availabilityService: AvailabilityService,
     private readonly stockAlerts: StockAlertService,
     private readonly notifications: WarehouseNotificationsService,
+    private readonly usersPrisma: UsersPrismaService,
   ) {}
+
+  /**
+   * Full event history for a task, independent of the `items` list.
+   *
+   * `items` deliberately shows only live reservations; history must not. A
+   * cancelled or replaced reservation is exactly where the interesting events
+   * are ("who removed the excavator, and when"), and the old query filtered
+   * those rows out — taking their history with them.
+   *
+   * Merges three sources: status transitions, asset-level allocation events,
+   * and returns.
+   */
+  private async buildTaskHistory(taskId: number) {
+    const reservations = await this.prisma.resourceReservation.findMany({
+      where: { taskId },              // no status / replacedBy filter — that is the point
+      include: {
+        item: { select: { name: true, unit: true } },
+        statusHistory: true,
+        allocationHistory: { include: { asset: { select: { name: true, serialNumber: true } } } },
+        returns: true,
+      },
+    });
+    if (!reservations.length) return [];
+
+    type Entry = {
+      kind: 'STATUS' | 'ALLOCATION' | 'RETURN';
+      reservationId: number;
+      itemName: string;
+      performedAt: Date;
+      performedById?: number | null;
+      performedByName?: string;
+      reason?: string;
+      fromStatus?: string;
+      toStatus?: string;
+      previousQuantity?: number;
+      newQuantity?: number;
+      action?: string;
+      assetLabel?: string;
+      quantity?: number;
+      returnStatus?: string;
+      /** Day-slots this entry covers once grouped (HOUR items only). */
+      dates?: string[];
+      groupedCount?: number;
+    };
+
+    const entries: Entry[] = [];
+
+    for (const r of reservations) {
+      for (const h of r.statusHistory) {
+        entries.push({
+          kind: 'STATUS',
+          reservationId: r.id,
+          itemName: r.item.name,
+          performedAt: h.performedAt,
+          performedById: h.performedBy,
+          reason: h.reason ?? undefined,
+          fromStatus: h.fromStatus ?? undefined,
+          toStatus: h.toStatus,
+          previousQuantity: h.previousQuantity ?? undefined,
+          newQuantity: h.newQuantity ?? undefined,
+          dates: [getYerevanDateKey(r.startDate)],
+        });
+      }
+      for (const a of r.allocationHistory) {
+        entries.push({
+          kind: 'ALLOCATION',
+          reservationId: r.id,
+          itemName: r.item.name,
+          performedAt: a.performedAt,
+          performedById: a.performedBy,
+          reason: a.notes ?? undefined,
+          action: a.action,
+          assetLabel: a.asset
+            ? [a.asset.name, a.asset.serialNumber].filter(Boolean).join(' · ') || undefined
+            : undefined,
+        });
+      }
+      for (const ret of r.returns) {
+        entries.push({
+          kind: 'RETURN',
+          reservationId: r.id,
+          itemName: r.item.name,
+          performedAt: ret.receivedAt ?? ret.requestedAt,
+          performedById: ret.receivedBy ?? ret.requestedBy,
+          reason: ret.notes ?? undefined,
+          quantity: ret.quantity,
+          returnStatus: ret.status,
+        });
+      }
+    }
+
+    const grouped = this.groupHourlyStatusEntries(entries);
+
+    // Resolve actor names in one query rather than per entry.
+    const ids = [...new Set(grouped.map((e) => e.performedById).filter((v): v is number => !!v))];
+    const users = ids.length ? await this.usersPrisma.getUsersByIds(ids) : [];
+    const nameById = new Map(users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
+
+    return grouped
+      .map(({ performedById, ...e }) => ({
+        ...e,
+        performedByName: performedById ? nameById.get(performedById) : undefined,
+      }))
+      .sort((a, b) => new Date(a.performedAt).getTime() - new Date(b.performedAt).getTime());
+  }
+
+  /**
+   * HOUR-unit items are stored as one reservation row per working day, so a
+   * single edit fans out into one identical status entry per day. Collapse
+   * entries that represent the SAME action — same item, same transition, same
+   * reason, within a few seconds of each other — into one, carrying the days
+   * it covered.
+   *
+   * Keyed on the action rather than on the item, so days that genuinely
+   * diverged (one rejected, the rest approved) do not share a key and stay
+   * visible as separate entries. For non-HOUR items there is one row per item,
+   * so this never fires.
+   *
+   * The time bucket is a heuristic: there is no correlation id tying the rows
+   * written by one call together. Two distinct actions on the same item with
+   * the same transition and reason inside the window would merge — implausible,
+   * and harmless if it happened. A `batchId` column would make it exact.
+   */
+  private groupHourlyStatusEntries<T extends {
+    kind: string; itemName: string; fromStatus?: string; toStatus?: string;
+    reason?: string; performedAt: Date; dates?: string[]; groupedCount?: number;
+  }>(entries: T[]): T[] {
+    const BUCKET_MS = 5000;
+    const out: T[] = [];
+    const byKey = new Map<string, T>();
+
+    for (const e of entries) {
+      if (e.kind !== 'STATUS') { out.push(e); continue; }
+      const bucket = Math.floor(new Date(e.performedAt).getTime() / BUCKET_MS);
+      const key = [e.itemName, e.fromStatus ?? '', e.toStatus ?? '', e.reason ?? '', bucket].join('|');
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, { ...e, groupedCount: 1 });
+        continue;
+      }
+      existing.groupedCount = (existing.groupedCount ?? 1) + 1;
+      existing.dates = [...new Set([...(existing.dates ?? []), ...(e.dates ?? [])])].sort();
+      // Keep the earliest timestamp of the group.
+      if (new Date(e.performedAt) < new Date(existing.performedAt)) existing.performedAt = e.performedAt;
+    }
+
+    return [...out, ...byKey.values()];
+  }
 
   // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -138,7 +288,7 @@ export class ReservationsService {
 
   // ─── create ─────────────────────────────────────────────────────────────────
 
-  async create(dto: CreateReservationDto) {
+  async create(dto: CreateReservationDto, performedBy?: number) {
     this.logger.log(
       `CREATE reservation | taskId=${dto.taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
     );
@@ -195,7 +345,7 @@ export class ReservationsService {
                 status,
               },
             });
-            await this.writeStatusHistory(tx, created.id, null, status);
+            await this.writeStatusHistory(tx, created.id, null, status, { performedBy });
           }
         } else {
           // For open-ended reservations, re-check inside the transaction to prevent race conditions
@@ -235,7 +385,7 @@ export class ReservationsService {
               status,
             },
           });
-          await this.writeStatusHistory(tx, created.id, null, status);
+          await this.writeStatusHistory(tx, created.id, null, status, { performedBy });
         }
       }
     });
@@ -942,7 +1092,12 @@ export class ReservationsService {
     }
 
     const groups = Array.from(byItem.values());
-    if (groups.length === 0) return [];
+    // No LIVE reservations still means there may be history worth showing — a
+    // task whose resources were all removed is precisely the case where "who
+    // removed them, and when" matters. Returning early here hid exactly that.
+    if (groups.length === 0) {
+      return { items: [], history: await this.buildTaskHistory(taskId) };
+    }
 
     // Real-time availability check (excludes this task's own reservations)
     const allDates = groups.flatMap((g) => g.map((r) => r.startDate));
@@ -1014,28 +1169,16 @@ export class ReservationsService {
       }];
     });
 
-    // Aggregate status history across all reservations, sorted by time
-    const history = reservations
-      .flatMap((r) =>
-        (r.statusHistory ?? []).map((h) => ({
-          reservationId: r.id,
-          itemName: r.item.name,
-          fromStatus: h.fromStatus ?? undefined,
-          toStatus: h.toStatus,
-          performedAt: h.performedAt,
-          reason: h.reason ?? undefined,
-          previousQuantity: h.previousQuantity ?? undefined,
-          newQuantity: h.newQuantity ?? undefined,
-        })),
-      )
-      .sort((a, b) => new Date(a.performedAt).getTime() - new Date(b.performedAt).getTime());
+    // History is built independently of `items`: it must include cancelled,
+    // completed and replaced reservations, which `items` deliberately excludes.
+    const history = await this.buildTaskHistory(taskId);
 
     return { items, history };
   }
 
   // ─── updateTaskReservations ──────────────────────────────────────────────────
 
-  async updateTaskReservations(taskId: number, dto: CreateReservationDto) {
+  async updateTaskReservations(taskId: number, dto: CreateReservationDto, performedBy?: number) {
     this.logger.log(
       `UPDATE reservation | taskId=${taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
     );
@@ -1097,7 +1240,7 @@ export class ReservationsService {
             existing.id,
             existing.status as ResourceReservationStatus,
             ResourceReservationStatus.CANCELLED,
-            { reason: 'Resource removed from task' },
+            { reason: 'Resource removed from task', performedBy },
           );
         }
       }
@@ -1139,7 +1282,7 @@ export class ReservationsService {
                 existing.id,
                 existing.status as ResourceReservationStatus,
                 ResourceReservationStatus.CANCELLED,
-                { reason: 'Date removed from task' },
+                { reason: 'Date removed from task', performedBy },
               );
             }
           }
@@ -1213,6 +1356,7 @@ export class ReservationsService {
                     previousQuantity: quantityChanged ? existing.quantity : undefined,
                     newQuantity: quantityChanged ? resource.quantity : undefined,
                     reason: 'Task updated',
+                    performedBy,
                   },
                 );
               }
@@ -1234,7 +1378,7 @@ export class ReservationsService {
                   status,
                 },
               });
-              await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Task updated' });
+              await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Task updated', performedBy });
             }
           }
         } else {
@@ -1304,6 +1448,7 @@ export class ReservationsService {
                   previousQuantity: quantityChanged ? existing.quantity : undefined,
                   newQuantity: quantityChanged ? resource.quantity : undefined,
                   reason: 'Task updated',
+                  performedBy,
                 },
               );
             }
@@ -1325,7 +1470,7 @@ export class ReservationsService {
                 status,
               },
             });
-            await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Task updated' });
+            await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Task updated', performedBy });
           }
         }
       }
