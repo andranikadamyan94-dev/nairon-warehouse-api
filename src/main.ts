@@ -5,6 +5,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { PrismaService } from 'prisma/prisma.service';
+import { PrismaExceptionFilter } from './common/filters/prisma-exception.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -41,6 +42,10 @@ async function bootstrap() {
       forbidNonWhitelisted: true,
     }),
   );
+
+  // Without this a broken unique constraint (e.g. a duplicate item code)
+  // escapes as a bare 500 with no body, leaving the UI nothing to show.
+  app.useGlobalFilters(new PrismaExceptionFilter());
 
   const config = new DocumentBuilder()
     .setTitle('Warehouse API')
