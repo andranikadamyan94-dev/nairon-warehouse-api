@@ -45,17 +45,25 @@ export class AvailabilityService {
       ? { startDate: { lte: endDate }, endDate: { gte: startDate } }
       : { startDate: { gte: startDate } };
 
-    const [assets, overlappingReservations] = await Promise.all([
-      this.prisma.asset.findMany({
-        where: {
-          itemId: item.id,
-          status: { notIn: [AssetStatus.DAMAGED, AssetStatus.RETIRED] },
-        },
-        include: {
-          maintenanceRecords: {
-            where: maintenanceFilter,
-          },
-        },
+    const usableAssets = {
+      itemId: item.id,
+      status: { notIn: [AssetStatus.DAMAGED, AssetStatus.RETIRED] },
+    };
+
+    // Counts, not rows. This previously loaded every asset of the item with its
+    // maintenance records included — and Prisma resolves an `include` as a
+    // second query with one bind parameter per parent id. An item with 100k
+    // assets (procurement creates one row per ordered unit) blew Postgres'
+    // 32767-parameter ceiling and 500'd the whole availability check.
+    //
+    // Only two integers were ever derived from those rows, and
+    // `maintenanceRecords: { some }` compiles to a correlated EXISTS, so there
+    // is no id list at all — the limit becomes unreachable rather than merely
+    // further away.
+    const [assetCount, underMaintenance, overlappingReservations] = await Promise.all([
+      this.prisma.asset.count({ where: usableAssets }),
+      this.prisma.asset.count({
+        where: { ...usableAssets, maintenanceRecords: { some: maintenanceFilter } },
       }),
       this.prisma.resourceReservation.aggregate({
         where: {
@@ -69,11 +77,7 @@ export class AvailabilityService {
     ]);
 
     let available =
-      item.type === ItemType.ASSET ? assets.length : (item.quantity ?? 0);
-
-    const underMaintenance = assets.filter(
-      (a) => a.maintenanceRecords.length > 0,
-    ).length;
+      item.type === ItemType.ASSET ? assetCount : (item.quantity ?? 0);
 
     available = Math.max(0, available - underMaintenance);
     available = Math.max(
