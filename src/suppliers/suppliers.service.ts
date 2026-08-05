@@ -103,4 +103,17 @@ export class SuppliersService {
     await this.findOne(id);
     return this.prisma.supplier.delete({ where: { id } });
   }
+
+  /**
+   * Minimal shape for a picker in another app: id and name only, so the
+   * response carries no pricing or catalogue data across the service boundary.
+   */
+  async findOptions(search?: string) {
+    return this.prisma.supplier.findMany({
+      where: search ? { name: { contains: search, mode: 'insensitive' } } : {},
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+      take: 50,
+    });
+  }
 }

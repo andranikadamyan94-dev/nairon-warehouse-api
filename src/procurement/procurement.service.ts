@@ -82,7 +82,7 @@ export class ProcurementService {
       where: { id },
       include,
     });
-    if (!order) throw new NotFoundException('Procurement order not found');
+    if (!order) throw new NotFoundException('Գնման պատվերը չի գտնվել');
     return order;
   }
 
@@ -91,6 +91,7 @@ export class ProcurementService {
       data: {
         supplierId: dto.supplierId ?? null,
         notes: dto.notes ?? null,
+        prepaymentAmount: dto.prepaymentAmount ?? null,
         items: {
           create: dto.items.map((i) => ({
             itemId: i.itemId,
@@ -106,7 +107,21 @@ export class ProcurementService {
   async update(id: number, dto: UpdateProcurementDto) {
     const order = await this.findOne(id);
     if (order.status === ProcurementOrderStatus.RECEIVED) {
-      throw new BadRequestException('Cannot edit a received order');
+      throw new BadRequestException('Ստացված պատվերը հնարավոր չէ խմբագրել');
+    }
+
+    // The deposit is frozen once the order leaves DRAFT, because finalize has
+    // already raised transfers for it. Changing it afterwards would leave the
+    // settlement maths disagreeing with the money actually raised: a deposit
+    // edited down to zero after a 30,000 deposit was raised would bill the
+    // full delivered value again on top of it.
+    const changesPrepayment =
+      dto.prepaymentAmount !== undefined &&
+      (dto.prepaymentAmount ?? null) !== (order.prepaymentAmount ?? null);
+    if (changesPrepayment && order.status !== ProcurementOrderStatus.DRAFT) {
+      throw new BadRequestException(
+        'Կանխավճարը հնարավոր չէ փոխել այն բանից հետո, երբ պատվերն ուղարկվել է ֆինանս',
+      );
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -127,6 +142,7 @@ export class ProcurementService {
         data: {
           supplierId: dto.supplierId ?? undefined,
           notes: dto.notes ?? undefined,
+          prepaymentAmount: dto.prepaymentAmount ?? undefined,
         },
         include,
       });
@@ -136,10 +152,10 @@ export class ProcurementService {
   async updateStatus(id: number, status: ProcurementOrderStatus) {
     const order = await this.findOne(id);
     if (order.status === ProcurementOrderStatus.RECEIVED) {
-      throw new BadRequestException('Order already received');
+      throw new BadRequestException('Պատվերն արդեն ստացվել է');
     }
     if (order.status === ProcurementOrderStatus.CANCELLED) {
-      throw new BadRequestException('Order is cancelled');
+      throw new BadRequestException('Պատվերը չեղարկված է');
     }
     return this.prisma.procurementOrder.update({
       where: { id },
@@ -164,30 +180,30 @@ export class ProcurementService {
   ) {
     const order = await this.findOne(id);
     if (order.status === ProcurementOrderStatus.RECEIVED) {
-      throw new BadRequestException('Order already received');
+      throw new BadRequestException('Պատվերն արդեն ստացվել է');
     }
     if (order.status === ProcurementOrderStatus.CLOSED_SHORT) {
-      throw new BadRequestException('Order was closed short and cannot receive more');
+      throw new BadRequestException('Պատվերը փակված է թերի — այլևս հնարավոր չէ ընդունել');
     }
     if (order.status === ProcurementOrderStatus.CANCELLED) {
-      throw new BadRequestException('Order is cancelled');
+      throw new BadRequestException('Պատվերը չեղարկված է');
     }
     if (order.status === ProcurementOrderStatus.PENDING_FINANCE_APPROVAL) {
-      throw new BadRequestException('Order is awaiting finance approval');
+      throw new BadRequestException('Պատվերը սպասում է ֆինանսական հաստատման');
     }
     if (order.status === ProcurementOrderStatus.DRAFT) {
       throw new BadRequestException(
-        'Order must be finance-approved before receiving',
+        'Ընդունելուց առաջ պատվերը պետք է հաստատվի ֆինանսի կողմից',
       );
     }
     if (order.status === ProcurementOrderStatus.FINANCE_REJECTED) {
       throw new BadRequestException(
-        'Order was finance-rejected and cannot be received',
+        'Պատվերը մերժվել է ֆինանսի կողմից և չի կարող ընդունվել',
       );
     }
     if (!receiptFile) {
       throw new BadRequestException(
-        'Receipt file is required when recording a delivery',
+        'Մատակարարումը գրանցելու համար պարտադիր է կցել փաստաթուղթ',
       );
     }
 
@@ -202,7 +218,7 @@ export class ProcurementService {
           .map((l) => ({ orderItemId: l.id, quantity: remaining(l) }));
 
     if (!requested.length) {
-      throw new BadRequestException('Nothing outstanding on this order');
+      throw new BadRequestException('Այս պատվերով մնացորդ չկա');
     }
 
     // Validate before touching anything — a delivery is all-or-nothing.
@@ -349,13 +365,35 @@ export class ProcurementService {
    */
   private async settleWithFinance(order: any, deliveredValue: number, reason: string) {
     const transferId = order.financeTransferId;
-    if (!transferId) return;
 
     const orderedValue = order.items.reduce(
       (sum: number, l: any) => sum + l.quantity * (l.unitPrice ?? 0),
       0,
     );
-    if (Math.abs(orderedValue - deliveredValue) < 0.005) return; // nothing to correct
+
+    // A deposit has already been paid, so the balance transfer only ever covers
+    // what is still owed. Clamped at zero: a delivery worth less than the
+    // deposit means the supplier owes us money, which is a refund to chase —
+    // never a negative expense.
+    const prepaid = order.prepaymentAmount ?? 0;
+    const balanceDue = Math.max(0, deliveredValue - prepaid);
+    const balanceAuthorized = Math.max(0, orderedValue - prepaid);
+
+    if (prepaid > 0 && deliveredValue < prepaid - 0.005) {
+      void this.notifications.send({
+        permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+        title: 'Կանխավճարը գերազանցում է ստացվածը',
+        body:
+          `Պատվեր #${order.id}: կանխավճար ${prepaid}, ստացվել է ${deliveredValue}-ի չափով։ ` +
+          `Մատակարարը պարտք է ${Math.round((prepaid - deliveredValue) * 100) / 100}։ Պահանջեք վերադարձ։`,
+      });
+    }
+
+    // Checked after the overpayment alert above, not before: a fully prepaid
+    // order has no balance transfer at all, and that is exactly the case where
+    // the supplier is most likely to owe money back.
+    if (!transferId) return;
+    if (Math.abs(balanceAuthorized - balanceDue) < 0.005) return; // nothing to correct
 
     const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
     try {
@@ -365,21 +403,34 @@ export class ProcurementService {
           'Content-Type': 'application/json',
           'x-internal-secret': process.env.INTERNAL_SECRET || '',
         },
-        body: JSON.stringify({ amount: deliveredValue, reason }),
+        body: JSON.stringify({ amount: balanceDue, reason }),
       });
 
       if (res.ok) {
-        await this.prisma.procurementPayment.create({
-          data: {
-            orderId: order.id,
-            type: 'BALANCE',
-            amount: deliveredValue,
-            financeTransferId: transferId,
-            status: 'ADJUSTED',
-          },
+        // finalize already wrote a BALANCE row for this transfer; correct it
+        // rather than stacking a second row for the same payment.
+        const existing = await this.prisma.procurementPayment.findFirst({
+          where: { orderId: order.id, financeTransferId: transferId, type: 'BALANCE' },
+          select: { id: true },
         });
+        if (existing) {
+          await this.prisma.procurementPayment.update({
+            where: { id: existing.id },
+            data: { amount: balanceDue, status: 'ADJUSTED' },
+          });
+        } else {
+          await this.prisma.procurementPayment.create({
+            data: {
+              orderId: order.id,
+              type: 'BALANCE',
+              amount: balanceDue,
+              financeTransferId: transferId,
+              status: 'ADJUSTED',
+            },
+          });
+        }
         this.logger.log(
-          `Order #${order.id}: finance transfer ${transferId} corrected ${orderedValue} → ${deliveredValue}`,
+          `Order #${order.id}: finance transfer ${transferId} corrected ${balanceAuthorized} → ${balanceDue} (prepaid ${prepaid})`,
         );
         return;
       }
@@ -499,7 +550,7 @@ export class ProcurementService {
   async finalize(id: number) {
     const order = await this.findOne(id);
     if (order.status !== ProcurementOrderStatus.DRAFT) {
-      throw new BadRequestException('Only DRAFT orders can be finalized');
+      throw new BadRequestException('Միայն նախագիծ պատվերները կարող են ուղարկվել հաստատման');
     }
 
     const total = order.items.reduce(
@@ -507,15 +558,32 @@ export class ProcurementService {
       0,
     );
 
+    const prepayment = order.prepaymentAmount ?? 0;
+    if (prepayment > total) {
+      throw new BadRequestException(
+        `Կանխավճարը (${prepayment}) չի կարող գերազանցել պատվերի արժեքը (${total})`,
+      );
+    }
+
     const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
     const internalKey = process.env.INTERNAL_SECRET || '';
     console.log(
       `[procurement:finalize] calling finance-api: POST ${financeUrl}/api/transfer/external | key_set=${!!internalKey} | key_len=${internalKey.length}`,
     );
 
-    let financeTransferId: number | undefined;
-    let financeError: string | undefined;
-    try {
+    const supplierSuffix = order.supplier ? ` — ${order.supplier.name}` : '';
+
+    /**
+     * Raise one transfer in finance. The prepayment carries a `:prepayment`
+     * suffix on the ref so finance can tell the two apart without a lookup —
+     * everything that parses the ref reads the id from `split(':')[1]`, which
+     * is unchanged.
+     */
+    const raise = async (
+      amount: number,
+      kind: 'FULL' | 'PREPAYMENT' | 'BALANCE',
+      label: string,
+    ): Promise<number> => {
       const res = await fetch(`${financeUrl}/api/transfer/external`, {
         method: 'POST',
         headers: {
@@ -523,39 +591,89 @@ export class ProcurementService {
           'x-internal-secret': internalKey,
         },
         body: JSON.stringify({
-          amount: total,
-          description: `Գնման պատվեր #${id}${order.supplier ? ` — ${order.supplier.name}` : ''}`,
-          externalRef: `warehouse_procurement:${id}`,
+          amount,
+          description: `${label} #${id}${supplierSuffix}`,
+          externalRef:
+            kind === 'PREPAYMENT'
+              ? `warehouse_procurement:${id}:prepayment`
+              : `warehouse_procurement:${id}`,
+          paymentKind: kind,
           date: new Date().toISOString(),
         }),
       });
       const body = await res.text();
       console.log(
-        `[procurement:finalize] finance-api response: status=${res.status} body=${body}`,
+        `[procurement:finalize] finance-api response (${kind}): status=${res.status} body=${body}`,
       );
-      if (res.ok) {
-        financeTransferId = JSON.parse(body).id;
+      if (!res.ok) {
+        throw new Error(`finance-api ${res.status} (url: ${financeUrl}): ${body}`);
+      }
+      return JSON.parse(body).id;
+    };
+
+    let prepaymentTransferId: number | undefined;
+    let balanceTransferId: number | undefined;
+    try {
+      if (prepayment > 0) {
+        // The deposit first: if the balance call then fails the order stays in
+        // DRAFT and finalize can be retried, which would duplicate it. The
+        // duplicate is visible in the finance queue and rejectable, whereas an
+        // order that can never be finalized is not.
+        prepaymentTransferId = await raise(prepayment, 'PREPAYMENT', 'Կանխավճար — գնման պատվեր');
+        // A fully prepaid order has nothing left to bill. Raising a zero
+        // transfer would put a meaningless row in the approval queue for
+        // someone to action.
+        if (total - prepayment > 0.005) {
+          balanceTransferId = await raise(total - prepayment, 'BALANCE', 'Մնացորդ — գնման պատվեր');
+        }
       } else {
-        financeError = `finance-api ${res.status} (url: ${financeUrl}): ${body}`;
+        balanceTransferId = await raise(total, 'FULL', 'Գնման պատվեր');
       }
     } catch (e: any) {
-      financeError = `network error reaching ${financeUrl}: ${e?.message ?? e}`;
+      const financeError =
+        e?.message?.startsWith('finance-api')
+          ? e.message
+          : `network error reaching ${financeUrl}: ${e?.message ?? e}`;
       console.error(`[procurement:finalize] ${financeError}`);
+      throw new BadRequestException(`Finance notification failed — ${financeError}`);
     }
 
-    if (financeError) {
-      throw new BadRequestException(
-        `Finance notification failed — ${financeError}`,
-      );
-    }
+    return this.prisma.$transaction(async (tx) => {
+      // The order keeps pointing at the BALANCE transfer: that is the one whose
+      // amount is corrected when the order closes, so every existing path that
+      // reads financeTransferId keeps working unchanged.
+      const updated = await tx.procurementOrder.update({
+        where: { id },
+        data: {
+          status: ProcurementOrderStatus.PENDING_FINANCE_APPROVAL,
+          ...(balanceTransferId ? { financeTransferId: balanceTransferId } : {}),
+        },
+        include,
+      });
 
-    return this.prisma.procurementOrder.update({
-      where: { id },
-      data: {
-        status: ProcurementOrderStatus.PENDING_FINANCE_APPROVAL,
-        ...(financeTransferId ? { financeTransferId } : {}),
-      },
-      include,
+      if (prepaymentTransferId) {
+        await tx.procurementPayment.create({
+          data: {
+            orderId: id,
+            type: 'PREPAYMENT',
+            amount: prepayment,
+            financeTransferId: prepaymentTransferId,
+            status: 'PENDING',
+          },
+        });
+      }
+      if (balanceTransferId) {
+        await tx.procurementPayment.create({
+          data: {
+            orderId: id,
+            type: 'BALANCE',
+            amount: total - prepayment,
+            financeTransferId: balanceTransferId,
+            status: 'PENDING',
+          },
+        });
+      }
+      return updated;
     });
   }
 
@@ -599,7 +717,7 @@ export class ProcurementService {
   async remove(id: number) {
     const order = await this.findOne(id);
     if (order.status === ProcurementOrderStatus.RECEIVED) {
-      throw new BadRequestException('Cannot delete a received order');
+      throw new BadRequestException('Ստացված պատվերը հնարավոր չէ ջնջել');
     }
     return this.prisma.procurementOrder.delete({ where: { id } });
   }

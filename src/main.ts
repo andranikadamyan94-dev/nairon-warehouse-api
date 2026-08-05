@@ -6,6 +6,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { PrismaService } from 'prisma/prisma.service';
 import { PrismaExceptionFilter } from './common/filters/prisma-exception.filter';
+import { armenianValidationPipe } from './common/validation-messages';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
@@ -41,13 +42,7 @@ async function bootstrap() {
 
   app.setGlobalPrefix('api');
 
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      transform: true,
-      forbidNonWhitelisted: true,
-    }),
-  );
+  app.useGlobalPipes(armenianValidationPipe());
 
   // Without this a broken unique constraint (e.g. a duplicate item code)
   // escapes as a bare 500 with no body, leaving the UI nothing to show.

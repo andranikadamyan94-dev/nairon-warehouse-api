@@ -204,8 +204,8 @@ model ResourceReservation {
 
   itemId Int
 
-  taskId    Int?
-  projectId Int?
+  taskId      Int?
+  projectId   Int?
   projectName String?
 
   entityId   Int?
@@ -328,8 +328,8 @@ model ReservationAllocationHistory {
 }
 
 model Maintainer {
-  id    Int    @id @default(autoincrement())
-  uuid  String @unique @default(uuid())
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
 
   name           String
   phone          String?
@@ -456,6 +456,9 @@ model ProcurementOrder {
   supplier   Supplier? @relation(fields: [supplierId], references: [id])
 
   notes             String?
+  /// Deposit the supplier requires before shipping. Raised as its own finance
+  /// transfer at finalize; the balance transfer is what remains after it.
+  prepaymentAmount  Float?
   createdBy         Int?
   financeTransferId Int?
 
@@ -495,7 +498,7 @@ model ProcurementOrderItem {
   receivedQuantity Float @default(0)
 
   order ProcurementOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  item  Item              @relation(fields: [itemId],  references: [id], onDelete: Cascade)
+  item  Item             @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
   deliveryItems ProcurementDeliveryItem[]
 
@@ -549,7 +552,7 @@ model ProcurementPayment {
   /// finance-api Transfer id. The finance callback identifies which payment it
   /// refers to by this, since both payments call back on the same order URL.
   financeTransferId Int?
-  status            String  @default("PENDING")
+  status            String @default("PENDING")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
