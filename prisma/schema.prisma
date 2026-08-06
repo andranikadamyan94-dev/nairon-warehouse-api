@@ -360,7 +360,15 @@ model MaintenanceRecord {
 
   amount Float?
 
-  financeTransferId Int?
+  /// Deposit the maintainer wants before starting. Raised as its own finance
+  /// transfer when the job is submitted; the balance transfer covers the rest.
+  prepaymentAmount Float?
+
+  /// The balance transfer — kept on this field so every existing path that
+  /// reads financeTransferId keeps working.
+
+  financeTransferId    Int?
+  prepaymentTransferId Int?
 
   startDate DateTime
   endDate   DateTime?

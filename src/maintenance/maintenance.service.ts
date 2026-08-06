@@ -39,25 +39,41 @@ export class MaintenanceService {
     });
   }
 
-  async finalize(id: number, amount: number) {
+  async finalize(id: number, amount: number, prepaymentAmount?: number) {
     const record = await this.prisma.maintenanceRecord.findUnique({
       where: { id },
       include,
     });
-    if (!record) throw new NotFoundException('Maintenance record not found');
+    if (!record) throw new NotFoundException('Սպասարկման գրառումը չի գտնվել');
     if (record.status !== 'DRAFT')
       throw new BadRequestException(
-        'Only DRAFT records can be submitted for finance approval',
+        'Միայն նախագիծ գրառումները կարող են ուղարկվել ֆինանսական հաստատման',
       );
     if (!amount || amount <= 0)
       throw new BadRequestException(
-        'Amount is required to request finance approval',
+        'Ֆինանսական հաստատման համար պարտադիր է նշել գումարը',
       );
 
+    const prepayment = prepaymentAmount ?? 0;
+    if (prepayment > amount) {
+      throw new BadRequestException(
+        `Կանխավճարը (${prepayment}) չի կարող գերազանցել աշխատանքի արժեքը (${amount})`,
+      );
+    }
+
     const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
-    let financeTransferId: number | undefined;
-    let financeError: string | undefined;
-    try {
+    const maintainer = record.maintainer ? ` — ${record.maintainer.name}` : '';
+
+    /**
+     * Raise one transfer in finance. The deposit carries a ":prepayment" suffix
+     * on the ref so finance can tell the two apart; everything that parses the
+     * ref reads the id from split(':')[1], which is unchanged.
+     */
+    const raise = async (
+      value: number,
+      kind: 'FULL' | 'PREPAYMENT' | 'BALANCE',
+      label: string,
+    ): Promise<number> => {
       const res = await fetch(`${financeUrl}/api/transfer/external`, {
         method: 'POST',
         headers: {
@@ -65,37 +81,54 @@ export class MaintenanceService {
           'x-internal-secret': process.env.INTERNAL_SECRET || '',
         },
         body: JSON.stringify({
-          amount,
-          description: `Սպասարկում #${id}${record.maintainer ? ` — ${record.maintainer.name}` : ''}`,
-          externalRef: `warehouse_maintenance:${id}`,
+          amount: value,
+          description: `${label} #${id}${maintainer}`,
+          externalRef:
+            kind === 'PREPAYMENT'
+              ? `warehouse_maintenance:${id}:prepayment`
+              : `warehouse_maintenance:${id}`,
+          paymentKind: kind,
           date: new Date().toISOString(),
         }),
       });
       const body = await res.text();
-      if (res.ok) {
-        financeTransferId = (JSON.parse(body) as { id: number }).id;
+      if (!res.ok) {
+        throw new Error(`finance-api ${res.status} (url: ${financeUrl}): ${body}`);
+      }
+      return (JSON.parse(body) as { id: number }).id;
+    };
+
+    let prepaymentTransferId: number | undefined;
+    let financeTransferId: number | undefined;
+    try {
+      if (prepayment > 0) {
+        prepaymentTransferId = await raise(prepayment, 'PREPAYMENT', 'Կանխավճար — սպասարկում');
+        // A fully prepaid job has nothing left to bill; a zero transfer would
+        // just be a meaningless row in the approval queue.
+        if (amount - prepayment > 0.005) {
+          financeTransferId = await raise(amount - prepayment, 'BALANCE', 'Մնացորդ — սպասարկում');
+        }
       } else {
-        financeError = `finance-api ${res.status} (url: ${financeUrl}): ${body}`;
+        financeTransferId = await raise(amount, 'FULL', 'Սպասարկում');
       }
     } catch (e: any) {
-      financeError = `network error reaching ${financeUrl}: ${e?.message ?? e}`;
-    }
-
-    // Same contract as procurement finalize: if finance never received the
-    // transfer, fail the request instead of stranding the record in
-    // PENDING_FINANCE with no matching transfer on the finance side.
-    if (financeError) {
-      throw new BadRequestException(
-        `Finance notification failed — ${financeError}`,
-      );
+      // Same contract as procurement finalize: if finance never received the
+      // transfer, fail the request instead of stranding the record in
+      // PENDING_FINANCE with no matching transfer on the finance side.
+      const detail = e?.message?.startsWith('finance-api')
+        ? e.message
+        : `network error reaching ${financeUrl}: ${e?.message ?? e}`;
+      throw new BadRequestException(`Finance notification failed — ${detail}`);
     }
 
     return this.prisma.maintenanceRecord.update({
       where: { id },
       data: {
         amount,
+        prepaymentAmount: prepayment > 0 ? prepayment : null,
         status: 'PENDING_FINANCE',
         ...(financeTransferId ? { financeTransferId } : {}),
+        ...(prepaymentTransferId ? { prepaymentTransferId } : {}),
       },
       include,
     });
