@@ -221,12 +221,18 @@ export class MaintenanceService {
       : {};
 
     const order: 'asc' | 'desc' = query.sortOrder === 'asc' ? 'asc' : 'desc';
-    const orderBy: any =
+    // Every sort ends with id, because none of these columns is unique.
+    // Without a tiebreaker Postgres is free to return tied rows in a different
+    // arrangement per query, and skip/take then slices a different arrangement
+    // for each page: rows appear on two pages and others on none. With most
+    // jobs sharing a start date that was not theoretical — records 20 to 31
+    // could not be reached from the list at all.
+    const orderBy: any[] =
       query.sortBy === 'endDate'
-        ? { endDate: order }
+        ? [{ endDate: order }, { id: 'desc' }]
         : query.sortBy === 'type'
-          ? { type: order }
-          : { startDate: query.sortBy === 'startDate' ? order : 'desc' };
+          ? [{ type: order }, { id: 'desc' }]
+          : [{ startDate: query.sortBy === 'startDate' ? order : 'desc' }, { id: 'desc' }];
 
     const [data, total] = await Promise.all([
       this.prisma.maintenanceRecord.findMany({

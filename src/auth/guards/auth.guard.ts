@@ -9,12 +9,14 @@ import { JwtService } from '@nestjs/jwt';
 
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { jwtConstants } from '../constants';
+import { UsersPrismaService } from '../../common/users-prisma.service';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
   constructor(
     private jwtService: JwtService,
     private reflector: Reflector,
+    private usersPrisma: UsersPrismaService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -35,6 +37,14 @@ export class AuthGuard implements CanActivate {
       request['user'] = payload;
     } catch {
       throw new UnauthorizedException();
+    }
+
+    // The signature says the token was ours; it does not say the account still
+    // exists. Tokens run for 30 days with no session store, so a deactivated
+    // person keeps a valid one — checked here rather than in PermissionGuard
+    // because that one returns early on routes with no required permission.
+    if (await this.usersPrisma.isDeactivated(request['user'].id)) {
+      throw new UnauthorizedException('Այս հաշիվը ապաակտիվացված է');
     }
 
     return true;

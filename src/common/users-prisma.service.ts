@@ -16,6 +16,69 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
   }
 
   /**
+   * Deactivated user ids, cached briefly.
+   *
+   * Tokens are signed for 30 days and there is no session store, so a
+   * deactivated person's existing token stays cryptographically valid — the
+   * guards have to ask. Reading the whole set once per TTL keeps that to one
+   * small query per service rather than one per request.
+   *
+   * The staleness is deliberately one-directional. A cache miss is trusted, so
+   * deactivating takes up to the TTL to bite. A cache *hit* is re-checked
+   * against the row before anyone is refused, which costs one query for the
+   * rare deactivated caller and means reactivating takes effect at once —
+   * otherwise someone told they were back would keep getting 401s for another
+   * half minute and be bounced to the login screen.
+   */
+  private deactivated: { ids: Set<number>; expiresAt: number } | null = null;
+
+  async isDeactivated(userId: number): Promise<boolean> {
+    const now = Date.now();
+    if (!this.deactivated || now >= this.deactivated.expiresAt) {
+      const rows = await this.$queryRaw<{ id: number }[]>`
+        SELECT id FROM "User" WHERE "deactivatedAt" IS NOT NULL
+      `;
+      this.deactivated = {
+        ids: new Set(rows.map((r) => Number(r.id))),
+        expiresAt: now + 30_000,
+      };
+      return this.deactivated.ids.has(userId);
+    }
+    if (!this.deactivated.ids.has(userId)) return false;
+
+    const [row] = await this.$queryRaw<{ deactivatedAt: Date | null }[]>`
+      SELECT "deactivatedAt" FROM "User" WHERE id = ${userId}
+    `;
+    if (row && row.deactivatedAt === null) {
+      this.deactivated.ids.delete(userId);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Queried directly rather than through the guard cache above: that one
+   * trades staleness for speed on a per-request hot path, which is the wrong
+   * trade here. A list is a page load, and someone offboarded a moment ago
+   * must already be gone from it.
+   *
+   * Drops deactivated people from a set of ids. For lists of *people* — a
+   * picker, a directory, a roster. Lists of *records* keep them: preserving
+   * that history is the whole reason deactivation exists.
+   */
+  async filterActive(ids: number[]): Promise<number[]> {
+    if (!ids.length) return ids;
+    const rows = await this.$queryRaw<{ id: number }[]>`
+      SELECT id FROM "User"
+      WHERE id = ANY(${ids}::int[]) AND "deactivatedAt" IS NULL
+    `;
+    const active = new Set(rows.map((r) => Number(r.id)));
+    return ids.filter((id) => active.has(id));
+  }
+
+
+
+  /**
    * Effective access for a user. Entity is IGNORED: permissions are role-level,
    * so a user's effective set is the union of every permission granted to any of
    * their roles. `entityId` is accepted for signature parity with the other APIs

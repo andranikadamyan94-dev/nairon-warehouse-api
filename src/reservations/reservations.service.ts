@@ -940,12 +940,16 @@ export class ReservationsService {
     }
 
     const order: 'asc' | 'desc' = query.sortOrder === 'asc' ? 'asc' : 'desc';
-    const orderBy: any =
-      query.sortBy === 'startDate' ? { startDate: order }
-      : query.sortBy === 'entityName' ? { entityName: order }
-      : query.sortBy === 'status' ? { status: order }
-      : query.sortBy === 'createdAt' ? { createdAt: order }
-      : [{ createdAt: 'desc' }, { taskId: 'asc' }];
+    // id last, on every branch. status and entityName have very few distinct
+    // values, so most rows tie; tied rows with no tiebreaker can come back in a
+    // different arrangement per query, and skip/take then repeats some
+    // reservations across pages while never showing others.
+    const orderBy: any[] =
+      query.sortBy === 'startDate' ? [{ startDate: order }, { id: 'desc' }]
+      : query.sortBy === 'entityName' ? [{ entityName: order }, { id: 'desc' }]
+      : query.sortBy === 'status' ? [{ status: order }, { id: 'desc' }]
+      : query.sortBy === 'createdAt' ? [{ createdAt: order }, { id: 'desc' }]
+      : [{ createdAt: 'desc' }, { taskId: 'asc' }, { id: 'desc' }];
 
     const [data, total] = await Promise.all([
       this.prisma.resourceReservation.findMany({

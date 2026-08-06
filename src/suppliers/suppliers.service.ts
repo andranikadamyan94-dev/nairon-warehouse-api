@@ -16,8 +16,13 @@ export class SuppliersService {
     const limit = Number(query?.limit ?? 20);
     const search = query?.search;
     const order: 'asc' | 'desc' = query?.sortOrder === 'asc' ? 'asc' : 'desc';
-    const orderBy: any =
-      query?.sortBy === 'createdAt' ? { createdAt: order } : { name: query?.sortBy === 'name' ? order : 'asc' };
+    // id last: supplier names are not unique, and tied rows with no tiebreaker
+    // can be arranged differently per query, which makes paged results skip
+    // and repeat entries.
+    const orderBy: any[] =
+      query?.sortBy === 'createdAt'
+        ? [{ createdAt: order }, { id: 'desc' }]
+        : [{ name: query?.sortBy === 'name' ? order : 'asc' }, { id: 'desc' }];
 
     const itemIds = query?.itemIds
       ? String(query.itemIds).split(',').map(Number).filter(Boolean)

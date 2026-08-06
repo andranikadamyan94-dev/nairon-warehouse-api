@@ -58,10 +58,14 @@ export class ProcurementService {
     }
 
     const order: 'asc' | 'desc' = query?.sortOrder === 'asc' ? 'asc' : 'desc';
-    const orderBy: any =
+    // id last, always. Sorting by status is the sharp case — there are only a
+    // handful of distinct values, so nearly every row is tied, and without a
+    // tiebreaker skip/take slices a differently-arranged result per page:
+    // orders appear twice and others never appear at all.
+    const orderBy: any[] =
       query?.sortBy === 'status'
-        ? { status: order }
-        : { createdAt: query?.sortBy === 'createdAt' ? order : 'desc' };
+        ? [{ status: order }, { id: 'desc' }]
+        : [{ createdAt: query?.sortBy === 'createdAt' ? order : 'desc' }, { id: 'desc' }];
 
     const [data, total] = await Promise.all([
       this.prisma.procurementOrder.findMany({

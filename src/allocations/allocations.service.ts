@@ -17,6 +17,10 @@ export class AllocationsService {
     const limit = Number(query.limit ?? 10);
     const [data, total] = await Promise.all([
       this.prisma.reservationAllocation.findMany({
+        // Paging with no ordering at all leaves the arrangement entirely up to
+        // Postgres, so skip/take could return the same allocation on two pages
+        // and never show another.
+        orderBy: { id: 'desc' },
         skip: (page - 1) * limit,
         take: limit,
         where: { releasedAt: null },
