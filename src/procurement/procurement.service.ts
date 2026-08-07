@@ -546,7 +546,9 @@ export class ProcurementService {
     }
     return this.prisma.procurementOrder.update({
       where: { id },
-      data: { status: ProcurementOrderStatus.DRAFT },
+      // Back to a draft, so the previous rejection reason no longer describes
+      // it — leaving it would attach finance's old objection to a fresh order.
+      data: { status: ProcurementOrderStatus.DRAFT, financeRejectionReason: null },
       include,
     });
   }
@@ -690,7 +692,7 @@ export class ProcurementService {
    * retry into a permanent deadlock — warehouse had already moved on, finance
    * had rolled back, and every subsequent attempt hit the same 400.
    */
-  async financeCallback(id: number, status: 'APPROVED' | 'REJECTED') {
+  async financeCallback(id: number, status: 'APPROVED' | 'REJECTED', rejectionReason?: string) {
     const order = await this.findOne(id);
     const target =
       status === 'APPROVED'
@@ -713,6 +715,9 @@ export class ProcurementService {
           status === 'APPROVED'
             ? ProcurementOrderStatus.FINANCE_APPROVED
             : ProcurementOrderStatus.FINANCE_REJECTED,
+        // Cleared on approval, so an order rejected once and approved on the
+        // second pass does not keep showing the old reason.
+        financeRejectionReason: status === 'REJECTED' ? (rejectionReason ?? null) : null,
       },
       include,
     });

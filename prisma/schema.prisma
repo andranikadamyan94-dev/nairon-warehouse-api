@@ -370,6 +370,10 @@ model MaintenanceRecord {
   financeTransferId    Int?
   prepaymentTransferId Int?
 
+  /// Why finance turned the job down. See ProcurementOrder for the same field —
+  /// finance sends this on the rejection callback and it was being discarded.
+  financeRejectionReason String?
+
   startDate DateTime
   endDate   DateTime?
 
@@ -469,6 +473,12 @@ model ProcurementOrder {
   prepaymentAmount  Float?
   createdBy         Int?
   financeTransferId Int?
+
+  /// Why finance turned the order down. Finance has always sent this on the
+  /// rejection callback; there was nowhere to put it, so the warehouse showed a
+  /// red status and no reason, and the only way to find out was to ask finance.
+  /// Cleared on approval and on resubmission so a stale reason cannot linger.
+  financeRejectionReason String?
 
   /// Receipt/receivedAt of the FIRST delivery, kept so existing list views and
   /// the finance flow keep working unchanged. Per-delivery documents live on

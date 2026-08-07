@@ -139,7 +139,7 @@ export class MaintenanceService {
    * a non-2xx as a hard error and rolls its own approval back, so re-notifying
    * an already-updated record must not fail.
    */
-  async financeCallback(id: number, status: 'APPROVED' | 'REJECTED') {
+  async financeCallback(id: number, status: 'APPROVED' | 'REJECTED', rejectionReason?: string) {
     const record = await this.prisma.maintenanceRecord.findUnique({
       where: { id },
     });
@@ -157,6 +157,9 @@ export class MaintenanceService {
       where: { id },
       data: {
         status: status === 'APPROVED' ? 'FINANCE_APPROVED' : 'FINANCE_REJECTED',
+        // Cleared on approval, so a job rejected once and approved on the
+        // second pass does not keep showing the old reason.
+        financeRejectionReason: status === 'REJECTED' ? (rejectionReason ?? null) : null,
       },
       include,
     });

@@ -102,9 +102,9 @@ export class MaintenanceController {
   @ApiOperation({ summary: 'Finance approval callback (called by finance API)' })
   financeCallback(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { status: 'APPROVED' | 'REJECTED' },
+    @Body() body: { status: 'APPROVED' | 'REJECTED'; rejectionReason?: string },
   ) {
-    return this.maintenanceService.financeCallback(id, body.status);
+    return this.maintenanceService.financeCallback(id, body.status, body.rejectionReason);
   }
 
   @UseGuards(PermissionGuard)
