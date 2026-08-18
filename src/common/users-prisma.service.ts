@@ -90,8 +90,17 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
    */
   async getUserAccessInfo(
     userId: number,
-    _entityId?: number,
+    entityId = 0,
+    targetDepartmentIds?: number[],
   ): Promise<{ isSuperAdmin: boolean; permissionNames: string[] }> {
+    // Context-aware resolution. An assignment applies when its entity matches
+    // the entity in play (assignment entityId 0 = every entity; request
+    // entityId 0 = no entity context, everything counts) and, for
+    // people-targeted actions, when the role's department contains the target
+    // (role departmentId NULL = org-wide; no department context = all roles).
+    // Level-0 roles are global super admins and bypass scoping entirely.
+    const hasDeptCtx = targetDepartmentIds !== undefined;
+    const deptIds = targetDepartmentIds && targetDepartmentIds.length ? targetDepartmentIds : [-1];
     const rows = await this.$queryRaw<{ name: string | null; level: number }[]>`
       SELECT DISTINCT p.name AS "name", r."level" AS "level"
       FROM "UserRole" ur
@@ -99,6 +108,13 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
       LEFT JOIN "RolePermission" rp ON rp."roleId" = r.id
       LEFT JOIN "Permission" p ON p.id = rp."permissionId"
       WHERE ur."userId" = ${userId}
+        AND (
+          r."level" = 0
+          OR (
+            (${entityId} = 0 OR ur."entityId" = 0 OR ur."entityId" = ${entityId})
+            AND (${hasDeptCtx} = false OR r."departmentId" IS NULL OR r."departmentId" = ANY(${deptIds}::int[]))
+          )
+        )
     `;
     const isSuperAdmin = rows.some((r) => Number(r.level) === 0);
     const permissionNames = [
