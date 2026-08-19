@@ -9,6 +9,10 @@ import { PrismaService } from 'prisma/prisma.service';
 
 import { AvailabilityService } from '../availability/availability.service';
 
+import { StockAlertService } from '../common/notifications/stock-alert.service';
+import { UsersPrismaService } from '../common/users-prisma.service';
+import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
+
 import { AssetStatus } from '../common/enums/asset-status.enum';
 import { ItemType } from '../common/enums/item-type.enum';
 import { ItemUnit } from '../common/enums/item-unit.enum';
@@ -57,9 +61,210 @@ export class ReservationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly availabilityService: AvailabilityService,
+    private readonly stockAlerts: StockAlertService,
+    private readonly notifications: WarehouseNotificationsService,
+    private readonly usersPrisma: UsersPrismaService,
   ) {}
 
+  /**
+   * Full event history for a task, independent of the `items` list.
+   *
+   * `items` deliberately shows only live reservations; history must not. A
+   * cancelled or replaced reservation is exactly where the interesting events
+   * are ("who removed the excavator, and when"), and the old query filtered
+   * those rows out — taking their history with them.
+   *
+   * Merges three sources: status transitions, asset-level allocation events,
+   * and returns.
+   */
+  private async buildTaskHistory(taskId: number) {
+    const reservations = await this.prisma.resourceReservation.findMany({
+      where: { taskId },              // no status / replacedBy filter — that is the point
+      include: {
+        item: { select: { name: true, unit: true } },
+        statusHistory: true,
+        allocationHistory: { include: { asset: { select: { name: true, serialNumber: true } } } },
+        returns: true,
+      },
+    });
+    if (!reservations.length) return [];
+
+    type Entry = {
+      kind: 'STATUS' | 'ALLOCATION' | 'RETURN';
+      reservationId: number;
+      itemName: string;
+      performedAt: Date;
+      performedById?: number | null;
+      performedByName?: string;
+      reason?: string;
+      fromStatus?: string;
+      toStatus?: string;
+      previousQuantity?: number;
+      newQuantity?: number;
+      action?: string;
+      assetLabel?: string;
+      quantity?: number;
+      returnStatus?: string;
+      /** Day-slots this entry covers once grouped (HOUR items only). */
+      dates?: string[];
+      groupedCount?: number;
+    };
+
+    const entries: Entry[] = [];
+
+    for (const r of reservations) {
+      for (const h of r.statusHistory) {
+        entries.push({
+          kind: 'STATUS',
+          reservationId: r.id,
+          itemName: r.item.name,
+          performedAt: h.performedAt,
+          performedById: h.performedBy,
+          reason: h.reason ?? undefined,
+          fromStatus: h.fromStatus ?? undefined,
+          toStatus: h.toStatus,
+          previousQuantity: h.previousQuantity ?? undefined,
+          newQuantity: h.newQuantity ?? undefined,
+          dates: [getYerevanDateKey(r.startDate)],
+        });
+      }
+      for (const a of r.allocationHistory) {
+        entries.push({
+          kind: 'ALLOCATION',
+          reservationId: r.id,
+          itemName: r.item.name,
+          performedAt: a.performedAt,
+          performedById: a.performedBy,
+          reason: a.notes ?? undefined,
+          action: a.action,
+          assetLabel: a.asset
+            ? [a.asset.name, a.asset.serialNumber].filter(Boolean).join(' · ') || undefined
+            : undefined,
+        });
+      }
+      for (const ret of r.returns) {
+        entries.push({
+          kind: 'RETURN',
+          reservationId: r.id,
+          itemName: r.item.name,
+          performedAt: ret.receivedAt ?? ret.requestedAt,
+          performedById: ret.receivedBy ?? ret.requestedBy,
+          reason: ret.notes ?? undefined,
+          quantity: ret.quantity,
+          returnStatus: ret.status,
+        });
+      }
+    }
+
+    const grouped = this.groupHourlyStatusEntries(entries);
+
+    // Resolve actor names in one query rather than per entry.
+    const ids = [...new Set(grouped.map((e) => e.performedById).filter((v): v is number => !!v))];
+    const users = ids.length ? await this.usersPrisma.getUsersByIds(ids) : [];
+    const nameById = new Map(users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
+
+    return grouped
+      .map(({ performedById, ...e }) => ({
+        ...e,
+        performedByName: performedById ? nameById.get(performedById) : undefined,
+      }))
+      .sort((a, b) => new Date(a.performedAt).getTime() - new Date(b.performedAt).getTime());
+  }
+
+  /**
+   * HOUR-unit items are stored as one reservation row per working day, so a
+   * single edit fans out into one identical status entry per day. Collapse
+   * entries that represent the SAME action — same item, same transition, same
+   * reason, within a few seconds of each other — into one, carrying the days
+   * it covered.
+   *
+   * Keyed on the action rather than on the item, so days that genuinely
+   * diverged (one rejected, the rest approved) do not share a key and stay
+   * visible as separate entries. For non-HOUR items there is one row per item,
+   * so this never fires.
+   *
+   * The time bucket is a heuristic: there is no correlation id tying the rows
+   * written by one call together. Two distinct actions on the same item with
+   * the same transition and reason inside the window would merge — implausible,
+   * and harmless if it happened. A `batchId` column would make it exact.
+   */
+  private groupHourlyStatusEntries<T extends {
+    kind: string; itemName: string; fromStatus?: string; toStatus?: string;
+    reason?: string; performedAt: Date; dates?: string[]; groupedCount?: number;
+  }>(entries: T[]): T[] {
+    const BUCKET_MS = 5000;
+    const out: T[] = [];
+    const byKey = new Map<string, T>();
+
+    for (const e of entries) {
+      if (e.kind !== 'STATUS') { out.push(e); continue; }
+      const bucket = Math.floor(new Date(e.performedAt).getTime() / BUCKET_MS);
+      const key = [e.itemName, e.fromStatus ?? '', e.toStatus ?? '', e.reason ?? '', bucket].join('|');
+      const existing = byKey.get(key);
+      if (!existing) {
+        byKey.set(key, { ...e, groupedCount: 1 });
+        continue;
+      }
+      existing.groupedCount = (existing.groupedCount ?? 1) + 1;
+      existing.dates = [...new Set([...(existing.dates ?? []), ...(e.dates ?? [])])].sort();
+      // Keep the earliest timestamp of the group.
+      if (new Date(e.performedAt) < new Date(existing.performedAt)) existing.performedAt = e.performedAt;
+    }
+
+    return [...out, ...byKey.values()];
+  }
+
   // ─── helpers ────────────────────────────────────────────────────────────────
+
+  /**
+   * Who to tell about a reservation's outcome. A reservation records no
+   * requester (ResourceReservation has no createdBy), so the audience is the
+   * assignees of the CRM task it was raised against. Reservations with no
+   * taskId have nobody to notify.
+   */
+  private async taskAssignees(taskId: number | null | undefined): Promise<number[]> {
+    if (!taskId) return [];
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    try {
+      const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
+        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+      });
+      if (!res.ok) {
+        this.logger.warn(`CRM task lookup failed for task ${taskId}: ${res.status}`);
+        return [];
+      }
+      // The internal endpoint resolves assignees to USER objects — `id` is the
+      // user id. (The CRM table column is `userId`; don't reach for that here,
+      // it isn't in the response and would silently yield zero recipients.)
+      const task = (await res.json()) as { assignees?: { id?: number; userId?: number }[] };
+      return (task?.assignees ?? [])
+        .map((a) => a.id ?? a.userId)
+        .filter((id): id is number => Number.isFinite(id));
+    } catch (e: any) {
+      this.logger.warn(`CRM task lookup error for task ${taskId}: ${e?.message}`);
+      return [];
+    }
+  }
+
+  /** Tell the requesting task's assignees what happened to their reservation. */
+  private async notifyRequesters(
+    reservation: { taskId?: number | null; projectName?: string | null },
+    title: string,
+    body: string,
+    details: { label: string; value: string }[] = [],
+  ): Promise<void> {
+    const userIds = await this.taskAssignees(reservation.taskId);
+    if (!userIds.length) return;
+    await this.notifications.sendToUsers(userIds, {
+      title,
+      body,
+      path: '/reservations',
+      details: [
+        ...details,
+        ...(reservation.projectName ? [{ label: 'Նախագիծ', value: reservation.projectName }] : []),
+      ],
+    });
+  }
 
   private async writeStatusHistory(
     tx: any,
@@ -83,7 +288,7 @@ export class ReservationsService {
 
   // ─── create ─────────────────────────────────────────────────────────────────
 
-  async create(dto: CreateReservationDto) {
+  async create(dto: CreateReservationDto, performedBy?: number) {
     this.logger.log(
       `CREATE reservation | taskId=${dto.taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
     );
@@ -140,7 +345,7 @@ export class ReservationsService {
                 status,
               },
             });
-            await this.writeStatusHistory(tx, created.id, null, status);
+            await this.writeStatusHistory(tx, created.id, null, status, { performedBy });
           }
         } else {
           // For open-ended reservations, re-check inside the transaction to prevent race conditions
@@ -180,7 +385,7 @@ export class ReservationsService {
               status,
             },
           });
-          await this.writeStatusHistory(tx, created.id, null, status);
+          await this.writeStatusHistory(tx, created.id, null, status, { performedBy });
         }
       }
     });
@@ -189,6 +394,20 @@ export class ReservationsService {
       this.logger.warn(
         `CREATE reservation taskId=${dto.taskId} | unavailable: ${JSON.stringify(availability.unavailableResources)}`,
       );
+      // Only conflicting requests land in PENDING and need a human decision —
+      // freely available stock is auto-approved and needs no alert.
+      const names = [...new Set(availability.unavailableResources.map((r: any) => r.name ?? `#${r.itemId}`))];
+      void this.notifications.send({
+        permissions: ['receive_reservation_alerts', 'manage_warehouse'],
+        title: 'Ամրագրում սպասում է հաստատման',
+        body: 'Ամրագրման հայտ է ստացվել ռեսուրսի համար, որը հասանելի չէ նշված ժամկետում և սպասում է ձեր որոշմանը։',
+        path: '/reservations',
+        details: [
+          { label: 'Ռեսուրս(ներ)', value: names.join(', ') },
+          ...(dto.projectName ? [{ label: 'Նախագիծ', value: dto.projectName }] : []),
+          ...(dto.taskId ? [{ label: 'Առաջադրանք', value: `#${dto.taskId}` }] : []),
+        ],
+      });
     } else {
       this.logger.log(`CREATE reservation taskId=${dto.taskId} | all available`);
     }
@@ -202,7 +421,11 @@ export class ReservationsService {
   // ─── allocate (assets) ───────────────────────────────────────────────────────
 
   async allocate(dto: AllocateReservationDto, allocatedBy?: number) {
-    return this.prisma.$transaction(async (tx) => {
+    // Only reservations that reached ALLOCATED are worth telling the requester
+    // about — a partial allocation isn't yet a usable outcome.
+    const fullyAllocated: { taskId: number | null; projectName: string | null; quantity: number }[] = [];
+
+    const result = await this.prisma.$transaction(async (tx) => {
       for (const allocation of dto.allocations) {
         const reservation = await tx.resourceReservation.findUnique({
           where: { id: allocation.reservationId },
@@ -275,10 +498,29 @@ export class ReservationsService {
           data: { status: newStatus },
         });
         await this.writeStatusHistory(tx, reservation.id, reservation.status as ResourceReservationStatus, newStatus, { performedBy: allocatedBy });
+
+        if (newStatus === ResourceReservationStatus.ALLOCATED) {
+          fullyAllocated.push({
+            taskId: reservation.taskId,
+            projectName: reservation.projectName,
+            quantity: reservation.quantity,
+          });
+        }
       }
 
       return { success: true };
     });
+
+    for (const r of fullyAllocated) {
+      void this.notifyRequesters(
+        r,
+        'Ամրագրումը հաստատվել է',
+        'Ձեր առաջադրանքի համար պահանջված ռեսուրսը տրամադրվել է։',
+        [{ label: 'Քանակ', value: String(r.quantity) }],
+      );
+    }
+
+    return result;
   }
 
   // ─── approve consumable ──────────────────────────────────────────────────────
@@ -310,7 +552,7 @@ export class ReservationsService {
       );
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.create({
         data: { reservationId, quantity: reservation.quantity },
       });
@@ -350,6 +592,21 @@ export class ReservationsService {
 
       return { success: true };
     });
+
+    // The main breach path: approving a consumable reservation takes stock out.
+    this.stockAlerts.check([reservation.item.id]);
+
+    void this.notifyRequesters(
+      reservation,
+      'Ամրագրումը հաստատվել է',
+      'Ձեր առաջադրանքի համար կատարված ամրագրումը հաստատվել է և ռեսուրսը տրամադրվել է։',
+      [
+        { label: 'Ռեսուրս', value: reservation.item.name },
+        { label: 'Քանակ', value: String(reservation.quantity) },
+      ],
+    );
+
+    return result;
   }
 
   // ─── cancel ──────────────────────────────────────────────────────────────────
@@ -441,7 +698,7 @@ export class ReservationsService {
       throw new BadRequestException(`Reservation is already ${reservation.status}`);
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       const activeAllocations = await tx.reservationAllocation.findMany({
         where: { reservationId, releasedAt: null },
       });
@@ -475,6 +732,15 @@ export class ReservationsService {
       );
       return { success: true };
     });
+
+    void this.notifyRequesters(
+      reservation,
+      'Ամրագրումը մերժվել է',
+      'Ձեր առաջադրանքի համար կատարված ամրագրման հայտը մերժվել է։',
+      reason ? [{ label: 'Պատճառ', value: reason }] : [],
+    );
+
+    return result;
   }
 
   // ─── release allocation ──────────────────────────────────────────────────────
@@ -489,7 +755,7 @@ export class ReservationsService {
 
     const isConsumable = allocation.reservation.item.type === ItemType.CONSUMABLE;
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.update({
         where: { id: allocationId },
         data: { releasedAt: new Date() },
@@ -549,6 +815,10 @@ export class ReservationsService {
 
       return { success: true };
     });
+
+    if (isConsumable) this.stockAlerts.check([allocation.reservation.itemId]);
+
+    return result;
   }
 
   // ─── reallocate ──────────────────────────────────────────────────────────────
@@ -670,12 +940,16 @@ export class ReservationsService {
     }
 
     const order: 'asc' | 'desc' = query.sortOrder === 'asc' ? 'asc' : 'desc';
-    const orderBy: any =
-      query.sortBy === 'startDate' ? { startDate: order }
-      : query.sortBy === 'entityName' ? { entityName: order }
-      : query.sortBy === 'status' ? { status: order }
-      : query.sortBy === 'createdAt' ? { createdAt: order }
-      : [{ createdAt: 'desc' }, { taskId: 'asc' }];
+    // id last, on every branch. status and entityName have very few distinct
+    // values, so most rows tie; tied rows with no tiebreaker can come back in a
+    // different arrangement per query, and skip/take then repeats some
+    // reservations across pages while never showing others.
+    const orderBy: any[] =
+      query.sortBy === 'startDate' ? [{ startDate: order }, { id: 'desc' }]
+      : query.sortBy === 'entityName' ? [{ entityName: order }, { id: 'desc' }]
+      : query.sortBy === 'status' ? [{ status: order }, { id: 'desc' }]
+      : query.sortBy === 'createdAt' ? [{ createdAt: order }, { id: 'desc' }]
+      : [{ createdAt: 'desc' }, { taskId: 'asc' }, { id: 'desc' }];
 
     const [data, total] = await Promise.all([
       this.prisma.resourceReservation.findMany({
@@ -822,7 +1096,12 @@ export class ReservationsService {
     }
 
     const groups = Array.from(byItem.values());
-    if (groups.length === 0) return [];
+    // No LIVE reservations still means there may be history worth showing — a
+    // task whose resources were all removed is precisely the case where "who
+    // removed them, and when" matters. Returning early here hid exactly that.
+    if (groups.length === 0) {
+      return { items: [], history: await this.buildTaskHistory(taskId) };
+    }
 
     // Real-time availability check (excludes this task's own reservations)
     const allDates = groups.flatMap((g) => g.map((r) => r.startDate));
@@ -894,28 +1173,16 @@ export class ReservationsService {
       }];
     });
 
-    // Aggregate status history across all reservations, sorted by time
-    const history = reservations
-      .flatMap((r) =>
-        (r.statusHistory ?? []).map((h) => ({
-          reservationId: r.id,
-          itemName: r.item.name,
-          fromStatus: h.fromStatus ?? undefined,
-          toStatus: h.toStatus,
-          performedAt: h.performedAt,
-          reason: h.reason ?? undefined,
-          previousQuantity: h.previousQuantity ?? undefined,
-          newQuantity: h.newQuantity ?? undefined,
-        })),
-      )
-      .sort((a, b) => new Date(a.performedAt).getTime() - new Date(b.performedAt).getTime());
+    // History is built independently of `items`: it must include cancelled,
+    // completed and replaced reservations, which `items` deliberately excludes.
+    const history = await this.buildTaskHistory(taskId);
 
     return { items, history };
   }
 
   // ─── updateTaskReservations ──────────────────────────────────────────────────
 
-  async updateTaskReservations(taskId: number, dto: CreateReservationDto) {
+  async updateTaskReservations(taskId: number, dto: CreateReservationDto, performedBy?: number) {
     this.logger.log(
       `UPDATE reservation | taskId=${taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
     );
@@ -977,7 +1244,7 @@ export class ReservationsService {
             existing.id,
             existing.status as ResourceReservationStatus,
             ResourceReservationStatus.CANCELLED,
-            { reason: 'Resource removed from task' },
+            { reason: 'Resource removed from task', performedBy },
           );
         }
       }
@@ -1019,7 +1286,7 @@ export class ReservationsService {
                 existing.id,
                 existing.status as ResourceReservationStatus,
                 ResourceReservationStatus.CANCELLED,
-                { reason: 'Date removed from task' },
+                { reason: 'Date removed from task', performedBy },
               );
             }
           }
@@ -1093,6 +1360,7 @@ export class ReservationsService {
                     previousQuantity: quantityChanged ? existing.quantity : undefined,
                     newQuantity: quantityChanged ? resource.quantity : undefined,
                     reason: 'Task updated',
+                    performedBy,
                   },
                 );
               }
@@ -1114,7 +1382,7 @@ export class ReservationsService {
                   status,
                 },
               });
-              await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Task updated' });
+              await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Task updated', performedBy });
             }
           }
         } else {
@@ -1184,6 +1452,7 @@ export class ReservationsService {
                   previousQuantity: quantityChanged ? existing.quantity : undefined,
                   newQuantity: quantityChanged ? resource.quantity : undefined,
                   reason: 'Task updated',
+                  performedBy,
                 },
               );
             }
@@ -1205,7 +1474,7 @@ export class ReservationsService {
                 status,
               },
             });
-            await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Task updated' });
+            await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Task updated', performedBy });
           }
         }
       }

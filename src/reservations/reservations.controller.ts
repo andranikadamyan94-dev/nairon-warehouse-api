@@ -39,8 +39,8 @@ export class ReservationsController {
   @Permissions('view_warehouse', 'manage_reservations')
   @ApiOperation({ summary: 'Create resource reservations' })
   @ApiResponse({ status: 201 })
-  create(@Body() dto: CreateReservationDto) {
-    return this.reservationsService.create(dto);
+  create(@Body() dto: CreateReservationDto, @LoggedInUser('id') userId?: number) {
+    return this.reservationsService.create(dto, userId);
   }
 
   @Patch('task/:taskId')
@@ -49,8 +49,10 @@ export class ReservationsController {
   updateTaskReservations(
     @Param('taskId') taskId: string,
     @Body() dto: CreateReservationDto,
+    // Task-side edits were the only flow writing history with no author.
+    @LoggedInUser('id') userId?: number,
   ) {
-    return this.reservationsService.updateTaskReservations(+taskId, dto);
+    return this.reservationsService.updateTaskReservations(+taskId, dto, userId);
   }
 
   @Get('task/:taskId')

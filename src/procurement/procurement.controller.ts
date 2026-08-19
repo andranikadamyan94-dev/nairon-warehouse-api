@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body, Controller, Delete, Get, Param, ParseIntPipe,
   Patch, Post, UploadedFile, UseGuards, UseInterceptors, Query,
 } from '@nestjs/common';
@@ -11,6 +12,8 @@ import { ProcurementOrderStatus } from '../common/enums/procurement-order-status
 import { Public } from '../auth/decorators/public.decorator';
 import { InternalGuard } from '../auth/guards/internal.guard';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
+import { LoggedInUser } from '../auth/decorators/logged-in-user.decorator';
+import { ReceiveDeliveryLineDto } from './dto/receive-delivery.dto';
 
 @ApiTags('Procurement')
 @Controller('procurement')
@@ -56,12 +59,42 @@ export class ProcurementController {
   @Patch(':id/receive')
   @UseInterceptors(FileInterceptor('receipt'))
   @ApiConsumes('multipart/form-data')
-  @ApiOperation({ summary: 'Mark order as RECEIVED — requires receipt file upload' })
+  @ApiOperation({
+    summary:
+      'Record a delivery — requires a receipt file. Send `lines` for a partial delivery; omit it to receive the whole outstanding remainder.',
+  })
   receive(
     @Param('id', ParseIntPipe) id: number,
     @UploadedFile() receipt: Express.Multer.File,
+    @Body() body: { lines?: string | ReceiveDeliveryLineDto[]; notes?: string },
+    @LoggedInUser('id') userId?: number,
   ) {
-    return this.procurementService.receive(id, receipt);
+    // multipart carries everything as strings, so a per-line array arrives
+    // JSON-encoded rather than as a real array.
+    let lines: ReceiveDeliveryLineDto[] | undefined;
+    if (typeof body?.lines === 'string' && body.lines.trim()) {
+      try {
+        lines = JSON.parse(body.lines);
+      } catch {
+        throw new BadRequestException('`lines` must be valid JSON');
+      }
+    } else if (Array.isArray(body?.lines)) {
+      lines = body.lines;
+    }
+    return this.procurementService.receive(id, receipt, { lines, notes: body?.notes }, userId);
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_procurement')
+  @Patch(':id/close-short')
+  @ApiOperation({
+    summary: 'Settle a partially delivered order — the outstanding quantity is not coming',
+  })
+  closeShort(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { reason?: string },
+  ) {
+    return this.procurementService.closeShort(id, body?.reason);
   }
 
   @UseGuards(PermissionGuard)
@@ -102,9 +135,9 @@ export class ProcurementController {
   @ApiOperation({ summary: 'Finance approval callback (called by finance API)' })
   financeCallback(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { status: 'APPROVED' | 'REJECTED' },
+    @Body() body: { status: 'APPROVED' | 'REJECTED'; rejectionReason?: string },
   ) {
-    return this.procurementService.financeCallback(id, body.status);
+    return this.procurementService.financeCallback(id, body.status, body.rejectionReason);
   }
 
   @UseGuards(PermissionGuard)

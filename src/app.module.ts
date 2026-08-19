@@ -2,6 +2,9 @@ import { MiddlewareConsumer, Global, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { LoggingMiddleware } from './common/middleware/logging.middleware';
 import { UsersPrismaService } from './common/users-prisma.service';
+import { WarehouseNotificationsService } from './common/notifications/notifications.service';
+import { StockAlertService } from './common/notifications/stock-alert.service';
+import { SourceController } from './common/source.controller';
 
 import { PrismaModule } from 'prisma/prisma.module';
 
@@ -48,8 +51,9 @@ import { ResourceReturnsModule } from './resource-returns/resource-returns.modul
     ProcurementModule,
     ResourceReturnsModule,
   ],
-  providers: [UsersPrismaService],
-  exports: [UsersPrismaService],
+  controllers: [SourceController],
+  providers: [UsersPrismaService, WarehouseNotificationsService, StockAlertService],
+  exports: [UsersPrismaService, WarehouseNotificationsService, StockAlertService],
 })
 export class AppModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

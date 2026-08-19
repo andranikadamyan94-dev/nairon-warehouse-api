@@ -6,6 +6,8 @@ import {
 
 import { PrismaService } from 'prisma/prisma.service';
 
+import { StockAlertService } from '../common/notifications/stock-alert.service';
+
 import { ItemType } from '../common/enums/item-type.enum';
 
 import {
@@ -15,7 +17,10 @@ import {
 
 @Injectable()
 export class InventoryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly stockAlerts: StockAlertService,
+  ) {}
 
   async createMovement(dto: InventoryMovementDto) {
     const item = await this.prisma.item.findUnique({
@@ -59,8 +64,8 @@ export class InventoryService {
       throw new BadRequestException('Insufficient inventory quantity');
     }
 
-    return this.prisma.$transaction(async (tx) => {
-      const movement = await tx.inventoryMovement.create({
+    const movement = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.inventoryMovement.create({
         data: dto,
       });
 
@@ -73,8 +78,13 @@ export class InventoryService {
         },
       });
 
-      return movement;
+      return created;
     });
+
+    // After commit, never inside the transaction — see StockAlertService.
+    this.stockAlerts.check([item.id]);
+
+    return movement;
   }
 
   async getMovements(itemId?: number) {

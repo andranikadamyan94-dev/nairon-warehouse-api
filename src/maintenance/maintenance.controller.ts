@@ -17,6 +17,7 @@ import { PaginationQueryDto } from 'src/common/dto/pagination-query.dto';
 import { Public } from '../auth/decorators/public.decorator';
 import { InternalGuard } from '../auth/guards/internal.guard';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
+import { FinalizeMaintenanceDto } from './dto/finalize-maintenance.dto';
 
 @ApiTags('Maintenance')
 @Controller('maintenance')
@@ -74,9 +75,9 @@ export class MaintenanceController {
   @ApiOperation({ summary: 'Submit maintenance for finance approval' })
   finalize(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { amount: number },
+    @Body() body: FinalizeMaintenanceDto,
   ) {
-    return this.maintenanceService.finalize(id, body.amount);
+    return this.maintenanceService.finalize(id, body.amount, body.prepaymentAmount);
   }
 
   @UseGuards(PermissionGuard)
@@ -101,9 +102,9 @@ export class MaintenanceController {
   @ApiOperation({ summary: 'Finance approval callback (called by finance API)' })
   financeCallback(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { status: 'APPROVED' | 'REJECTED' },
+    @Body() body: { status: 'APPROVED' | 'REJECTED'; rejectionReason?: string },
   ) {
-    return this.maintenanceService.financeCallback(id, body.status);
+    return this.maintenanceService.financeCallback(id, body.status, body.rejectionReason);
   }
 
   @UseGuards(PermissionGuard)

@@ -4,10 +4,14 @@ import { CreateReturnDto } from './dto/create-return.dto';
 import { ResourceReturnStatus } from '../common/enums/resource-return-status.enum';
 import { ResourceReservationStatus } from '../common/enums/resource-reservation-status.enum';
 import { ItemType } from '../common/enums/item-type.enum';
+import { StockAlertService } from '../common/notifications/stock-alert.service';
 
 @Injectable()
 export class ResourceReturnsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly stockAlerts: StockAlertService,
+  ) {}
 
   private readonly include = {
     reservation: {
@@ -71,7 +75,7 @@ export class ResourceReturnsService {
 
     const isAsset = ret.reservation.item.type === ItemType.ASSET;
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       if (isAsset) {
         // Assets are tracked individually — release all active allocations for this reservation
         await tx.reservationAllocation.updateMany({
@@ -133,6 +137,10 @@ export class ResourceReturnsService {
         include: this.include,
       });
     });
+
+    if (!isAsset) this.stockAlerts.check([ret.reservation.itemId]);
+
+    return result;
   }
 
   async cancel(id: number) {

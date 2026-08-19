@@ -5,6 +5,8 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { SuppliersService } from './suppliers.service';
 import { CreateSupplierDto } from './dto/create-supplier.dto';
 import { UpdateSupplierDto } from './dto/update-supplier.dto';
+import { Public } from '../auth/decorators/public.decorator';
+import { InternalGuard } from '../auth/guards/internal.guard';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 
 @ApiTags('Suppliers')
@@ -17,6 +19,20 @@ export class SuppliersController {
   @Get()
   @ApiOperation({ summary: 'Get all suppliers' })
   findAll(@Query() query: any) { return this.suppliersService.findAll(query); }
+
+  /**
+   * Options for finance's advance form. Finance staff have no warehouse
+   * permissions, so finance-api proxies this with the internal secret rather
+   * than the browser calling it directly. Declared before ':id' — Nest matches
+   * routes in order and 'internal' would otherwise be read as an id.
+   */
+  @Public()
+  @UseGuards(InternalGuard)
+  @Get('internal')
+  @ApiOperation({ summary: 'Supplier options (internal)' })
+  findAllInternal(@Query('search') search?: string) {
+    return this.suppliersService.findOptions(search);
+  }
 
   @UseGuards(PermissionGuard)
   @Permissions('view_partners', 'manage_partners', 'view_procurement', 'manage_procurement')

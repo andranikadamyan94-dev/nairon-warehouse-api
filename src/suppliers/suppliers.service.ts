@@ -16,8 +16,13 @@ export class SuppliersService {
     const limit = Number(query?.limit ?? 20);
     const search = query?.search;
     const order: 'asc' | 'desc' = query?.sortOrder === 'asc' ? 'asc' : 'desc';
-    const orderBy: any =
-      query?.sortBy === 'createdAt' ? { createdAt: order } : { name: query?.sortBy === 'name' ? order : 'asc' };
+    // id last: supplier names are not unique, and tied rows with no tiebreaker
+    // can be arranged differently per query, which makes paged results skip
+    // and repeat entries.
+    const orderBy: any[] =
+      query?.sortBy === 'createdAt'
+        ? [{ createdAt: order }, { id: 'desc' }]
+        : [{ name: query?.sortBy === 'name' ? order : 'asc' }, { id: 'desc' }];
 
     const itemIds = query?.itemIds
       ? String(query.itemIds).split(',').map(Number).filter(Boolean)
@@ -102,5 +107,18 @@ export class SuppliersService {
   async remove(id: number) {
     await this.findOne(id);
     return this.prisma.supplier.delete({ where: { id } });
+  }
+
+  /**
+   * Minimal shape for a picker in another app: id and name only, so the
+   * response carries no pricing or catalogue data across the service boundary.
+   */
+  async findOptions(search?: string) {
+    return this.prisma.supplier.findMany({
+      where: search ? { name: { contains: search, mode: 'insensitive' } } : {},
+      select: { id: true, name: true },
+      orderBy: { name: 'asc' },
+      take: 50,
+    });
   }
 }
