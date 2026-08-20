@@ -98,6 +98,8 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
     // entityId 0 = no entity context, everything counts) and, for
     // people-targeted actions, when the role's department contains the target
     // (role departmentId NULL = org-wide; no department context = all roles).
+    // Grants are additive per entity: a RolePermission row counts when its
+    // own entity matches the context (0 on either side = everywhere).
     // Level-0 roles are global super admins and bypass scoping entirely.
     const hasDeptCtx = targetDepartmentIds !== undefined;
     const deptIds = targetDepartmentIds && targetDepartmentIds.length ? targetDepartmentIds : [-1];
@@ -106,6 +108,7 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
       FROM "UserRole" ur
       JOIN "Role" r ON r.id = ur."roleId"
       LEFT JOIN "RolePermission" rp ON rp."roleId" = r.id
+        AND (rp."entityId" = 0 OR ${entityId} = 0 OR rp."entityId" = ${entityId})
       LEFT JOIN "Permission" p ON p.id = rp."permissionId"
       WHERE ur."userId" = ${userId}
         AND (
