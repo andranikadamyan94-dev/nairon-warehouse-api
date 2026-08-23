@@ -33,8 +33,6 @@ export class PermissionGuard implements CanActivate {
 
     const user = context.switchToHttp().getRequest().user;
     if (!user) throw new ForbiddenException('Access denied');
-    if (user.isAdmin) return true;
-
     const { isSuperAdmin, permissionNames } = await this.usersPrisma.getUserAccessInfo(user.id);
     if (isSuperAdmin) return true;
     if (permissionNames.includes('manage_warehouse')) return true;

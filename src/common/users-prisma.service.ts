@@ -92,7 +92,7 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
     userId: number,
     entityId = 0,
     targetDepartmentIds?: number[],
-  ): Promise<{ isSuperAdmin: boolean; permissionNames: string[] }> {
+  ): Promise<{ isSuperAdmin: boolean; isGlobalSuperAdmin: boolean; permissionNames: string[] }> {
     // Context-aware resolution. An assignment applies when its entity matches
     // the entity in play (assignment entityId 0 = every entity; request
     // entityId 0 = no entity context, everything counts) and, for
@@ -100,32 +100,36 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
     // (role departmentId NULL = org-wide; no department context = all roles).
     // Grants are additive per entity: a RolePermission row counts when its
     // own entity matches the context (0 on either side = everywhere).
-    // Level-0 roles are global super admins and bypass scoping entirely.
+    // Level-0 roles are super admins WITHIN their assignment's entity scope:
+    // a wildcard assignment (entityId 0) makes them global; a scoped one
+    // grants admin only when that entity is the one in play. Department
+    // scoping never applies to level 0.
     const hasDeptCtx = targetDepartmentIds !== undefined;
     const deptIds = targetDepartmentIds && targetDepartmentIds.length ? targetDepartmentIds : [-1];
-    const rows = await this.$queryRaw<{ name: string | null; level: number }[]>`
-      SELECT DISTINCT p.name AS "name", r."level" AS "level"
+    const rows = await this.$queryRaw<{ name: string | null; level: number; urEntityId: number }[]>`
+      SELECT DISTINCT p.name AS "name", r."level" AS "level", ur."entityId" AS "urEntityId"
       FROM "UserRole" ur
       JOIN "Role" r ON r.id = ur."roleId"
       LEFT JOIN "RolePermission" rp ON rp."roleId" = r.id
         AND (rp."entityId" = 0 OR ${entityId} = 0 OR rp."entityId" = ${entityId})
       LEFT JOIN "Permission" p ON p.id = rp."permissionId"
       WHERE ur."userId" = ${userId}
+        AND (${entityId} = 0 OR ur."entityId" = 0 OR ur."entityId" = ${entityId})
         AND (
           r."level" = 0
-          OR (
-            (${entityId} = 0 OR ur."entityId" = 0 OR ur."entityId" = ${entityId})
-            AND (${hasDeptCtx} = false OR r."departmentId" IS NULL OR r."departmentId" = ANY(${deptIds}::int[]))
-          )
+          OR ${hasDeptCtx} = false OR r."departmentId" IS NULL OR r."departmentId" = ANY(${deptIds}::int[])
         )
     `;
     const isSuperAdmin = rows.some((r) => Number(r.level) === 0);
+    const isGlobalSuperAdmin = rows.some(
+      (r) => Number(r.level) === 0 && Number(r.urEntityId) === 0,
+    );
     const permissionNames = [
       ...new Set(
         rows.map((r) => r.name).filter((n): n is string => !!n && n !== '_entity_configured_'),
       ),
     ];
-    return { isSuperAdmin, permissionNames };
+    return { isSuperAdmin, isGlobalSuperAdmin, permissionNames };
   }
 
   /**
