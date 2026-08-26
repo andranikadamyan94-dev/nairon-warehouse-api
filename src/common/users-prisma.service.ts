@@ -100,14 +100,14 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
     // (role departmentId NULL = org-wide; no department context = all roles).
     // Grants are additive per entity: a RolePermission row counts when its
     // own entity matches the context (0 on either side = everywhere).
-    // Level-0 roles are super admins WITHIN their assignment's entity scope:
-    // a wildcard assignment (entityId 0) makes them global; a scoped one
-    // grants admin only when that entity is the one in play. Department
-    // scoping never applies to level 0.
+    // isSuperAdmin roles are super admins WITHIN their assignment's entity
+    // scope: a wildcard assignment (entityId 0) makes them global; a
+    // scoped one grants admin only in that entity. Department
+    // scoping never applies to super-admin roles.
     const hasDeptCtx = targetDepartmentIds !== undefined;
     const deptIds = targetDepartmentIds && targetDepartmentIds.length ? targetDepartmentIds : [-1];
-    const rows = await this.$queryRaw<{ name: string | null; level: number; urEntityId: number }[]>`
-      SELECT DISTINCT p.name AS "name", r."level" AS "level", ur."entityId" AS "urEntityId"
+    const rows = await this.$queryRaw<{ name: string | null; isSuperAdmin: boolean; urEntityId: number }[]>`
+      SELECT DISTINCT p.name AS "name", r."isSuperAdmin" AS "isSuperAdmin", ur."entityId" AS "urEntityId"
       FROM "UserRole" ur
       JOIN "Role" r ON r.id = ur."roleId"
       LEFT JOIN "RolePermission" rp ON rp."roleId" = r.id
@@ -116,13 +116,13 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
       WHERE ur."userId" = ${userId}
         AND (${entityId} = 0 OR ur."entityId" = 0 OR ur."entityId" = ${entityId})
         AND (
-          r."level" = 0
+          r."isSuperAdmin" = true
           OR ${hasDeptCtx} = false OR r."departmentId" IS NULL OR r."departmentId" = ANY(${deptIds}::int[])
         )
     `;
-    const isSuperAdmin = rows.some((r) => Number(r.level) === 0);
+    const isSuperAdmin = rows.some((r) => r.isSuperAdmin === true);
     const isGlobalSuperAdmin = rows.some(
-      (r) => Number(r.level) === 0 && Number(r.urEntityId) === 0,
+      (r) => r.isSuperAdmin === true && Number(r.urEntityId) === 0,
     );
     const permissionNames = [
       ...new Set(
@@ -161,7 +161,7 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
       JOIN "Role" r ON r.id = ur."roleId"
       LEFT JOIN "RolePermission" rp ON rp."roleId" = r.id
       LEFT JOIN "Permission" p ON p.id = rp."permissionId"
-      WHERE p.name = ANY(${permissions}::text[]) OR r."level" = 0
+      WHERE p.name = ANY(${permissions}::text[]) OR r."isSuperAdmin" = true
     `;
   }
 }
