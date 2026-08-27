@@ -1355,11 +1355,20 @@ export class ReservationsService {
               });
               const activeAllocCount = activeAllocAgg._sum.quantity ?? 0;
 
-              if (activeAllocCount > resource.quantity) {
+              // A consumable cannot be reduced below what was handed out —
+              // the goods are with the task and stock was already deducted;
+              // releasing the allocation without restocking would lose the
+              // units. Physical give-backs go through the returns flow.
+              const targetQuantity =
+                itemTypeMap.get(resource.itemId) !== ItemType.ASSET
+                  ? Math.max(resource.quantity, activeAllocCount)
+                  : resource.quantity;
+
+              if (activeAllocCount > targetQuantity) {
                 const excessAllocs = await tx.reservationAllocation.findMany({
                   where: { reservationId: existing.id, releasedAt: null },
                   orderBy: { id: 'desc' },
-                  take: activeAllocCount - resource.quantity,
+                  take: activeAllocCount - targetQuantity,
                 });
                 for (const alloc of excessAllocs) {
                   await tx.reservationAllocation.update({
@@ -1377,21 +1386,21 @@ export class ReservationsService {
                 }
               }
 
-              const effectiveAllocCount = Math.min(activeAllocCount, resource.quantity);
+              const effectiveAllocCount = Math.min(activeAllocCount, targetQuantity);
 
               let newStatus: ResourceReservationStatus;
               if (unavailable) newStatus = ResourceReservationStatus.PENDING;
               else if (effectiveAllocCount === 0) newStatus = ResourceReservationStatus.APPROVED;
-              else if (effectiveAllocCount >= resource.quantity) newStatus = ResourceReservationStatus.ALLOCATED;
+              else if (effectiveAllocCount >= targetQuantity) newStatus = ResourceReservationStatus.ALLOCATED;
               else newStatus = ResourceReservationStatus.PARTIALLY_ALLOCATED;
 
-              const quantityChanged = existing.quantity !== resource.quantity;
+              const quantityChanged = existing.quantity !== targetQuantity;
               const statusChanged = existing.status !== newStatus;
 
               await tx.resourceReservation.update({
                 where: { id: existing.id },
                 data: {
-                  quantity: resource.quantity,
+                  quantity: targetQuantity,
                   startDate: slot.startDate,
                   endDate: slot.endDate,
                   projectId: dto.projectId ?? existing.projectId,
@@ -1410,7 +1419,7 @@ export class ReservationsService {
                   newStatus,
                   {
                     previousQuantity: quantityChanged ? existing.quantity : undefined,
-                    newQuantity: quantityChanged ? resource.quantity : undefined,
+                    newQuantity: quantityChanged ? targetQuantity : undefined,
                     reason: 'Task updated',
                     performedBy,
                   },
@@ -1451,12 +1460,19 @@ export class ReservationsService {
             });
             const activeAllocCount = activeAllocAgg._sum.quantity ?? 0;
 
+            // Same clamp as the hourly branch: delivered consumables can only
+            // be reduced through the returns flow, never by editing the request.
+            const targetQuantity =
+              itemTypeMap.get(resource.itemId) !== ItemType.ASSET
+                ? Math.max(resource.quantity, activeAllocCount)
+                : resource.quantity;
+
             // Release excess allocations when quantity decreases
-            if (activeAllocCount > resource.quantity) {
+            if (activeAllocCount > targetQuantity) {
               const excessAllocs = await tx.reservationAllocation.findMany({
                 where: { reservationId: existing.id, releasedAt: null },
                 orderBy: { id: 'desc' },
-                take: activeAllocCount - resource.quantity,
+                take: activeAllocCount - targetQuantity,
               });
               for (const alloc of excessAllocs) {
                 await tx.reservationAllocation.update({
@@ -1474,21 +1490,21 @@ export class ReservationsService {
               }
             }
 
-            const effectiveAllocCount = Math.min(activeAllocCount, resource.quantity);
+            const effectiveAllocCount = Math.min(activeAllocCount, targetQuantity);
 
             let newStatus: ResourceReservationStatus;
             if (unavailable) newStatus = ResourceReservationStatus.PENDING;
             else if (effectiveAllocCount === 0) newStatus = ResourceReservationStatus.APPROVED;
-            else if (effectiveAllocCount >= resource.quantity) newStatus = ResourceReservationStatus.ALLOCATED;
+            else if (effectiveAllocCount >= targetQuantity) newStatus = ResourceReservationStatus.ALLOCATED;
             else newStatus = ResourceReservationStatus.PARTIALLY_ALLOCATED;
 
-            const quantityChanged = existing.quantity !== resource.quantity;
+            const quantityChanged = existing.quantity !== targetQuantity;
             const statusChanged = existing.status !== newStatus;
 
             await tx.resourceReservation.update({
               where: { id: existing.id },
               data: {
-                quantity: resource.quantity,
+                quantity: targetQuantity,
                 startDate,
                 endDate,
                 entityId: dto.entityId ?? existing.entityId,
@@ -1505,7 +1521,7 @@ export class ReservationsService {
                 newStatus,
                 {
                   previousQuantity: quantityChanged ? existing.quantity : undefined,
-                  newQuantity: quantityChanged ? resource.quantity : undefined,
+                  newQuantity: quantityChanged ? targetQuantity : undefined,
                   reason: 'Task updated',
                   performedBy,
                 },
