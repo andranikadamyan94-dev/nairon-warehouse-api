@@ -60,30 +60,41 @@ export class AvailabilityService {
     // `maintenanceRecords: { some }` compiles to a correlated EXISTS, so there
     // is no id list at all — the limit becomes unreachable rather than merely
     // further away.
-    const [assetCount, underMaintenance, overlappingReservations] = await Promise.all([
+    const reservationWhere = {
+      itemId: item.id,
+      ...reservationOverlapFilter,
+      status: { notIn: INACTIVE_STATUSES },
+      ...(excludeTaskId ? { taskId: { not: excludeTaskId } } : {}),
+    };
+
+    const [assetCount, underMaintenance, overlappingReservations, handedOut] = await Promise.all([
       this.prisma.asset.count({ where: usableAssets }),
       this.prisma.asset.count({
         where: { ...usableAssets, maintenanceRecords: { some: maintenanceFilter } },
       }),
       this.prisma.resourceReservation.aggregate({
-        where: {
-          itemId: item.id,
-          ...reservationOverlapFilter,
-          status: { notIn: INACTIVE_STATUSES },
-          ...(excludeTaskId ? { taskId: { not: excludeTaskId } } : {}),
-        },
+        where: reservationWhere,
         _sum: { quantity: true },
       }),
+      // Approving a consumable already decrements Item.quantity, so the
+      // handed-out share of a counted reservation is in the stock figure
+      // too. Without crediting it back, every allocated consumable is
+      // subtracted twice and updates knock delivered items back to PENDING.
+      item.type === ItemType.ASSET
+        ? Promise.resolve(null)
+        : this.prisma.reservationAllocation.aggregate({
+            where: { releasedAt: null, reservation: reservationWhere },
+            _sum: { quantity: true },
+          }),
     ]);
 
     let available =
       item.type === ItemType.ASSET ? assetCount : (item.quantity ?? 0);
 
     available = Math.max(0, available - underMaintenance);
-    available = Math.max(
-      0,
-      available - (overlappingReservations._sum.quantity ?? 0),
-    );
+    const reservedSum = overlappingReservations._sum.quantity ?? 0;
+    const alreadyInStockFigure = handedOut?._sum.quantity ?? 0;
+    available = Math.max(0, available - Math.max(0, reservedSum - alreadyInStockFigure));
 
     return available;
   }

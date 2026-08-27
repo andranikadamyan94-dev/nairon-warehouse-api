@@ -546,15 +546,30 @@ export class ReservationsService {
       );
     }
 
-    if (reservation.item.quantity < reservation.quantity) {
+    // Approve only what has not been handed out yet. A reservation knocked
+    // back to PENDING (or bumped to a higher quantity) may already carry
+    // allocations — approving the full amount again would deduct stock twice
+    // for goods that already left the shelf.
+    const alreadyAllocated = await this.prisma.reservationAllocation.aggregate({
+      where: { reservationId, releasedAt: null },
+      _sum: { quantity: true },
+    });
+    const toAllocate = reservation.quantity - (alreadyAllocated._sum.quantity ?? 0);
+    if (toAllocate <= 0) {
       throw new BadRequestException(
-        `Insufficient stock: ${reservation.item.quantity} available, ${reservation.quantity} requested`,
+        `Reservation ${reservationId} is already fully allocated`,
+      );
+    }
+
+    if (reservation.item.quantity < toAllocate) {
+      throw new BadRequestException(
+        `Insufficient stock: ${reservation.item.quantity} available, ${toAllocate} requested`,
       );
     }
 
     const result = await this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.create({
-        data: { reservationId, quantity: reservation.quantity },
+        data: { reservationId, quantity: toAllocate },
       });
 
       await tx.reservationAllocationHistory.create({
@@ -563,13 +578,13 @@ export class ReservationsService {
 
       await tx.item.update({
         where: { id: reservation.item.id },
-        data: { quantity: { decrement: reservation.quantity } },
+        data: { quantity: { decrement: toAllocate } },
       });
 
       await tx.inventoryMovement.create({
         data: {
           itemId: reservation.item.id,
-          quantity: -reservation.quantity,
+          quantity: -toAllocate,
           type: 'OUT',
           taskId: reservation.taskId,
           performedBy,
@@ -1190,9 +1205,10 @@ export class ReservationsService {
     const itemIds = dto.resources.map((r) => r.itemId);
     const items = await this.prisma.item.findMany({
       where: { id: { in: itemIds } },
-      select: { id: true, unit: true },
+      select: { id: true, unit: true, type: true },
     });
     const itemUnitMap = new Map(items.map((i) => [i.id, i.unit]));
+    const itemTypeMap = new Map(items.map((i) => [i.id, i.type]));
 
     const hourlySlots = new Map<number, DaySlot[]>();
     for (const resource of dto.resources) {
@@ -1205,6 +1221,37 @@ export class ReservationsService {
       ...dto,
       excludeTaskId: taskId,
     });
+
+    // excludeTaskId removes this task's reservation ROWS from the math, but a
+    // consumable the warehouse already handed to this task has also left
+    // Item.quantity. Re-sending that row means "keep what I have", not "give
+    // me the same again" — credit the task's own unreleased allocations so
+    // delivered items don't flip back to PENDING on every save.
+    if (availability.unavailableResources.length) {
+      const kept: typeof availability.unavailableResources = [];
+      for (const u of availability.unavailableResources) {
+        if (u.date || itemTypeMap.get(u.itemId) === ItemType.ASSET) {
+          kept.push(u);
+          continue;
+        }
+        const own = await this.prisma.reservationAllocation.aggregate({
+          where: {
+            releasedAt: null,
+            reservation: {
+              taskId,
+              itemId: u.itemId,
+              status: { notIn: INACTIVE_STATUSES },
+            },
+          },
+          _sum: { quantity: true },
+        });
+        const credit = own._sum.quantity ?? 0;
+        if (u.available + credit < u.requested) {
+          kept.push({ ...u, available: u.available + credit });
+        }
+      }
+      availability.unavailableResources = kept;
+    }
     const startDate = new Date(dto.startDate);
     const endDate = new Date(dto.endDate);
 
@@ -1299,9 +1346,14 @@ export class ReservationsService {
             );
 
             if (existing) {
-              const activeAllocCount = await tx.reservationAllocation.count({
+              // Sum of quantities, not row count: an approved consumable is one
+              // allocation row carrying the whole amount (assets are 1 per row,
+              // so the sum is right for both).
+              const activeAllocAgg = await tx.reservationAllocation.aggregate({
                 where: { reservationId: existing.id, releasedAt: null },
+                _sum: { quantity: true },
               });
+              const activeAllocCount = activeAllocAgg._sum.quantity ?? 0;
 
               if (activeAllocCount > resource.quantity) {
                 const excessAllocs = await tx.reservationAllocation.findMany({
@@ -1392,9 +1444,12 @@ export class ReservationsService {
           );
 
           if (existing) {
-            const activeAllocCount = await tx.reservationAllocation.count({
+            // Sum of quantities, not row count — see the hourly branch above.
+            const activeAllocAgg = await tx.reservationAllocation.aggregate({
               where: { reservationId: existing.id, releasedAt: null },
+              _sum: { quantity: true },
             });
+            const activeAllocCount = activeAllocAgg._sum.quantity ?? 0;
 
             // Release excess allocations when quantity decreases
             if (activeAllocCount > resource.quantity) {
