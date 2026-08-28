@@ -1,6 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
-import { IsNumberString, IsOptional, IsString } from 'class-validator';
+import { IsIn, IsNumberString, IsOptional, IsString } from 'class-validator';
 
 export class PaginationQueryDto {
   @ApiPropertyOptional()
@@ -27,4 +27,17 @@ export class PaginationQueryDto {
   @IsOptional()
   @IsString()
   status?: string;
+
+  // The client's tables have sent these since 2026-06-19 and the services
+  // already implement them — but they were never declared here, so the
+  // whitelist pipe 400'd every sorted list request.
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  sortBy?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsIn(['asc', 'desc'])
+  sortOrder?: string;
 }
