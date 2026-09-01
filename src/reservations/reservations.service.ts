@@ -1232,7 +1232,10 @@ export class ReservationsService {
     const reservations = await this.prisma.resourceReservation.findMany({
       where: {
         taskId,
-        status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.COMPLETED] },
+        // COMPLETED stays visible: a fully accepted reservation must keep its
+        // card in the task modal (vanishing on accept read as data loss —
+        // 2026-09-01). Only CANCELLED disappears.
+        status: { not: ResourceReservationStatus.CANCELLED },
         replacedByReservationId: null,
       },
       include: {
@@ -1243,11 +1246,15 @@ export class ReservationsService {
       orderBy: { id: 'asc' },
     });
 
-    // Group by itemId — HOUR items have one DB row per working day
-    const byItem = new Map<number, typeof reservations>();
+    // Group by itemId — HOUR items have one DB row per working day. COMPLETED
+    // reservations each stand alone: folding one into an active group for the
+    // same item (completed earlier + freshly re-requested) would blend two
+    // different lifecycles into one bogus row.
+    const byItem = new Map<number | string, typeof reservations>();
     for (const r of reservations) {
-      if (!byItem.has(r.itemId)) byItem.set(r.itemId, []);
-      byItem.get(r.itemId)!.push(r);
+      const key = r.status === ResourceReservationStatus.COMPLETED ? `done-${r.id}` : r.itemId;
+      if (!byItem.has(key)) byItem.set(key, []);
+      byItem.get(key)!.push(r);
     }
 
     const groups = Array.from(byItem.values());
