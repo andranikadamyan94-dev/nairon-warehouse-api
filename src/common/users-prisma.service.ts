@@ -1,10 +1,18 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 
+// Small cap: this pool only runs point lookups against the shared users DB.
+// See prisma/prisma.service.ts — uncapped pools saturated prod Postgres (P2037).
+const pooledUrl = (url: string | undefined, envVar: string, fallback: number) => {
+  if (!url || url.includes('connection_limit=')) return url;
+  const limit = Number(process.env[envVar]) > 0 ? Number(process.env[envVar]) : fallback;
+  return `${url}${url.includes('?') ? '&' : '?'}connection_limit=${limit}&pool_timeout=20`;
+};
+
 @Injectable()
 export class UsersPrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   constructor() {
-    super({ datasources: { db: { url: process.env.USERS_DATABASE_URL } } });
+    super({ datasources: { db: { url: pooledUrl(process.env.USERS_DATABASE_URL, 'USERS_DB_POOL_LIMIT', 4) } } });
   }
 
   async onModuleInit() {
