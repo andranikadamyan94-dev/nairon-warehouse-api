@@ -87,13 +87,32 @@ export class ReservationsController {
     return this.reservationsService.releaseAllocation(dto.allocationId, undefined, dto.reason);
   }
 
-  // Warehouse staff approves a consumable reservation (no specific asset to assign)
+  // Warehouse staff approves a consumable reservation (no specific asset to
+  // assign). An optional quantity issues just part of the request (#1880) —
+  // the remainder stays open as PARTIALLY_ALLOCATED.
   @Patch(':id/approve')
   @UseGuards(PermissionGuard)
   @Permissions('manage_reservations')
-  @ApiOperation({ summary: 'Approve consumable reservation' })
-  approveConsumable(@Param('id') id: string, @LoggedInUser('id') userId: number) {
-    return this.reservationsService.approveConsumable(+id, userId);
+  @ApiOperation({ summary: 'Approve consumable reservation (optionally a partial quantity)' })
+  approveConsumable(
+    @Param('id') id: string,
+    @LoggedInUser('id') userId: number,
+    @Body() body?: { quantity?: number },
+  ) {
+    return this.reservationsService.approveConsumable(+id, userId, body?.quantity);
+  }
+
+  // The task side confirms physical receipt of issued goods (#1882/#1883).
+  // Any authenticated task participant may call; the service validates the
+  // caller against the task's role slots in CRM.
+  @Patch(':id/accept')
+  @ApiOperation({ summary: 'Task-side acceptance of issued goods (partial allowed with a comment)' })
+  accept(
+    @Param('id') id: string,
+    @LoggedInUser('id') userId: number,
+    @Body() body: { quantity: number; comment?: string },
+  ) {
+    return this.reservationsService.accept(+id, userId, Number(body?.quantity), body?.comment);
   }
 
   // Cancel any active reservation, releasing any allocations

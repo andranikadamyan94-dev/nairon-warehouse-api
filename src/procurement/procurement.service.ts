@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -153,6 +154,52 @@ export class ProcurementService {
     });
   }
 
+  /**
+   * The procurement side's confirmation (2026-09-01 split): finance approved
+   * the money, procurement placed the order with the supplier — from here the
+   * order belongs to warehouse receiving (the Ընդունումներ page). Only this
+   * transition may set ORDERED; the old free-form marking allowed it from any
+   * state, which let orders skip finance entirely.
+   */
+  async confirmOrdered(id: number) {
+    const order = await this.findOne(id);
+    if (order.status !== ProcurementOrderStatus.FINANCE_APPROVED) {
+      throw new BadRequestException(
+        'Միայն ֆինանսների կողմից հաստատված պատվերը կարող է հաստատվել որպես պատվիրված',
+      );
+    }
+    return this.prisma.procurementOrder.update({
+      where: { id },
+      data: { status: ProcurementOrderStatus.ORDERED },
+      include,
+    });
+  }
+
+  /**
+   * The warehouse receiving list: confirmed orders awaiting delivery, orders
+   * mid-delivery, and (for the page's history tab) recently settled ones.
+   */
+  async findReceivable(query?: { history?: string; page?: string; limit?: string }) {
+    const page = Number(query?.page ?? 1);
+    const limit = Number(query?.limit ?? 20);
+    const statuses =
+      query?.history === '1'
+        ? [ProcurementOrderStatus.RECEIVED, ProcurementOrderStatus.CLOSED_SHORT]
+        : [ProcurementOrderStatus.ORDERED, ProcurementOrderStatus.PARTIALLY_RECEIVED];
+    const where = { status: { in: statuses } };
+    const [data, total] = await this.prisma.$transaction([
+      this.prisma.procurementOrder.findMany({
+        where,
+        include,
+        orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.procurementOrder.count({ where }),
+    ]);
+    return { data, total, page, limit };
+  }
+
   async updateStatus(id: number, status: ProcurementOrderStatus) {
     const order = await this.findOne(id);
     if (order.status === ProcurementOrderStatus.RECEIVED) {
@@ -203,6 +250,14 @@ export class ProcurementService {
     if (order.status === ProcurementOrderStatus.FINANCE_REJECTED) {
       throw new BadRequestException(
         'Պատվերը մերժվել է ֆինանսի կողմից և չի կարող ընդունվել',
+      );
+    }
+    // The 2026-09-01 split: after finance approval the PROCUREMENT side must
+    // first confirm the purchase (ORDERED) — only then does the order reach
+    // the warehouse receiving list and become receivable.
+    if (order.status === ProcurementOrderStatus.FINANCE_APPROVED) {
+      throw new BadRequestException(
+        'Պատվերը դեռ հաստատված չէ գնումների կողմից որպես պատվիրված',
       );
     }
     if (!receiptFile) {
@@ -466,6 +521,90 @@ export class ProcurementService {
   /** Value of what has actually been received on an order. */
   private deliveredValue(items: any[]): number {
     return items.reduce((sum, l) => sum + (l.receivedQuantity ?? 0) * (l.unitPrice ?? 0), 0);
+  }
+
+  /**
+   * Cancel an order (2026-09-01 rules). Only the creator — or a super-admin —
+   * may cancel. Anything up to and including ORDERED cancels outright: the
+   * finance transfers (balance AND prepayment, by ref) are voided unless
+   * already booked, and the audience of the procurement alerts is notified.
+   * Mid-delivery (PARTIALLY_RECEIVED) only the remainder cancels — received
+   * stock stays, which is exactly close-short semantics, so it delegates
+   * there. RECEIVED/CLOSED_SHORT/CANCELLED are final.
+   */
+  async cancel(id: number, userId?: number, isSuperAdmin = false, reason?: string) {
+    const order = await this.findOne(id);
+    const status = order.status as ProcurementOrderStatus;
+    if (status === ProcurementOrderStatus.RECEIVED) {
+      throw new BadRequestException('Ստացված պատվերը չի կարող չեղարկվել');
+    }
+    if (status === ProcurementOrderStatus.CLOSED_SHORT) {
+      throw new BadRequestException('Պատվերն արդեն փակված է');
+    }
+    if (status === ProcurementOrderStatus.CANCELLED) {
+      throw new BadRequestException('Պատվերն արդեն չեղարկված է');
+    }
+    if (!isSuperAdmin && order.createdBy != null && order.createdBy !== userId) {
+      throw new ForbiddenException('Միայն պատվերը ստեղծողը կարող է չեղարկել այն');
+    }
+
+    if (status === ProcurementOrderStatus.PARTIALLY_RECEIVED) {
+      return this.closeShort(id, reason ?? 'Չեղարկվել է ստեղծողի կողմից');
+    }
+
+    // Void the money before flipping the status: if finance is unreachable the
+    // cancel fails whole, rather than leaving a live transfer for a dead order.
+    let financeNote: string | undefined;
+    if (
+      [
+        ProcurementOrderStatus.PENDING_FINANCE_APPROVAL,
+        ProcurementOrderStatus.FINANCE_APPROVED,
+        ProcurementOrderStatus.ORDERED,
+      ].includes(status)
+    ) {
+      const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
+      const res = await fetch(`${financeUrl}/api/transfer/external/cancel-by-ref`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-internal-secret': process.env.INTERNAL_SECRET || '',
+        },
+        body: JSON.stringify({
+          externalRef: `warehouse_procurement:${id}`,
+          reason: `Գնման պատվեր #${id} չեղարկվել է${reason ? `՝ ${reason}` : ''}`,
+        }),
+      });
+      if (!res.ok) {
+        throw new BadRequestException(
+          `Ֆինանսական գործարքը չհաջողվեց չեղարկել (finance-api ${res.status})`,
+        );
+      }
+      const voided = (await res.json()) as { cancelled: number[]; skippedCompleted: number[] };
+      if (voided.skippedCompleted?.length) {
+        financeNote =
+          'Ուշադրություն. գործարք(ներ)ը արդեն կատարված են ֆինանսում — գումարի վերադարձը պետք է լուծվի առանձին';
+      }
+    }
+
+    const cancelled = await this.prisma.procurementOrder.update({
+      where: { id },
+      data: { status: ProcurementOrderStatus.CANCELLED },
+      include,
+    });
+
+    void this.notifications.send({
+      permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+      title: 'Գնման պատվերը չեղարկվել է',
+      body: `Գնման պատվեր #${id} չեղարկվել է${reason ? `՝ ${reason}` : ''}։`,
+      path: '/procurement',
+      details: [
+        { label: 'Պատվեր', value: `#${id}` },
+        ...(order.supplier?.name ? [{ label: 'Մատակարար', value: order.supplier.name }] : []),
+        ...(financeNote ? [{ label: 'Ֆինանս', value: financeNote }] : []),
+      ],
+    });
+
+    return financeNote ? { ...cancelled, financeNote } : cancelled;
   }
 
   /**

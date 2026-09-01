@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -525,7 +526,7 @@ export class ReservationsService {
 
   // ─── approve consumable ──────────────────────────────────────────────────────
 
-  async approveConsumable(reservationId: number, performedBy?: number) {
+  async approveConsumable(reservationId: number, performedBy?: number, quantity?: number) {
     const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id: reservationId },
       include: { item: true },
@@ -554,10 +555,23 @@ export class ReservationsService {
       where: { reservationId, releasedAt: null },
       _sum: { quantity: true },
     });
-    const toAllocate = reservation.quantity - (alreadyAllocated._sum.quantity ?? 0);
-    if (toAllocate <= 0) {
+    const outstanding = reservation.quantity - (alreadyAllocated._sum.quantity ?? 0);
+    if (outstanding <= 0) {
       throw new BadRequestException(
         `Reservation ${reservationId} is already fully allocated`,
+      );
+    }
+
+    // Deliberate partial issuance (#1880): staff may hand out part of the
+    // request now — even with full stock on the shelf — and the remainder
+    // stays open. No quantity means the old behavior: everything outstanding.
+    const toAllocate = quantity ?? outstanding;
+    if (!(toAllocate > 0) || !Number.isFinite(toAllocate)) {
+      throw new BadRequestException('Տրամադրվող քանակը պետք է լինի դրական թիվ');
+    }
+    if (toAllocate > outstanding) {
+      throw new BadRequestException(
+        `Տրամադրվող քանակը (${toAllocate}) գերազանցում է չտրամադրված մնացորդը (${outstanding})`,
       );
     }
 
@@ -592,18 +606,24 @@ export class ReservationsService {
         },
       });
 
+      const newStatus =
+        toAllocate < outstanding
+          ? ResourceReservationStatus.PARTIALLY_ALLOCATED
+          : ResourceReservationStatus.ALLOCATED;
       await tx.resourceReservation.update({
         where: { id: reservationId },
-        data: { status: ResourceReservationStatus.ALLOCATED },
+        data: { status: newStatus },
       });
 
-      await this.writeStatusHistory(
-        tx,
-        reservationId,
-        reservation.status as ResourceReservationStatus,
-        ResourceReservationStatus.ALLOCATED,
-        { performedBy },
-      );
+      if (reservation.status !== newStatus) {
+        await this.writeStatusHistory(
+          tx,
+          reservationId,
+          reservation.status as ResourceReservationStatus,
+          newStatus,
+          { performedBy },
+        );
+      }
 
       return { success: true };
     });
@@ -614,14 +634,134 @@ export class ReservationsService {
     void this.notifyRequesters(
       reservation,
       'Ամրագրումը հաստատվել է',
-      'Ձեր առաջադրանքի համար կատարված ամրագրումը հաստատվել է և ռեսուրսը տրամադրվել է։',
+      toAllocate < outstanding
+        ? 'Ձեր առաջադրանքի համար կատարված ամրագրումը մասնակի տրամադրվել է։ Մնացորդը դեռ սպասվում է։'
+        : 'Ձեր առաջադրանքի համար կատարված ամրագրումը հաստատվել է և ռեսուրսը տրամադրվել է։',
       [
         { label: 'Ռեսուրս', value: reservation.item.name },
-        { label: 'Քանակ', value: String(reservation.quantity) },
+        { label: 'Տրամադրված', value: String(toAllocate) },
+        ...(toAllocate < outstanding
+          ? [{ label: 'Մնացորդ', value: String(outstanding - toAllocate) }]
+          : []),
       ],
     );
 
     return result;
+  }
+
+  // ─── task-side acceptance (#1882/#1883) ─────────────────────────────────────
+
+  /**
+   * The task confirms it physically received issued goods. Any of the task's
+   * three role slots may confirm (validated against CRM); partial acceptance
+   * is allowed with an explanatory comment that stays visible to warehouse
+   * staff. Invariant: accepted ≤ issued ≤ requested. Accepting the full
+   * requested quantity flips the reservation to COMPLETED — this is that
+   * status's only setter.
+   */
+  async accept(
+    reservationId: number,
+    userId: number,
+    quantity: number,
+    comment?: string,
+  ) {
+    const reservation = await this.prisma.resourceReservation.findUnique({
+      where: { id: reservationId },
+      include: { item: true },
+    });
+    if (!reservation) throw new NotFoundException('Reservation not found');
+    if (INACTIVE_STATUSES.includes(reservation.status as ResourceReservationStatus)) {
+      throw new BadRequestException(`Reservation is already ${reservation.status}`);
+    }
+    if (!reservation.taskId) {
+      throw new BadRequestException('Միայն առաջադրանքի ամրագրումները կարող են ընդունվել այս ձևով');
+    }
+
+    const { isSuperAdmin } = await this.usersPrisma.getUserAccessInfo(userId);
+    if (!isSuperAdmin) {
+      await this.assertTaskRole(reservation.taskId, userId);
+    }
+
+    const issuedAgg = await this.prisma.reservationAllocation.aggregate({
+      where: { reservationId, releasedAt: null },
+      _sum: { quantity: true },
+    });
+    const issued = issuedAgg._sum.quantity ?? 0;
+    const acceptable = issued - (reservation.acceptedQuantity ?? 0);
+    if (acceptable <= 0) {
+      throw new BadRequestException('Ընդունելու ենթակա տրամադրված քանակ չկա');
+    }
+    if (!(quantity > 0) || !Number.isFinite(quantity)) {
+      throw new BadRequestException('Ընդունվող քանակը պետք է լինի դրական թիվ');
+    }
+    if (quantity > acceptable) {
+      throw new BadRequestException(
+        `Ընդունվող քանակը (${quantity}) գերազանցում է տրամադրված չընդունված մնացորդը (${acceptable})`,
+      );
+    }
+    const partial = quantity < acceptable;
+    if (partial && !comment?.trim()) {
+      throw new BadRequestException(
+        'Մասնակի ընդունման դեպքում պարտադիր է նշել պատճառը',
+      );
+    }
+
+    const newAccepted = (reservation.acceptedQuantity ?? 0) + quantity;
+    const completes = newAccepted >= reservation.quantity;
+    const stamp = `[${new Date().toISOString().slice(0, 10)}] ${comment?.trim() ?? ''}`.trim();
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const row = await tx.resourceReservation.update({
+        where: { id: reservationId },
+        data: {
+          acceptedQuantity: newAccepted,
+          ...(comment?.trim()
+            ? {
+                acceptanceComment: reservation.acceptanceComment
+                  ? `${reservation.acceptanceComment}\n${stamp}`
+                  : stamp,
+              }
+            : {}),
+          ...(completes ? { status: ResourceReservationStatus.COMPLETED } : {}),
+        },
+      });
+      if (completes) {
+        await this.writeStatusHistory(
+          tx,
+          reservationId,
+          reservation.status as ResourceReservationStatus,
+          ResourceReservationStatus.COMPLETED,
+          { performedBy: userId, reason: 'Ամբողջ քանակն ընդունվել է առաջադրանքի կողմից' },
+        );
+      }
+      return row;
+    });
+
+    return updated;
+  }
+
+  /** The acceptor/executor/responsible slots of the task, asked from CRM —
+   * the warehouse has no task-role data of its own. */
+  private async assertTaskRole(taskId: number, userId: number) {
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    let task: any;
+    try {
+      const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
+        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      task = await res.json();
+    } catch {
+      throw new BadRequestException('Առաջադրանքի տվյալները հասանելի չեն — փորձեք կրկին');
+    }
+    const inRole = ['acceptors', 'executors', 'responsibles'].some((r) =>
+      (task?.[r] ?? []).some((u: any) => (u.id ?? u.userId) === userId),
+    );
+    if (!inRole) {
+      throw new ForbiddenException(
+        'Ընդունել կարող են միայն առաջադրանքի Կատարողը, Ստուգողը կամ Պատասխանատուն',
+      );
+    }
   }
 
   // ─── cancel ──────────────────────────────────────────────────────────────────
@@ -1171,6 +1311,13 @@ export class ReservationsService {
         (sum, r) => sum + r.allocations.reduce((s, a) => s + (a.quantity ?? 1), 0),
         0,
       );
+      // The acceptance handshake (#1882): what is currently in the task's
+      // hands (issued = unreleased allocations) vs what they've confirmed.
+      const issuedQuantity = group.reduce(
+        (sum, r) => sum + r.allocations.filter((a) => !a.releasedAt).reduce((s, a) => s + (a.quantity ?? 1), 0),
+        0,
+      );
+      const acceptedQuantity = group.reduce((s, r) => s + ((r as any).acceptedQuantity ?? 0), 0);
       return [{
         reservationId: first.id,
         itemId: first.itemId,
@@ -1179,6 +1326,8 @@ export class ReservationsService {
         unit: first.item.unit ?? undefined,
         requestedQuantity: first.quantity,
         allocatedQuantity,
+        issuedQuantity,
+        acceptedQuantity,
         status: first.status,
         startTime: undefined,
         endTime: undefined,

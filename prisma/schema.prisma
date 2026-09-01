@@ -213,6 +213,16 @@ model ResourceReservation {
 
   quantity Int
 
+  /// Task-side acceptance (2026-09-01 handshake): how much of the ISSUED
+  /// quantity the task has confirmed receiving. Invariant accepted ≤ issued ≤
+  /// requested; full acceptance of the requested quantity flips the
+  /// reservation to COMPLETED — the status's first and only setter.
+  acceptedQuantity  Int     @default(0)
+  /// The task user's explanation when accepting less than what was issued
+  /// (broken delivery, over-estimated request, …). Appended per acceptance and
+  /// deliberately surfaced to warehouse staff.
+  acceptanceComment String?
+
   status ResourceReservationStatus @default(PENDING)
 
   startDate DateTime
