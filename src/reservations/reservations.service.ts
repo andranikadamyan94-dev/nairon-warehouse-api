@@ -566,8 +566,10 @@ export class ReservationsService {
     // request now — even with full stock on the shelf — and the remainder
     // stays open. No quantity means the old behavior: everything outstanding.
     const toAllocate = quantity ?? outstanding;
-    if (!(toAllocate > 0) || !Number.isFinite(toAllocate)) {
-      throw new BadRequestException('Տրամադրվող քանակը պետք է լինի դրական թիվ');
+    // Integer only: quantities are Int columns — a fractional value would die
+    // in Prisma as a 500 instead of an honest 400.
+    if (!Number.isInteger(toAllocate) || toAllocate <= 0) {
+      throw new BadRequestException('Տրամադրվող քանակը պետք է լինի դրական ամբողջ թիվ');
     }
     if (toAllocate > outstanding) {
       throw new BadRequestException(
@@ -676,68 +678,88 @@ export class ReservationsService {
     if (!reservation.taskId) {
       throw new BadRequestException('Միայն առաջադրանքի ամրագրումները կարող են ընդունվել այս ձևով');
     }
+    // Goods only. An asset reservation flipped COMPLETED while the asset is
+    // physically out would look FREE to availability — a double-booking trap.
+    if (reservation.item.type !== ItemType.CONSUMABLE) {
+      throw new BadRequestException('Միայն ապրանքային (ծախսվող) ամրագրումները կարող են ընդունվել');
+    }
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new BadRequestException('Ընդունվող քանակը պետք է լինի դրական ամբողջ թիվ');
+    }
 
     const { isSuperAdmin } = await this.usersPrisma.getUserAccessInfo(userId);
     if (!isSuperAdmin) {
       await this.assertTaskRole(reservation.taskId, userId);
     }
 
-    const issuedAgg = await this.prisma.reservationAllocation.aggregate({
-      where: { reservationId, releasedAt: null },
-      _sum: { quantity: true },
-    });
-    const issued = issuedAgg._sum.quantity ?? 0;
-    const acceptable = issued - (reservation.acceptedQuantity ?? 0);
-    if (acceptable <= 0) {
-      throw new BadRequestException('Ընդունելու ենթակա տրամադրված քանակ չկա');
-    }
-    if (!(quantity > 0) || !Number.isFinite(quantity)) {
-      throw new BadRequestException('Ընդունվող քանակը պետք է լինի դրական թիվ');
-    }
-    if (quantity > acceptable) {
-      throw new BadRequestException(
-        `Ընդունվող քանակը (${quantity}) գերազանցում է տրամադրված չընդունված մնացորդը (${acceptable})`,
-      );
-    }
-    const partial = quantity < acceptable;
-    if (partial && !comment?.trim()) {
-      throw new BadRequestException(
-        'Մասնակի ընդունման դեպքում պարտադիր է նշել պատճառը',
-      );
-    }
-
-    const newAccepted = (reservation.acceptedQuantity ?? 0) + quantity;
-    const completes = newAccepted >= reservation.quantity;
-    const stamp = `[${new Date().toISOString().slice(0, 10)}] ${comment?.trim() ?? ''}`.trim();
-
-    const updated = await this.prisma.$transaction(async (tx) => {
-      const row = await tx.resourceReservation.update({
+    // Optimistic concurrency: two role-holders confirming at once must not
+    // silently overwrite each other's acceptance — the write only lands if
+    // acceptedQuantity is still what this attempt validated against.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = await this.prisma.resourceReservation.findUnique({
         where: { id: reservationId },
-        data: {
-          acceptedQuantity: newAccepted,
-          ...(comment?.trim()
-            ? {
-                acceptanceComment: reservation.acceptanceComment
-                  ? `${reservation.acceptanceComment}\n${stamp}`
-                  : stamp,
-              }
-            : {}),
-          ...(completes ? { status: ResourceReservationStatus.COMPLETED } : {}),
-        },
+        select: { quantity: true, status: true, acceptedQuantity: true, acceptanceComment: true },
       });
-      if (completes) {
-        await this.writeStatusHistory(
-          tx,
-          reservationId,
-          reservation.status as ResourceReservationStatus,
-          ResourceReservationStatus.COMPLETED,
-          { performedBy: userId, reason: 'Ամբողջ քանակն ընդունվել է առաջադրանքի կողմից' },
+      if (!current) throw new NotFoundException('Reservation not found');
+
+      const issuedAgg = await this.prisma.reservationAllocation.aggregate({
+        where: { reservationId, releasedAt: null },
+        _sum: { quantity: true },
+      });
+      const issued = issuedAgg._sum.quantity ?? 0;
+      const acceptable = issued - (current.acceptedQuantity ?? 0);
+      if (acceptable <= 0) {
+        throw new BadRequestException('Ընդունելու ենթակա տրամադրված քանակ չկա');
+      }
+      if (quantity > acceptable) {
+        throw new BadRequestException(
+          `Ընդունվող քանակը (${quantity}) գերազանցում է տրամադրված չընդունված մնացորդը (${acceptable})`,
         );
       }
-      return row;
-    });
+      if (quantity < acceptable && !comment?.trim()) {
+        throw new BadRequestException(
+          'Մասնակի ընդունման դեպքում պարտադիր է նշել պատճառը',
+        );
+      }
 
-    return updated;
+      const newAccepted = (current.acceptedQuantity ?? 0) + quantity;
+      const completes = newAccepted >= current.quantity;
+      const stamp = `[${new Date().toISOString().slice(0, 10)}] ${comment?.trim() ?? ''}`.trim();
+
+      const landed = await this.prisma.$transaction(async (tx) => {
+        const res = await tx.resourceReservation.updateMany({
+          where: { id: reservationId, acceptedQuantity: current.acceptedQuantity ?? 0 },
+          data: {
+            acceptedQuantity: newAccepted,
+            ...(comment?.trim()
+              ? {
+                  acceptanceComment: current.acceptanceComment
+                    ? `${current.acceptanceComment}\n${stamp}`
+                    : stamp,
+                }
+              : {}),
+            ...(completes ? { status: ResourceReservationStatus.COMPLETED } : {}),
+          },
+        });
+        if (res.count === 0) return false;
+        if (completes) {
+          await this.writeStatusHistory(
+            tx,
+            reservationId,
+            current.status as ResourceReservationStatus,
+            ResourceReservationStatus.COMPLETED,
+            { performedBy: userId, reason: 'Ամբողջ քանակն ընդունվել է առաջադրանքի կողմից' },
+          );
+        }
+        return true;
+      });
+
+      if (landed) {
+        return this.prisma.resourceReservation.findUnique({ where: { id: reservationId } });
+      }
+      // someone else's acceptance landed first — re-validate against fresh state
+    }
+    throw new BadRequestException('Զուգահեռ ընդունում է կատարվել — թարմացրեք էջը և կրկնեք');
   }
 
   /** The acceptor/executor/responsible slots of the task, asked from CRM —
@@ -1651,6 +1673,13 @@ export class ReservationsService {
             let newStatus: ResourceReservationStatus;
             if (unavailable) newStatus = ResourceReservationStatus.PENDING;
             else if (effectiveAllocCount === 0) newStatus = ResourceReservationStatus.APPROVED;
+            else if (
+              // A request reduced down to what was already accepted has nothing
+              // left to issue or confirm — close it, or it sits ALLOCATED forever.
+              effectiveAllocCount >= targetQuantity &&
+              ((existing as any).acceptedQuantity ?? 0) >= targetQuantity
+            )
+              newStatus = ResourceReservationStatus.COMPLETED;
             else if (effectiveAllocCount >= targetQuantity) newStatus = ResourceReservationStatus.ALLOCATED;
             else newStatus = ResourceReservationStatus.PARTIALLY_ALLOCATED;
 

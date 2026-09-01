@@ -91,9 +91,12 @@ export class ProcurementService {
     return order;
   }
 
-  async create(dto: CreateProcurementDto) {
+  async create(dto: CreateProcurementDto, createdBy?: number) {
     return this.prisma.procurementOrder.create({
       data: {
+        // Stamped reliably: cancel is creator-only, and a null creator would
+        // let ANY manage_procurement holder through that gate.
+        createdBy: createdBy ?? null,
         supplierId: dto.supplierId ?? null,
         notes: dto.notes ?? null,
         prepaymentAmount: dto.prepaymentAmount ?? null,

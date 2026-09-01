@@ -29,8 +29,10 @@ export class ProcurementController {
   // Receiving belongs to the warehouse side of the 2026-09-01 split: orders
   // the procurement side has confirmed (ORDERED) plus anything mid-delivery,
   // served to the Ընդունումներ page under warehouse permissions.
+  // Deliberately NOT view_resources: receivable orders carry supplier names
+  // and unit prices — broad viewers have no business seeing purchase terms.
   @UseGuards(PermissionGuard)
-  @Permissions('view_resources', 'manage_inventory', 'manage_warehouse')
+  @Permissions('manage_inventory', 'manage_warehouse')
   @Get('receivable')
   @ApiOperation({ summary: 'Orders awaiting or amid delivery (warehouse receiving list)' })
   findReceivable(@Query() query: any) { return this.procurementService.findReceivable(query); }
@@ -45,7 +47,9 @@ export class ProcurementController {
   @Permissions('manage_procurement')
   @Post()
   @ApiOperation({ summary: 'Create procurement order' })
-  create(@Body() dto: CreateProcurementDto) { return this.procurementService.create(dto); }
+  create(@Body() dto: CreateProcurementDto, @LoggedInUser('id') userId?: number) {
+    return this.procurementService.create(dto, userId);
+  }
 
   @UseGuards(PermissionGuard)
   @Permissions('manage_procurement')
