@@ -5,6 +5,7 @@ import {
   Param,
   ParseIntPipe,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 
@@ -36,17 +37,35 @@ export class InventoryController {
     return this.inventoryService.createMovement(dto);
   }
 
+  // The movements ledger page has its own permission (2026-09-02); the two
+  // inventory super-perms keep access so warehouse staff need no extra grant.
   @UseGuards(PermissionGuard)
-  @Permissions('view_resources', 'manage_inventory', 'manage_items')
+  @Permissions(
+    'view_inventory_movements',
+    'manage_inventory',
+    'manage_reservations', // per-task waybill export from the reservations page
+    'manage_warehouse',
+  )
   @Get('movements')
   @ApiOperation({
-    summary: 'Get inventory movements',
+    summary: 'Get inventory movements (filterable, paginated)',
   })
   @ApiResponse({
     status: 200,
   })
-  getMovements() {
-    return this.inventoryService.getMovements();
+  getMovements(
+    @Query()
+    query: {
+      itemId?: string;
+      taskId?: string;
+      type?: string;
+      from?: string;
+      to?: string;
+      page?: string;
+      limit?: string;
+    },
+  ) {
+    return this.inventoryService.getMovements(query);
   }
 
   @UseGuards(PermissionGuard)
@@ -58,10 +77,15 @@ export class InventoryController {
   @ApiResponse({
     status: 200,
   })
-  getItemMovements(
+  async getItemMovements(
     @Param('itemId', ParseIntPipe)
     itemId: number,
   ) {
-    return this.inventoryService.getMovements(itemId);
+    // Item drawer expects a bare array — unwrap the paged shape.
+    const res = await this.inventoryService.getMovements({
+      itemId: String(itemId),
+      limit: '1000',
+    });
+    return res.data;
   }
 }

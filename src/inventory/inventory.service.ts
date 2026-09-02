@@ -7,6 +7,7 @@ import {
 import { PrismaService } from 'prisma/prisma.service';
 
 import { StockAlertService } from '../common/notifications/stock-alert.service';
+import { UsersPrismaService } from '../common/users-prisma.service';
 
 import { ItemType } from '../common/enums/item-type.enum';
 
@@ -20,6 +21,7 @@ export class InventoryService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stockAlerts: StockAlertService,
+    private readonly usersPrisma: UsersPrismaService,
   ) {}
 
   async createMovement(dto: InventoryMovementDto) {
@@ -87,20 +89,56 @@ export class InventoryService {
     return movement;
   }
 
-  async getMovements(itemId?: number) {
-    return this.prisma.inventoryMovement.findMany({
-      where: itemId
-        ? {
-            itemId,
-          }
-        : undefined,
-      include: {
-        item: true,
-        supplier: { select: { id: true, name: true } },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
+  /**
+   * The movements ledger (2026-09-02 page + waybill export): filterable and
+   * paginated, with performer names resolved from the shared users DB so the
+   * page never shows bare ids.
+   */
+  async getMovements(query?: {
+    itemId?: string;
+    taskId?: string;
+    type?: string;
+    from?: string;
+    to?: string;
+    page?: string;
+    limit?: string;
+  }) {
+    const page = Number(query?.page ?? 1);
+    const limit = Number(query?.limit ?? 20);
+    const where: any = {};
+    if (query?.itemId) where.itemId = Number(query.itemId);
+    if (query?.taskId) where.taskId = Number(query.taskId);
+    if (query?.type) where.type = query.type;
+    if (query?.from || query?.to) {
+      where.createdAt = {
+        ...(query?.from ? { gte: new Date(query.from) } : {}),
+        ...(query?.to ? { lte: new Date(`${query.to}T23:59:59.999Z`) } : {}),
+      };
+    }
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.inventoryMovement.findMany({
+        where,
+        include: {
+          item: true,
+          supplier: { select: { id: true, name: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.inventoryMovement.count({ where }),
+    ]);
+
+    const performerIds = [...new Set(rows.map((r) => r.performedBy).filter((x): x is number => x != null))];
+    const performers = await this.usersPrisma.getUsersByIds(performerIds);
+    const nameOf = new Map(performers.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
+
+    return {
+      data: rows.map((r) => ({ ...r, performedByName: r.performedBy ? nameOf.get(r.performedBy) ?? null : null })),
+      total,
+      page,
+      limit,
+    };
   }
 }
