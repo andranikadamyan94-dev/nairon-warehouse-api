@@ -1257,29 +1257,64 @@ export class ReservationsService {
       : query.sortBy === 'createdAt' ? [{ createdAt: order }, { id: 'desc' }]
       : [{ createdAt: 'desc' }, { taskId: 'asc' }, { id: 'desc' }];
 
-    const [data, total] = await Promise.all([
-      this.prisma.resourceReservation.findMany({
+    const include = {
+      item: true,
+      allocations: {
+        where: { releasedAt: null },
+        include: { asset: true },
+      },
+      allocationHistory: {
+        include: { asset: true },
+        orderBy: { performedAt: 'asc' as const },
+      },
+      statusHistory: {
+        orderBy: { performedAt: 'asc' as const },
+      },
+    };
+
+    let data: any[];
+    let total: number;
+    if (query.groupByTask === '1') {
+      // Group-key pagination (2026-09-03): a page holds N task-groups (a
+      // taskless reservation is its own group), and every group arrives with
+      // ALL its matching rows — grouping can't be split by a page boundary.
+      // Keys keep the requested sort: a group ranks where its best-ranked row
+      // ranks.
+      const keyRows = await this.prisma.resourceReservation.findMany({
         where,
-        skip: (page - 1) * limit,
-        take: limit,
-        include: {
-          item: true,
-          allocations: {
-            where: { releasedAt: null },
-            include: { asset: true },
-          },
-          allocationHistory: {
-            include: { asset: true },
-            orderBy: { performedAt: 'asc' },
-          },
-          statusHistory: {
-            orderBy: { performedAt: 'asc' },
-          },
-        },
+        select: { id: true, taskId: true },
         orderBy,
-      }),
-      this.prisma.resourceReservation.count({ where }),
-    ]);
+      });
+      const seen = new Set<string>();
+      const keys: { id: number; taskId: number | null }[] = [];
+      for (const r of keyRows) {
+        const k = r.taskId != null ? `t${r.taskId}` : `r${r.id}`;
+        if (!seen.has(k)) {
+          seen.add(k);
+          keys.push(r);
+        }
+      }
+      total = keys.length;
+      const slice = keys.slice((page - 1) * limit, page * limit);
+      const taskIds = slice.filter((s) => s.taskId != null).map((s) => s.taskId as number);
+      const soloIds = slice.filter((s) => s.taskId == null).map((s) => s.id);
+      data = await this.prisma.resourceReservation.findMany({
+        where: { AND: [where, { OR: [{ taskId: { in: taskIds } }, { id: { in: soloIds } }] }] },
+        include,
+        orderBy,
+      });
+    } else {
+      [data, total] = await Promise.all([
+        this.prisma.resourceReservation.findMany({
+          where,
+          skip: (page - 1) * limit,
+          take: limit,
+          include,
+          orderBy,
+        }),
+        this.prisma.resourceReservation.count({ where }),
+      ]);
+    }
 
     if (data.length === 0) return { data: [], total, page, limit };
 
