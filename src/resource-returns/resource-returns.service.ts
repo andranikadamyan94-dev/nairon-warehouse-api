@@ -6,6 +6,14 @@ import { ResourceReservationStatus } from '../common/enums/resource-reservation-
 import { ItemType } from '../common/enums/item-type.enum';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 
+/**
+ * Returns keep their established meaning — the task gives back goods it HOLDS
+ * and its request shrinks accordingly — rebuilt correctly (2026-09-02):
+ * the cap is what was actually issued (the old cap against the requested
+ * quantity let a task "return" goods never delivered, crediting stock from
+ * thin air), releases walk every allocation row instead of one, partial asset
+ * returns free only the returned count, and status/acceptance stay coherent.
+ */
 @Injectable()
 export class ResourceReturnsService {
   constructor(
@@ -19,6 +27,15 @@ export class ResourceReturnsService {
     },
   };
 
+  /** Unreleased allocation quantity — what the task physically holds. */
+  private async issuedOf(tx: any, reservationId: number): Promise<number> {
+    const agg = await tx.reservationAllocation.aggregate({
+      where: { reservationId, releasedAt: null },
+      _sum: { quantity: true },
+    });
+    return agg._sum.quantity ?? 0;
+  }
+
   async create(dto: CreateReturnDto) {
     const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id: dto.reservationId },
@@ -27,17 +44,19 @@ export class ResourceReturnsService {
 
     if (!reservation) throw new NotFoundException('Reservation not found');
 
-    if (reservation.item.type === ItemType.CONSUMABLE) {
-      const pendingQty = await this.prisma.resourceReturn.aggregate({
-        where: { reservationId: dto.reservationId, status: ResourceReturnStatus.PENDING },
-        _sum: { quantity: true },
-      });
-      const alreadyPending = pendingQty._sum.quantity ?? 0;
-      if (dto.quantity + alreadyPending > reservation.quantity) {
-        throw new BadRequestException(
-          `Cannot return ${dto.quantity} units — only ${reservation.quantity - alreadyPending} units remain available for return`,
-        );
-      }
+    // You can only give back what you hold: issued minus what's already on
+    // its way back. Applies to assets too — the old code had no asset cap.
+    const issued = await this.issuedOf(this.prisma, dto.reservationId);
+    const pendingQty = await this.prisma.resourceReturn.aggregate({
+      where: { reservationId: dto.reservationId, status: ResourceReturnStatus.PENDING },
+      _sum: { quantity: true },
+    });
+    const alreadyPending = pendingQty._sum.quantity ?? 0;
+    const returnable = issued - alreadyPending;
+    if (dto.quantity > returnable) {
+      throw new BadRequestException(
+        `Վերադարձվող քանակը (${dto.quantity}) գերազանցում է տրամադրված մնացորդը (${Math.max(0, returnable)})`,
+      );
     }
 
     return this.prisma.resourceReturn.create({
@@ -76,44 +95,105 @@ export class ResourceReturnsService {
     const isAsset = ret.reservation.item.type === ItemType.ASSET;
 
     const result = await this.prisma.$transaction(async (tx) => {
+      // The world may have moved since the return was requested (reclaims,
+      // further acceptance) — never take back more than is out right now.
+      const issued = await this.issuedOf(tx, ret.reservationId);
+      if (ret.quantity > issued) {
+        throw new BadRequestException(
+          `Վերադարձի քանակը (${ret.quantity}) գերազանցում է այս պահին տրամադրվածը (${issued}) — չեղարկեք և կրկին ձևակերպեք`,
+        );
+      }
+
+      // Release exactly the returned quantity, newest allocations first,
+      // splitting a row when only part of it comes back — every released
+      // unit stays a real, dated row.
+      const active = await tx.reservationAllocation.findMany({
+        where: { reservationId: ret.reservationId, releasedAt: null },
+        orderBy: { id: 'desc' },
+      });
+      let remaining = ret.quantity;
+      for (const alloc of active) {
+        if (remaining <= 0) break;
+        const rowQty = alloc.quantity ?? 1;
+        const take = Math.min(rowQty, remaining);
+        if (take === rowQty) {
+          await tx.reservationAllocation.update({
+            where: { id: alloc.id },
+            data: { releasedAt: new Date() },
+          });
+        } else {
+          await tx.reservationAllocation.update({
+            where: { id: alloc.id },
+            data: { quantity: rowQty - take },
+          });
+          await tx.reservationAllocation.create({
+            data: { reservationId: ret.reservationId, quantity: take, releasedAt: new Date() },
+          });
+        }
+        remaining -= take;
+      }
+      await tx.reservationAllocationHistory.create({
+        data: {
+          reservationId: ret.reservationId,
+          action: 'RELEASED',
+          performedBy: receivedBy,
+          notes: `Return #${ret.id} received — ${ret.quantity} returned`,
+        },
+      });
+
+      const newIssued = issued - ret.quantity;
+      const prevStatus = ret.reservation.status as ResourceReservationStatus;
+      let newStatus: ResourceReservationStatus;
+      let dataPatch: any;
+
       if (isAsset) {
-        // Assets are tracked individually — release all active allocations for this reservation
-        await tx.reservationAllocation.updateMany({
-          where: { reservationId: ret.reservationId, releasedAt: null },
-          data: { releasedAt: new Date() },
-        });
-        await tx.resourceReservation.update({
-          where: { id: ret.reservationId },
-          data: { status: ResourceReservationStatus.COMPLETED },
-        });
+        // Individually tracked: freeing the returned units is the whole story.
+        // COMPLETED only when nothing is out — a partial return must NOT make
+        // the still-out units look available.
+        newStatus = newIssued === 0
+          ? ResourceReservationStatus.COMPLETED
+          : ResourceReservationStatus.PARTIALLY_ALLOCATED;
+        dataPatch = { status: newStatus };
       } else {
-        // Consumable: restore item stock
         await tx.item.update({
           where: { id: ret.reservation.itemId },
           data: { quantity: { increment: ret.quantity } },
         });
 
-        const newQty = ret.reservation.quantity - ret.quantity;
-        await tx.resourceReservation.update({
-          where: { id: ret.reservationId },
+        // The request shrinks by what came back; acceptance can never exceed
+        // either the new request or what is still out.
+        const newQuantity = Math.max(0, ret.reservation.quantity - ret.quantity);
+        const accepted = (ret.reservation as any).acceptedQuantity ?? 0;
+        // Returned goods are no longer kept: acceptance can exceed neither the
+        // shrunken request nor what is still physically out.
+        const newAccepted = Math.min(accepted, newQuantity, newIssued);
+
+        if (newQuantity === 0 || newAccepted >= newQuantity) {
+          newStatus = ResourceReservationStatus.COMPLETED;
+        } else if (newIssued >= newQuantity) {
+          newStatus = ResourceReservationStatus.ALLOCATED;
+        } else if (newIssued > 0 || newAccepted > 0) {
+          newStatus = ResourceReservationStatus.PARTIALLY_ALLOCATED;
+        } else {
+          newStatus = ResourceReservationStatus.APPROVED;
+        }
+        dataPatch = { quantity: newQuantity, acceptedQuantity: newAccepted, status: newStatus };
+      }
+
+      await tx.resourceReservation.update({
+        where: { id: ret.reservationId },
+        data: dataPatch,
+      });
+      if (newStatus !== prevStatus) {
+        await tx.reservationStatusHistory.create({
           data: {
-            quantity: newQty <= 0 ? 0 : newQty,
-            status: newQty <= 0 ? ResourceReservationStatus.COMPLETED : undefined,
+            reservationId: ret.reservationId,
+            fromStatus: prevStatus,
+            toStatus: newStatus,
+            performedBy: receivedBy,
+            reason: `Return #${ret.id} received`,
           },
         });
-
-        const allocation = await tx.reservationAllocation.findFirst({
-          where: { reservationId: ret.reservationId, releasedAt: null },
-        });
-        if (allocation) {
-          const remainingAlloc = allocation.quantity - ret.quantity;
-          await tx.reservationAllocation.update({
-            where: { id: allocation.id },
-            data: remainingAlloc <= 0
-              ? { releasedAt: new Date() }
-              : { quantity: remainingAlloc },
-          });
-        }
       }
 
       await tx.inventoryMovement.create({
