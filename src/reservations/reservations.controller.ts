@@ -103,6 +103,21 @@ export class ReservationsController {
   }
 
   // The task side confirms physical receipt of issued goods (#1882/#1883).
+  // Warehouse staff take back the issued-but-unaccepted remainder (#dispute
+  // resolution): damaged goods are scrapped, usable ones return to stock —
+  // either way the issuance ceiling reopens for replacements.
+  @Patch(':id/reclaim')
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
+  @ApiOperation({ summary: 'Take back issued-but-unaccepted goods (damaged = no stock credit)' })
+  reclaim(
+    @Param('id') id: string,
+    @LoggedInUser('id') userId: number,
+    @Body() body: { quantity: number; damaged?: boolean; reason?: string },
+  ) {
+    return this.reservationsService.reclaim(+id, userId, Number(body?.quantity), !!body?.damaged, body?.reason);
+  }
+
   // Any authenticated task participant may call; the service validates the
   // caller against the task's role slots in CRM.
   @Patch(':id/accept')

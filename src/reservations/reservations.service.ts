@@ -762,6 +762,125 @@ export class ReservationsService {
     throw new BadRequestException('Զուգահեռ ընդունում է կատարվել — թարմացրեք էջը և կրկնեք');
   }
 
+  /**
+   * Take back the ISSUED-BUT-UNACCEPTED remainder (2026-09-02, closes the
+   * dispute dead-end): goods the task refused to confirm come off `issued`,
+   * reopening the issuance ceiling so replacements can go out. Damaged goods
+   * are scrapped — no stock credit (they left the shelf at issuance and are
+   * not coming back to it); usable ones return to stock with an IN movement.
+   * Never touches what the task accepted: the cap is issued − accepted.
+   */
+  async reclaim(
+    reservationId: number,
+    performedBy: number | undefined,
+    quantity: number,
+    damaged: boolean,
+    reason?: string,
+  ) {
+    const reservation = await this.prisma.resourceReservation.findUnique({
+      where: { id: reservationId },
+      include: { item: true },
+    });
+    if (!reservation) throw new NotFoundException('Reservation not found');
+    if (INACTIVE_STATUSES.includes(reservation.status as ResourceReservationStatus)) {
+      throw new BadRequestException(`Reservation is already ${reservation.status}`);
+    }
+    if (reservation.item.type !== ItemType.CONSUMABLE) {
+      throw new BadRequestException('Հետ վերցնելը կիրառելի է միայն ապրանքային ամրագրումների համար');
+    }
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new BadRequestException('Քանակը պետք է լինի դրական ամբողջ թիվ');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const active = await tx.reservationAllocation.findMany({
+        where: { reservationId, releasedAt: null },
+        orderBy: { id: 'desc' },
+      });
+      const issued = active.reduce((s, a) => s + (a.quantity ?? 1), 0);
+      const accepted = (reservation as any).acceptedQuantity ?? 0;
+      const reclaimable = issued - accepted;
+      if (quantity > reclaimable) {
+        throw new BadRequestException(
+          `Հետ վերցվող քանակը (${quantity}) գերազանցում է տրամադրված չընդունված մնացորդը (${reclaimable})`,
+        );
+      }
+
+      // Reduce newest allocations first; split a row when only part of it is
+      // reclaimed, so every released unit is a real, dated row in history.
+      let remaining = quantity;
+      for (const alloc of active) {
+        if (remaining <= 0) break;
+        const take = Math.min(alloc.quantity ?? 1, remaining);
+        if (take === (alloc.quantity ?? 1)) {
+          await tx.reservationAllocation.update({
+            where: { id: alloc.id },
+            data: { releasedAt: new Date() },
+          });
+        } else {
+          await tx.reservationAllocation.update({
+            where: { id: alloc.id },
+            data: { quantity: (alloc.quantity ?? 1) - take },
+          });
+          await tx.reservationAllocation.create({
+            data: { reservationId, quantity: take, releasedAt: new Date() },
+          });
+        }
+        remaining -= take;
+      }
+      await tx.reservationAllocationHistory.create({
+        data: {
+          reservationId,
+          action: 'RELEASED',
+          performedBy,
+          notes: damaged
+            ? `Հետ է վերցվել ${quantity} հատ՝ վնասված (պաշար չի վերադարձվել)${reason ? ` — ${reason}` : ''}`
+            : `Հետ է վերցվել ${quantity} հատ՝ պիտանի (վերադարձվել է պաշար)${reason ? ` — ${reason}` : ''}`,
+        },
+      });
+
+      if (!damaged) {
+        await tx.item.update({
+          where: { id: reservation.itemId },
+          data: { quantity: { increment: quantity } },
+        });
+        await tx.inventoryMovement.create({
+          data: {
+            itemId: reservation.itemId,
+            quantity,
+            type: 'IN',
+            taskId: reservation.taskId,
+            performedBy,
+            notes: reason ?? `Reservation #${reservationId} — չընդունված քանակի վերադարձ`,
+          },
+        });
+      }
+
+      // Acceptance-aware status: the reservation goes back to waiting for the
+      // replacement issue (or plain APPROVED when nothing is out at all).
+      const newIssued = issued - quantity;
+      const newStatus =
+        newIssued === 0 && accepted === 0
+          ? ResourceReservationStatus.APPROVED
+          : ResourceReservationStatus.PARTIALLY_ALLOCATED;
+      if (reservation.status !== newStatus) {
+        await tx.resourceReservation.update({
+          where: { id: reservationId },
+          data: { status: newStatus },
+        });
+        await this.writeStatusHistory(
+          tx,
+          reservationId,
+          reservation.status as ResourceReservationStatus,
+          newStatus,
+          { performedBy, reason: reason ?? 'Չընդունված քանակը հետ է վերցվել' },
+        );
+      }
+
+      return { reclaimed: quantity, damaged, issuedNow: newIssued };
+    });
+  }
+
   /** The acceptor/executor/responsible slots of the task, asked from CRM —
    * the warehouse has no task-role data of its own. */
   private async assertTaskRole(taskId: number, userId: number) {
@@ -931,6 +1050,16 @@ export class ReservationsService {
     if (!allocation) throw new NotFoundException('Allocation not found');
 
     const isConsumable = allocation.reservation.item.type === ItemType.CONSUMABLE;
+
+    // Once acceptance has started, a raw whole-row release is a three-way
+    // footgun: it takes back goods the task confirmed KEEPING, credits them
+    // to stock, and wrecks the accepted ≤ issued invariant. The reclaim flow
+    // handles the unaccepted remainder correctly.
+    if (isConsumable && ((allocation.reservation as any).acceptedQuantity ?? 0) > 0) {
+      throw new BadRequestException(
+        'Ընդունումն արդեն սկսված է — չընդունված մնացորդը հետ վերցրեք «Հետ վերցնել» գործողությամբ',
+      );
+    }
 
     const result = await this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.update({
