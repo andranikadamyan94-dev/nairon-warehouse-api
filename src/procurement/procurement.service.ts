@@ -352,7 +352,7 @@ export class ProcurementService {
               quantity,
               type: 'IN',
               supplierId: order.supplierId ?? undefined,
-              notes: `Procurement order #${id}, delivery #${delivery.id}`,
+              notes: `Գնման պատվեր #${id}, առաքում #${delivery.id}`,
             },
           });
         }

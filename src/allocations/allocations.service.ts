@@ -94,7 +94,7 @@ export class AllocationsService {
               quantity: returnQty,
               type: 'IN',
               taskId: allocation.reservation.taskId,
-              notes: `Returned from reservation #${allocation.reservationId}`,
+              notes: `Վերադարձ ամրագրում #${allocation.reservationId}-ից`,
             },
           });
         } else {
@@ -110,7 +110,7 @@ export class AllocationsService {
             reservationId: allocation.reservationId,
             assetId: allocation.assetId,
             action: 'RETURNED',
-            notes: `Returned ${returnQty} unit(s) to warehouse`,
+            notes: `${returnQty} հատ վերադարձվել է պահեստ`,
           },
         });
 
@@ -167,7 +167,7 @@ export class AllocationsService {
             quantity: allocation.quantity,
             type: 'IN',
             taskId: allocation.reservation.taskId,
-            notes: `Reservation #${allocation.reservationId} allocation cancelled`,
+            notes: `Ամրագրում #${allocation.reservationId} — հատկացումը չեղարկված`,
           },
         });
 

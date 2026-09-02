@@ -137,7 +137,7 @@ export class ResourceReturnsService {
           reservationId: ret.reservationId,
           action: 'RELEASED',
           performedBy: receivedBy,
-          notes: `Return #${ret.id} received — ${ret.quantity} returned`,
+          notes: `Վերադարձ #${ret.id} ստացված — ${ret.quantity} հատ`,
         },
       });
 
@@ -191,7 +191,7 @@ export class ResourceReturnsService {
             fromStatus: prevStatus,
             toStatus: newStatus,
             performedBy: receivedBy,
-            reason: `Return #${ret.id} received`,
+            reason: `Վերադարձ #${ret.id} ստացված`,
           },
         });
       }
@@ -203,7 +203,7 @@ export class ResourceReturnsService {
           type: 'IN',
           taskId: ret.reservation.taskId,
           performedBy: receivedBy,
-          notes: `Return #${ret.id} received`,
+          notes: `Վերադարձ #${ret.id} ստացված`,
         },
       });
 

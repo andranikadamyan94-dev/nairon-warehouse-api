@@ -589,7 +589,7 @@ export class ReservationsService {
       });
 
       await tx.reservationAllocationHistory.create({
-        data: { reservationId, action: 'ALLOCATED', performedBy, notes: 'Consumable approved' },
+        data: { reservationId, action: 'ALLOCATED', performedBy, notes: 'Ապրանքը տրված է' },
       });
 
       await tx.item.update({
@@ -604,7 +604,7 @@ export class ReservationsService {
           type: 'OUT',
           taskId: reservation.taskId,
           performedBy,
-          notes: `Reservation #${reservationId} approved`,
+          notes: `Ամրագրում #${reservationId} — տրված`,
         },
       });
 
@@ -933,7 +933,7 @@ export class ReservationsService {
             assetId: alloc.assetId,
             action: 'RELEASED',
             performedBy,
-            notes: reason ?? 'Cancelled',
+            notes: reason ?? 'Չեղարկված',
           },
         });
       }
@@ -1010,7 +1010,7 @@ export class ReservationsService {
             assetId: alloc.assetId,
             action: 'RELEASED',
             performedBy,
-            notes: reason ?? 'Rejected',
+            notes: reason ?? 'Մերժված',
           },
         });
       }
@@ -1090,7 +1090,7 @@ export class ReservationsService {
             type: 'IN',
             taskId: allocation.reservation.taskId,
             performedBy: releasedBy,
-            notes: reason ?? `Reservation #${allocation.reservationId} allocation cancelled`,
+            notes: reason ?? `Ամրագրում #${allocation.reservationId} — հատկացումը չեղարկված`,
           },
         });
         const restoredQty = (allocation.reservation.item?.quantity ?? 0) + (allocation.quantity ?? 0);
@@ -1585,7 +1585,7 @@ export class ReservationsService {
                 reservationId: existing.id,
                 assetId: alloc.assetId,
                 action: 'RELEASED',
-                notes: 'Released due to task update',
+                notes: 'Ազատված՝ առաջադրանքի փոփոխության պատճառով',
               },
             });
           }
@@ -1598,7 +1598,7 @@ export class ReservationsService {
             existing.id,
             existing.status as ResourceReservationStatus,
             ResourceReservationStatus.CANCELLED,
-            { reason: 'Resource removed from task', performedBy },
+            { reason: 'Ռեսուրսը հեռացվել է առաջադրանքից', performedBy },
           );
         }
       }
@@ -1627,7 +1627,7 @@ export class ReservationsService {
                     reservationId: existing.id,
                     assetId: alloc.assetId,
                     action: 'RELEASED',
-                    notes: 'Released due to task update',
+                    notes: 'Ազատված՝ առաջադրանքի փոփոխության պատճառով',
                   },
                 });
               }
@@ -1687,7 +1687,7 @@ export class ReservationsService {
                       reservationId: existing.id,
                       assetId: alloc.assetId,
                       action: 'RELEASED',
-                      notes: 'Released due to quantity decrease',
+                      notes: 'Ազատված՝ քանակի նվազման պատճառով',
                     },
                   });
                 }
@@ -1727,7 +1727,7 @@ export class ReservationsService {
                   {
                     previousQuantity: quantityChanged ? existing.quantity : undefined,
                     newQuantity: quantityChanged ? targetQuantity : undefined,
-                    reason: 'Task updated',
+                    reason: 'Առաջադրանքը թարմացվել է',
                     performedBy,
                   },
                 );
@@ -1750,7 +1750,7 @@ export class ReservationsService {
                   status,
                 },
               });
-              await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Task updated', performedBy });
+              await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Առաջադրանքը թարմացվել է', performedBy });
             }
           }
         } else {
@@ -1791,7 +1791,7 @@ export class ReservationsService {
                     reservationId: existing.id,
                     assetId: alloc.assetId,
                     action: 'RELEASED',
-                    notes: 'Released due to quantity decrease',
+                    notes: 'Ազատված՝ քանակի նվազման պատճառով',
                   },
                 });
               }
@@ -1836,7 +1836,7 @@ export class ReservationsService {
                 {
                   previousQuantity: quantityChanged ? existing.quantity : undefined,
                   newQuantity: quantityChanged ? targetQuantity : undefined,
-                  reason: 'Task updated',
+                  reason: 'Առաջադրանքը թարմացվել է',
                   performedBy,
                 },
               );
@@ -1859,7 +1859,7 @@ export class ReservationsService {
                 status,
               },
             });
-            await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Task updated', performedBy });
+            await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Առաջադրանքը թարմացվել է', performedBy });
           }
         }
       }
