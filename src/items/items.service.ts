@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
 
@@ -90,8 +90,19 @@ export class ItemsService {
   async remove(id: number) {
     await this.findOne(id);
 
-    return this.prisma.item.delete({
-      where: { id },
-    });
+    try {
+      return await this.prisma.item.delete({
+        where: { id },
+      });
+    } catch (e: any) {
+      // RESTRICT on transfer lines is deliberate — surface it as a message,
+      // not a 500.
+      if (e?.code === 'P2003') {
+        throw new BadRequestException(
+          'Ապրանքը ունի փոխանցումների պատմություն և չի կարող ջնջվել',
+        );
+      }
+      throw e;
+    }
   }
 }

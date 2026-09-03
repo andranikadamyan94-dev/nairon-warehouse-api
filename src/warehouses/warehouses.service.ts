@@ -82,21 +82,26 @@ export class WarehousesService {
     const nameOf = new Map(users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
 
     // A client's backlog exists once per project, so links often share a name
-    // (six «Սյունար» tags) — attach the project name live for disambiguation;
-    // plain snapshots remain the fallback when CRM is unreachable.
-    let projectOf = new Map<number, string | null>();
+    // (six «Սյունար» tags) — attach the project name live for disambiguation,
+    // and prefer the LIVE backlog name over the link-time snapshot so CRM
+    // renames show through; snapshots remain the fallback when CRM is down.
+    let liveOf = new Map<number, { name: string; projectName: string | null }>();
     try {
       const backlogs = await this.listBacklogs();
-      projectOf = new Map(backlogs.map((b) => [b.id, b.projectName]));
+      liveOf = new Map(backlogs.map((b) => [b.id, { name: b.name, projectName: b.projectName }]));
     } catch {
-      /* names render without the suffix */
+      /* names render from snapshots, without the suffix */
     }
 
     return {
       data: rows.map((w) => ({
         ...w,
         responsibleName: w.responsibleId ? nameOf.get(w.responsibleId) ?? null : null,
-        backlogs: w.backlogs.map((b) => ({ ...b, projectName: projectOf.get(b.backlogId) ?? null })),
+        backlogs: w.backlogs.map((b) => ({
+          ...b,
+          backlogName: liveOf.get(b.backlogId)?.name ?? b.backlogName,
+          projectName: liveOf.get(b.backlogId)?.projectName ?? null,
+        })),
       })),
       total,
       page,

@@ -299,6 +299,17 @@ export class ReservationsService {
    */
   private async resolveTaskWarehouse(taskId?: number | null): Promise<number | null> {
     if (!taskId) return null;
+    // Binding freeze (2026-09-04): once a task has any non-cancelled
+    // reservation, its warehouse is settled — availability, updates and new
+    // rows all follow the stamped pool. A backlog re-link only affects tasks
+    // starting fresh, and an unlinked backlog (or a CRM outage) can never
+    // lock an in-flight task out of managing its existing rows.
+    const existing = await this.prisma.resourceReservation.findFirst({
+      where: { taskId, status: { notIn: INACTIVE_STATUSES } },
+      orderBy: { id: 'desc' },
+      select: { warehouseId: true },
+    });
+    if (existing) return existing.warehouseId ?? null;
     const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
     let task: any;
     try {
