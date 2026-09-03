@@ -81,10 +81,22 @@ export class WarehousesService {
     const users = await this.usersPrisma.getUsersByIds(respIds);
     const nameOf = new Map(users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
 
+    // A client's backlog exists once per project, so links often share a name
+    // (six «Սյունար» tags) — attach the project name live for disambiguation;
+    // plain snapshots remain the fallback when CRM is unreachable.
+    let projectOf = new Map<number, string | null>();
+    try {
+      const backlogs = await this.listBacklogs();
+      projectOf = new Map(backlogs.map((b) => [b.id, b.projectName]));
+    } catch {
+      /* names render without the suffix */
+    }
+
     return {
       data: rows.map((w) => ({
         ...w,
         responsibleName: w.responsibleId ? nameOf.get(w.responsibleId) ?? null : null,
+        backlogs: w.backlogs.map((b) => ({ ...b, projectName: projectOf.get(b.backlogId) ?? null })),
       })),
       total,
       page,
