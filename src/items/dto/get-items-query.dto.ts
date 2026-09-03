@@ -19,4 +19,10 @@ export class GetItemsQueryDto {
   @IsOptional()
   @IsString()
   search?: string;
+
+  /** '1' = only items with no category (the Առանց կատեգորիայի tab). */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  uncategorized?: string;
 }

@@ -37,6 +37,7 @@ export class ItemsService {
     return this.prisma.item.findMany({
       where: {
         ...(categoryFilter ? { categoryId: { in: categoryFilter } } : {}),
+        ...(query?.uncategorized === '1' ? { categoryId: null } : {}),
         ...(query?.type ? { type: query.type } : {}),
         ...(query?.search
           ? { name: { contains: query.search, mode: 'insensitive' } }
