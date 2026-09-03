@@ -26,8 +26,48 @@ export class CategoriesService {
       }
     }
 
+    // One-step "insert a parent above existing trees" (#1943/#2036 follow-up):
+    // selected categories are re-parented under the new node atomically.
+    const childIds = [...new Set(dto.childIds ?? [])];
+    if (childIds.length) {
+      const children = await this.prisma.itemCategory.findMany({
+        where: { id: { in: childIds } },
+        select: { id: true },
+      });
+      if (children.length !== childIds.length) {
+        throw new NotFoundException('Child category not found');
+      }
+      if (dto.parentId) {
+        if (childIds.includes(dto.parentId)) {
+          throw new BadRequestException('Circular hierarchy detected');
+        }
+        // a chosen child must not be an ancestor of the chosen parent
+        let cur: number | null | undefined = dto.parentId;
+        while (cur) {
+          if (childIds.includes(cur)) {
+            throw new BadRequestException('Circular hierarchy detected');
+          }
+          const node = await this.prisma.itemCategory.findUnique({
+            where: { id: cur },
+            select: { parentId: true },
+          });
+          cur = node?.parentId;
+        }
+      }
+      const { childIds: _omit, ...data } = dto;
+      return this.prisma.$transaction(async (tx) => {
+        const created = await tx.itemCategory.create({ data });
+        await tx.itemCategory.updateMany({
+          where: { id: { in: childIds } },
+          data: { parentId: created.id },
+        });
+        return created;
+      });
+    }
+
+    const { childIds: _omit, ...data } = dto;
     return this.prisma.itemCategory.create({
-      data: dto,
+      data: data as any,
     });
   }
 
