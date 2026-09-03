@@ -51,6 +51,8 @@ export class AvailabilityService {
 
     const usableAssets = {
       itemId: item.id,
+      // #1989 workspaces: only assets homed in the requesting pool count.
+      warehouseId: warehouseId ?? null,
       status: { notIn: [AssetStatus.DAMAGED, AssetStatus.RETIRED] },
     };
 

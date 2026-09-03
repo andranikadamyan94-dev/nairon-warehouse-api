@@ -25,4 +25,10 @@ export class GetItemsQueryDto {
   @IsOptional()
   @IsString()
   uncategorized?: string;
+
+  /** 'main' or a sub-warehouse id — scopes quantities/asset counts (#1989). */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  warehouseId?: string;
 }

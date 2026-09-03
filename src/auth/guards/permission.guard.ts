@@ -42,8 +42,10 @@ export class PermissionGuard implements CanActivate {
     const user = request.user;
     if (!user) throw new ForbiddenException('Access denied');
     const { isSuperAdmin, permissionNames } = await this.usersPrisma.getUserAccessInfo(user.id);
-    // Handlers with creator-or-admin rules (e.g. procurement cancel) read this.
+    // Handlers with creator-or-admin rules (e.g. procurement cancel) read this;
+    // warehouse-membership scoping reads the permission names.
     request.isSuperAdmin = isSuperAdmin;
+    request.permissionNames = permissionNames;
     if (isSuperAdmin) return true;
     const procurementOnly = required.every((p) => PROCUREMENT_ONLY.has(p));
     if (!procurementOnly && permissionNames.includes('manage_warehouse')) return true;

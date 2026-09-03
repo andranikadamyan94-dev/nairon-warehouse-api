@@ -10,11 +10,12 @@ import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { ItemType } from '../common/enums/item-type.enum';
 
 /**
- * Main → project-warehouse transfers (#1989). One DOCUMENT with many item
- * lines (the printed transfer-waybill form), confirmed atomically per line:
- * main pool (Item.quantity) down with an OUT movement, sub stock up with an
- * IN movement carrying the warehouseId. No sub→sub or sub→main flows — per
- * the task, subs are replenished ONLY from main.
+ * Main ↔ project-warehouse transfers (#1989). One DOCUMENT with many item
+ * lines (the printed transfer-waybill form), confirmed atomically per line.
+ * TO_SUB replenishes a sub from main; TO_MAIN is the correction/return path.
+ * Consumables move quantity between pools (Item.quantity ↔ WarehouseStock);
+ * assets move by re-homing N transferable rows (AVAILABLE, unallocated) —
+ * the system picks them oldest-first, like allocation auto-pick.
  */
 @Injectable()
 export class StockTransfersService {
@@ -26,12 +27,14 @@ export class StockTransfersService {
   async create(
     dto: {
       toWarehouseId: number;
+      direction?: 'TO_SUB' | 'TO_MAIN';
       items: { itemId: number; quantity: number }[];
       transferDate?: string;
       comment?: string;
     },
     createdBy?: number,
   ) {
+    const direction = dto.direction === 'TO_MAIN' ? 'TO_MAIN' : 'TO_SUB';
     const lines = (dto.items ?? []).map((l) => ({ itemId: Number(l.itemId), quantity: Number(l.quantity) }));
     if (!lines.length) {
       throw new BadRequestException('Ավելացրեք գոնե մեկ ապրանք');
@@ -51,24 +54,22 @@ export class StockTransfersService {
     ]);
     if (!wh) throw new NotFoundException('Պահեստը չի գտնվել');
     if (wh.type !== 'PROJECT') {
-      throw new BadRequestException('Փոխանցումը հնարավոր է միայն նախագծային պահեստ');
+      throw new BadRequestException('Փոխանցումը հնարավոր է միայն նախագծային պահեստի հետ');
     }
-    if (wh.status !== 'ACTIVE') {
+    // TO_SUB into an inactive sub is refused; TO_MAIN (draining one) is fine.
+    if (direction === 'TO_SUB' && wh.status !== 'ACTIVE') {
       throw new BadRequestException('Պահեստը ակտիվ չէ');
     }
     const itemOf = new Map(items.map((i) => [i.id, i]));
     for (const l of lines) {
-      const item = itemOf.get(l.itemId);
-      if (!item) throw new NotFoundException(`Ապրանքը չի գտնվել (#${l.itemId})`);
-      if (item.type !== ItemType.CONSUMABLE) {
-        throw new BadRequestException(`«${item.name}»՝ փոխանցվում են միայն ծախսվող ապրանքները (ակտիվները՝ հաջորդ փուլում)`);
-      }
+      if (!itemOf.get(l.itemId)) throw new NotFoundException(`Ապրանքը չի գտնվել (#${l.itemId})`);
     }
 
     const transfer = await this.prisma.$transaction(async (tx) => {
       const created = await tx.stockTransfer.create({
         data: {
           toWarehouseId: wh.id,
+          direction,
           transferDate: dto.transferDate ? new Date(dto.transferDate) : new Date(),
           comment: dto.comment?.trim() || null,
           createdBy: createdBy ?? null,
@@ -78,29 +79,76 @@ export class StockTransfersService {
 
       for (const l of lines) {
         const item = itemOf.get(l.itemId)!;
-        // Guarded decrement — concurrent transfers/issuances must not drive
-        // the main pool negative.
-        const dec = await tx.item.updateMany({
-          where: { id: l.itemId, quantity: { gte: l.quantity } },
-          data: { quantity: { decrement: l.quantity } },
-        });
-        if (dec.count === 0) {
-          throw new BadRequestException(`«${item.name}»՝ հիմնական պահեստում բավարար պաշար չկա`);
+        // source/destination pools: null = main
+        const sourceWh = direction === 'TO_SUB' ? null : wh.id;
+        const destWh = direction === 'TO_SUB' ? wh.id : null;
+
+        if (item.type === ItemType.ASSET) {
+          // Move N transferable rows (AVAILABLE, no active allocation).
+          const candidates = await tx.asset.findMany({
+            where: {
+              itemId: l.itemId,
+              warehouseId: sourceWh,
+              status: 'AVAILABLE',
+              allocations: { none: { releasedAt: null } },
+            },
+            orderBy: { id: 'asc' },
+            take: l.quantity,
+            select: { id: true },
+          });
+          if (candidates.length < l.quantity) {
+            throw new BadRequestException(
+              `«${item.name}»՝ աղբյուր պահեստում փոխանցելի ակտիվ չկա բավարար քանակով (${candidates.length}/${l.quantity})`,
+            );
+          }
+          // Guarded — a concurrent transfer/allocation must not steal a row.
+          const moved = await tx.asset.updateMany({
+            where: { id: { in: candidates.map((c) => c.id) }, warehouseId: sourceWh },
+            data: { warehouseId: destWh },
+          });
+          if (moved.count !== l.quantity) {
+            throw new BadRequestException(`«${item.name}»՝ ակտիվները զբաղված են, փորձեք կրկին`);
+          }
+        } else {
+          if (direction === 'TO_SUB') {
+            const dec = await tx.item.updateMany({
+              where: { id: l.itemId, quantity: { gte: l.quantity } },
+              data: { quantity: { decrement: l.quantity } },
+            });
+            if (dec.count === 0) {
+              throw new BadRequestException(`«${item.name}»՝ հիմնական պահեստում բավարար պաշար չկա`);
+            }
+            await tx.warehouseStock.upsert({
+              where: { warehouseId_itemId: { warehouseId: wh.id, itemId: l.itemId } },
+              update: { quantity: { increment: l.quantity } },
+              create: { warehouseId: wh.id, itemId: l.itemId, quantity: l.quantity },
+            });
+          } else {
+            const dec = await tx.warehouseStock.updateMany({
+              where: { warehouseId: wh.id, itemId: l.itemId, quantity: { gte: l.quantity } },
+              data: { quantity: { decrement: l.quantity } },
+            });
+            if (dec.count === 0) {
+              throw new BadRequestException(`«${item.name}»՝ նախագծային պահեստում բավարար պաշար չկա`);
+            }
+            await tx.item.update({
+              where: { id: l.itemId },
+              data: { quantity: { increment: l.quantity } },
+            });
+          }
         }
 
-        await tx.warehouseStock.upsert({
-          where: { warehouseId_itemId: { warehouseId: wh.id, itemId: l.itemId } },
-          update: { quantity: { increment: l.quantity } },
-          create: { warehouseId: wh.id, itemId: l.itemId, quantity: l.quantity },
-        });
-
+        const label = direction === 'TO_SUB'
+          ? { out: `Փոխանցում #${created.id} → ${wh.name}`, in: `Փոխանցում #${created.id} ← Հիմնական պահեստ` }
+          : { out: `Փոխանցում #${created.id} → Հիմնական պահեստ`, in: `Փոխանցում #${created.id} ← ${wh.name}` };
         await tx.inventoryMovement.create({
           data: {
             itemId: l.itemId,
             quantity: -l.quantity,
             type: 'OUT',
+            warehouseId: direction === 'TO_SUB' ? null : wh.id,
             performedBy: createdBy ?? null,
-            notes: `Փոխանցում #${created.id} → ${wh.name}`,
+            notes: label.out,
           },
         });
         await tx.inventoryMovement.create({
@@ -108,9 +156,9 @@ export class StockTransfersService {
             itemId: l.itemId,
             quantity: l.quantity,
             type: 'IN',
-            warehouseId: wh.id,
+            warehouseId: direction === 'TO_SUB' ? wh.id : null,
             performedBy: createdBy ?? null,
-            notes: `Փոխանցում #${created.id} ← Հիմնական պահեստ`,
+            notes: label.in,
           },
         });
       }
@@ -118,13 +166,13 @@ export class StockTransfersService {
       return tx.stockTransfer.findUnique({
         where: { id: created.id },
         include: {
-          items: { include: { item: { select: { id: true, name: true, code: true, unit: true } } } },
+          items: { include: { item: { select: { id: true, name: true, code: true, unit: true, type: true } } } },
           toWarehouse: { select: { id: true, name: true, code: true } },
         },
       });
     });
 
-    // Main pool shrank — low-stock check, outside the transaction as always.
+    // Only main-pool consumable levels feed the low-stock latch today.
     this.stockAlerts.check(lines.map((l) => l.itemId));
 
     return transfer;
@@ -147,7 +195,7 @@ export class StockTransfersService {
         where,
         include: {
           toWarehouse: { select: { id: true, name: true, code: true } },
-          items: { include: { item: { select: { id: true, name: true, code: true, unit: true } } } },
+          items: { include: { item: { select: { id: true, name: true, code: true, unit: true, type: true } } } },
         },
         orderBy: { id: 'desc' },
         skip: (page - 1) * limit,

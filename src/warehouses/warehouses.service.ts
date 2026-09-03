@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -23,6 +24,66 @@ export class WarehousesService {
 
   private crmUrl() {
     return process.env.CRM_API_URL || 'http://localhost:3003';
+  }
+
+  /**
+   * Membership scoping (#1989 wave 2). 'all' for superadmins and warehouse
+   * admins; otherwise the warehouses the user belongs to (employee or
+   * responsible) — plus MAIN, which stays open to everyone with page access
+   * until main membership is deliberately enforced (rollout safety).
+   */
+  async accessibleWarehouseIds(
+    userId: number,
+    ctx?: { isSuperAdmin?: boolean; permissionNames?: string[] },
+  ): Promise<'all' | number[]> {
+    if (!ctx || (ctx.isSuperAdmin === undefined && !ctx.permissionNames)) {
+      // Route without PermissionGuard (e.g. /warehouses/mine) — resolve here.
+      const info = await this.usersPrisma.getUserAccessInfo(userId);
+      ctx = { isSuperAdmin: info.isSuperAdmin, permissionNames: info.permissionNames };
+    }
+    if (
+      ctx?.isSuperAdmin ||
+      ctx?.permissionNames?.includes('manage_warehouses') ||
+      ctx?.permissionNames?.includes('manage_warehouse')
+    ) {
+      return 'all';
+    }
+    const [memberships, owned, main] = await Promise.all([
+      this.prisma.warehouseEmployee.findMany({ where: { userId }, select: { warehouseId: true } }),
+      this.prisma.warehouse.findMany({ where: { responsibleId: userId }, select: { id: true } }),
+      this.prisma.warehouse.findFirst({ where: { type: 'MAIN' }, select: { id: true } }),
+    ]);
+    return [
+      ...new Set([
+        ...(main ? [main.id] : []),
+        ...memberships.map((m) => m.warehouseId),
+        ...owned.map((w) => w.id),
+      ]),
+    ];
+  }
+
+  /** Refuse warehouseId params outside the caller's scope ('main' is open). */
+  async assertWarehouseAccess(
+    userId: number,
+    warehouseId: number,
+    ctx?: { isSuperAdmin?: boolean; permissionNames?: string[] },
+  ): Promise<void> {
+    const acc = await this.accessibleWarehouseIds(userId, ctx);
+    if (acc === 'all' || acc.includes(warehouseId)) return;
+    throw new ForbiddenException('Դուք այս պահեստի աշխատակից չեք');
+  }
+
+  /** The switcher's list: warehouses this user can enter (ACTIVE only). */
+  async findMine(userId: number, ctx?: { isSuperAdmin?: boolean; permissionNames?: string[] }) {
+    const acc = await this.accessibleWarehouseIds(userId, ctx);
+    return this.prisma.warehouse.findMany({
+      where: {
+        status: 'ACTIVE',
+        ...(acc === 'all' ? {} : { id: { in: acc } }),
+      },
+      select: { id: true, name: true, code: true, type: true },
+      orderBy: [{ type: 'asc' }, { name: 'asc' }],
+    });
   }
 
   /** CRM backlog list for the «Կապված նախագիծ» picker. */
@@ -68,6 +129,7 @@ export class WarehousesService {
         where,
         include: {
           backlogs: true,
+          employees: true,
           _count: { select: { stock: true, transfersIn: true } },
         },
         orderBy: [{ type: 'asc' }, { id: 'asc' }],
@@ -77,7 +139,12 @@ export class WarehousesService {
       this.prisma.warehouse.count({ where }),
     ]);
 
-    const respIds = [...new Set(rows.map((w) => w.responsibleId).filter((x): x is number => x != null))];
+    const respIds = [
+      ...new Set([
+        ...rows.map((w) => w.responsibleId).filter((x): x is number => x != null),
+        ...rows.flatMap((w) => w.employees.map((e) => e.userId)),
+      ]),
+    ];
     const users = await this.usersPrisma.getUsersByIds(respIds);
     const nameOf = new Map(users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
 
@@ -97,6 +164,7 @@ export class WarehousesService {
       data: rows.map((w) => ({
         ...w,
         responsibleName: w.responsibleId ? nameOf.get(w.responsibleId) ?? null : null,
+        employees: w.employees.map((e) => ({ ...e, name: nameOf.get(e.userId) ?? null })),
         backlogs: w.backlogs.map((b) => ({
           ...b,
           backlogName: liveOf.get(b.backlogId)?.name ?? b.backlogName,
@@ -130,6 +198,7 @@ export class WarehousesService {
       responsibleId?: number;
       location?: string;
       backlogIds?: number[];
+      employeeIds?: number[];
     },
     createdBy?: number,
   ) {
@@ -156,8 +225,11 @@ export class WarehousesService {
             backlogName: backlogNames.get(b) ?? `#${b}`,
           })),
         },
+        employees: {
+          create: [...new Set(dto.employeeIds ?? [])].map((userId) => ({ userId })),
+        },
       },
-      include: { backlogs: true },
+      include: { backlogs: true, employees: true },
     });
   }
 
@@ -170,6 +242,7 @@ export class WarehousesService {
       location?: string | null;
       status?: 'ACTIVE' | 'INACTIVE';
       backlogIds?: number[];
+      employeeIds?: number[];
     },
   ) {
     const wh = await this.prisma.warehouse.findUnique({ where: { id }, include: { backlogs: true } });
@@ -198,6 +271,19 @@ export class WarehousesService {
       };
     }
 
+    let employeeOps: any;
+    if (dto.employeeIds) {
+      const ids = [...new Set(dto.employeeIds)];
+      employeeOps = {
+        deleteMany: { userId: { notIn: ids } },
+        upsert: ids.map((userId) => ({
+          where: { warehouseId_userId: { warehouseId: id, userId } },
+          update: {},
+          create: { userId },
+        })),
+      };
+    }
+
     return this.prisma.warehouse.update({
       where: { id },
       data: {
@@ -207,8 +293,9 @@ export class WarehousesService {
         ...(dto.location !== undefined ? { location: dto.location?.trim() || null } : {}),
         ...(dto.status !== undefined ? { status: dto.status } : {}),
         ...(backlogOps ? { backlogs: backlogOps } : {}),
+        ...(employeeOps ? { employees: employeeOps } : {}),
       },
-      include: { backlogs: true },
+      include: { backlogs: true, employees: true },
     });
   }
 

@@ -26,6 +26,7 @@ import { ProcurementModule } from './procurement/procurement.module';
 import { ResourceReturnsModule } from './resource-returns/resource-returns.module';
 import { WarehousesModule } from './warehouses/warehouses.module';
 import { StockTransfersModule } from './stock-transfers/stock-transfers.module';
+import { StockRequestsModule } from './stock-requests/stock-requests.module';
 
 @Global()
 @Module({
@@ -54,6 +55,7 @@ import { StockTransfersModule } from './stock-transfers/stock-transfers.module';
     ResourceReturnsModule,
     WarehousesModule,
     StockTransfersModule,
+    StockRequestsModule,
   ],
   controllers: [SourceController],
   providers: [UsersPrismaService, WarehouseNotificationsService, StockAlertService],

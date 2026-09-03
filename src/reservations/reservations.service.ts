@@ -506,6 +506,9 @@ export class ReservationsService {
           throw new BadRequestException(`Asset ${asset.id} unavailable`);
         if (asset.itemId !== reservation.itemId)
           throw new BadRequestException(`Asset ${asset.id} does not belong to requested item type`);
+        // #1989 workspaces: the asset must be homed in the reservation's pool.
+        if (((asset as any).warehouseId ?? null) !== ((reservation as any).warehouseId ?? null))
+          throw new BadRequestException('Ակտիվը այս ամրագրման պահեստում չէ');
 
         const activeAllocationCount = await tx.reservationAllocation.count({
           where: { reservationId: allocation.reservationId, releasedAt: null },
@@ -1351,6 +1354,10 @@ export class ReservationsService {
       where.status = { not: ResourceReservationStatus.COMPLETED };
     }
 
+    // #1989 workspaces: scope the list to the selected warehouse.
+    if (query.warehouseId === 'main') where.warehouseId = null;
+    else if (query.warehouseId) where.warehouseId = Number(query.warehouseId);
+
     if (query.search) {
       where.OR = [
         { item: { name: { contains: query.search, mode: 'insensitive' } } },
@@ -1436,7 +1443,9 @@ export class ReservationsService {
 
     const [assetCounts, activeReservations, maintenanceRecords] = await Promise.all([
       this.prisma.asset.groupBy({
-        by: ['itemId'],
+        // Pool-aware (#1989 wave 2): an asset reservation's ceiling is the
+        // assets homed in ITS warehouse.
+        by: ['itemId', 'warehouseId'],
         where: {
           itemId: { in: itemIds },
           status: { notIn: [AssetStatus.DAMAGED, AssetStatus.RETIRED] },
@@ -1456,7 +1465,9 @@ export class ReservationsService {
       }),
     ]);
 
-    const assetCountMap = new Map<number | null, number>(assetCounts.map((a) => [a.itemId, a._count.id]));
+    const assetCountMap = new Map<string, number>(
+      assetCounts.map((a: any) => [`${a.itemId}:${a.warehouseId ?? 'main'}`, a._count.id]),
+    );
 
     // #1989: sub-warehouse reservations draw from their own stock rows.
     const whPairs = [...new Set(data.filter((r: any) => r.warehouseId).map((r: any) => `${r.warehouseId}:${r.itemId}`))];
@@ -1495,7 +1506,11 @@ export class ReservationsService {
 
       const totalQuantity =
         reservation.item?.type === ItemType.ASSET
-          ? Math.max(0, (assetCountMap.get(reservation.itemId) ?? 0) - assetsUnderMaintenance)
+          ? Math.max(
+              0,
+              (assetCountMap.get(`${reservation.itemId}:${(reservation as any).warehouseId ?? 'main'}`) ?? 0) -
+                assetsUnderMaintenance,
+            )
           : (reservation as any).warehouseId
             ? subStockMap.get(`${(reservation as any).warehouseId}:${reservation.itemId}`) ?? 0
             : (reservation.item?.quantity ?? 0);

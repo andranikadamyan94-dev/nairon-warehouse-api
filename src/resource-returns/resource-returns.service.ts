@@ -70,11 +70,20 @@ export class ResourceReturnsService {
     });
   }
 
-  findAll(filters: { status?: ResourceReturnStatus; taskId?: number }) {
+  findAll(filters: { status?: ResourceReturnStatus; taskId?: number; warehouseId?: string }) {
+    // #1989 workspaces: returns belong to the pool their reservation draws from.
+    const reservationScope =
+      filters.warehouseId === 'main'
+        ? { warehouseId: null }
+        : filters.warehouseId
+          ? { warehouseId: Number(filters.warehouseId) }
+          : {};
     return this.prisma.resourceReturn.findMany({
       where: {
         ...(filters.status ? { status: filters.status } : {}),
-        ...(filters.taskId ? { reservation: { taskId: filters.taskId } } : {}),
+        ...(filters.taskId || filters.warehouseId
+          ? { reservation: { ...(filters.taskId ? { taskId: filters.taskId } : {}), ...reservationScope } }
+          : {}),
       },
       include: this.include,
       orderBy: { requestedAt: 'desc' },

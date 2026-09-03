@@ -31,6 +31,15 @@ export class WarehousesController {
     return this.warehousesService.findAll(query);
   }
 
+  // The switcher's list — membership-scoped, so any signed-in warehouse user
+  // may ask; they only get warehouses they can enter. Declared before ':id'.
+  @Get('mine')
+  @ApiOperation({ summary: 'Warehouses the caller can enter' })
+  findMine(@Req() req: any) {
+    // No PermissionGuard here — the service resolves access info itself.
+    return this.warehousesService.findMine(req.user?.id);
+  }
+
   // Declared before ':id' — Nest matches in order.
   @UseGuards(PermissionGuard)
   @Permissions('manage_warehouses')

@@ -123,6 +123,7 @@ model Item {
 
   warehouseStock     WarehouseStock[]
   stockTransferItems StockTransferItem[]
+  stockRequestItems  StockRequestItem[]
 
   resourceReservations ResourceReservation[]
 
@@ -149,6 +150,10 @@ model Asset {
 
   status AssetStatus @default(AVAILABLE)
 
+  /// #1989 wave 2: which warehouse holds this asset. NULL = main — every
+  /// pre-existing row; assets move between pools via stock transfers.
+  warehouseId Int?
+
   responsibleUserId Int?
 
   notes String?
@@ -160,6 +165,8 @@ model Asset {
 
   item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
+  warehouse Warehouse? @relation(fields: [warehouseId], references: [id])
+
   maintenanceRecords MaintenanceRecord[]
 
   allocations ReservationAllocation[]
@@ -170,6 +177,7 @@ model Asset {
 
   @@index([itemId])
   @@index([status])
+  @@index([warehouseId])
 }
 
 model InventoryMovement {
@@ -231,11 +239,14 @@ model Warehouse {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  backlogs     WarehouseBacklog[]
-  stock        WarehouseStock[]
-  transfersIn  StockTransfer[]      @relation("TransferTo")
-  movements    InventoryMovement[]
-  reservations ResourceReservation[]
+  backlogs      WarehouseBacklog[]
+  stock         WarehouseStock[]
+  transfersIn   StockTransfer[]      @relation("TransferTo")
+  movements     InventoryMovement[]
+  reservations  ResourceReservation[]
+  employees     WarehouseEmployee[]
+  assets        Asset[]
+  stockRequests StockRequest[]
 
   @@index([type])
   @@index([status])
@@ -288,14 +299,18 @@ model WarehouseStock {
   @@index([itemId])
 }
 
-/// Main → project-warehouse stock transfer (#1989): one DOCUMENT with many
+/// Main ↔ project-warehouse stock transfer (#1989): one DOCUMENT with many
 /// item lines, mirroring the printed transfer-waybill form. Confirmed
-/// atomically per line: main pool down, sub stock up, paired OUT/IN movements.
+/// atomically per line: source pool down, destination up, paired movements.
+/// direction TO_SUB = main→sub (replenishment); TO_MAIN = sub→main (the
+/// correction/return path). toWarehouseId is ALWAYS the sub involved.
 model StockTransfer {
   id   Int    @id @default(autoincrement())
   uuid String @unique @default(uuid())
 
   toWarehouseId Int
+
+  direction String @default("TO_SUB")
 
   transferDate DateTime @default(now())
 
@@ -322,6 +337,68 @@ model StockTransferItem {
 
   @@index([transferId])
   @@index([itemId])
+}
+
+/// Warehouse staff membership (#1989 wave 2): membership decides WHICH
+/// warehouses a user sees and operates; permissions still decide WHAT they
+/// can do inside. manage_warehouses / manage_warehouse / superadmin see all.
+model WarehouseEmployee {
+  id Int @id @default(autoincrement())
+
+  warehouseId Int
+  /// users-DB id
+  userId      Int
+
+  createdAt DateTime @default(now())
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@unique([warehouseId, userId])
+  @@index([userId])
+}
+
+/// A sub's resource request to main (#1989 wave 2): sub members file it,
+/// main (manage_stock_transfers) approves — which executes a TO_SUB transfer
+/// atomically — or rejects with a reason. Requester may cancel while pending.
+model StockRequest {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  /// the requesting sub
+  warehouseId Int
+
+  status String @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELLED
+
+  comment         String?
+  rejectionReason String?
+
+  createdBy Int?
+  decidedBy Int?
+  decidedAt DateTime?
+
+  /// the transfer executed on approval
+  transferId Int?
+
+  createdAt DateTime @default(now())
+
+  warehouse Warehouse          @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  items     StockRequestItem[]
+
+  @@index([warehouseId])
+  @@index([status])
+}
+
+model StockRequestItem {
+  id Int @id @default(autoincrement())
+
+  requestId Int
+  itemId    Int
+  quantity  Int
+
+  request StockRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  item    Item         @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
 }
 
 model ResourceReservation {

@@ -47,4 +47,10 @@ export class PaginationQueryDto {
   @IsOptional()
   @IsIn(['1'])
   groupByTask?: string;
+
+  /** #1989 workspaces: 'main' or a sub-warehouse id — scopes the list. */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  warehouseId?: string;
 }

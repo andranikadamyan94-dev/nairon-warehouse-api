@@ -34,15 +34,49 @@ export class ItemsService {
       );
     }
 
-    return this.prisma.item.findMany({
-      where: {
-        ...(categoryFilter ? { categoryId: { in: categoryFilter } } : {}),
-        ...(query?.uncategorized === '1' ? { categoryId: null } : {}),
-        ...(query?.type ? { type: query.type } : {}),
-        ...(query?.search
-          ? { name: { contains: query.search, mode: 'insensitive' } }
-          : {}),
-      },
+    const where: any = {
+      ...(categoryFilter ? { categoryId: { in: categoryFilter } } : {}),
+      ...(query?.uncategorized === '1' ? { categoryId: null } : {}),
+      ...(query?.type ? { type: query.type } : {}),
+      ...(query?.search
+        ? { name: { contains: query.search, mode: 'insensitive' } }
+        : {}),
+    };
+
+    // Sub-warehouse workspace (#1989 wave 2): the catalog is global, but a
+    // sub's Ապրանքներ page shows ITS holdings — quantity comes from the sub's
+    // stock row and the asset count from assets homed there; only items the
+    // sub actually holds are listed.
+    if (query?.warehouseId && query.warehouseId !== 'main') {
+      const whId = Number(query.warehouseId);
+      const [stocks, assetCounts] = await Promise.all([
+        this.prisma.warehouseStock.findMany({
+          where: { warehouseId: whId, quantity: { gt: 0 } },
+          select: { itemId: true, quantity: true },
+        }),
+        this.prisma.asset.groupBy({
+          by: ['itemId'],
+          where: { warehouseId: whId },
+          _count: { id: true },
+        }),
+      ]);
+      const stockOf = new Map(stocks.map((s) => [s.itemId, s.quantity]));
+      const assetsOf = new Map(assetCounts.map((a) => [a.itemId, a._count.id]));
+      const heldIds = [...new Set([...stockOf.keys(), ...assetsOf.keys()])];
+      const rows = await this.prisma.item.findMany({
+        where: { ...where, id: { in: heldIds } },
+        include: { category: true },
+        orderBy: { id: 'desc' },
+      });
+      return rows.map((r) => ({
+        ...r,
+        quantity: stockOf.get(r.id) ?? 0,
+        _count: { assets: assetsOf.get(r.id) ?? 0 },
+      }));
+    }
+
+    const rows = await this.prisma.item.findMany({
+      where,
 
       include: {
         category: true,
@@ -53,6 +87,16 @@ export class ItemsService {
         id: 'desc',
       },
     });
+
+    if (query?.warehouseId !== 'main') return rows;
+    // Main workspace: asset counts exclude rows homed in subs.
+    const mainCounts = await this.prisma.asset.groupBy({
+      by: ['itemId'],
+      where: { warehouseId: null, itemId: { in: rows.map((r) => r.id) } },
+      _count: { id: true },
+    });
+    const mainOf = new Map(mainCounts.map((a) => [a.itemId, a._count.id]));
+    return rows.map((r) => ({ ...r, _count: { assets: mainOf.get(r.id) ?? 0 } }));
   }
 
   async findOne(id: number) {
