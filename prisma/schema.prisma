@@ -121,8 +121,8 @@ model Item {
 
   inventoryMovements InventoryMovement[]
 
-  warehouseStock WarehouseStock[]
-  stockTransfers StockTransfer[]
+  warehouseStock     WarehouseStock[]
+  stockTransferItems StockTransferItem[]
 
   resourceReservations ResourceReservation[]
 
@@ -288,34 +288,39 @@ model WarehouseStock {
   @@index([itemId])
 }
 
-/// Main → project-warehouse stock transfer (#1989): single item per document,
-/// mirroring the printed transfer-waybill form. Confirmed atomically: main
-/// pool down, sub stock up, paired OUT/IN movements.
+/// Main → project-warehouse stock transfer (#1989): one DOCUMENT with many
+/// item lines, mirroring the printed transfer-waybill form. Confirmed
+/// atomically per line: main pool down, sub stock up, paired OUT/IN movements.
 model StockTransfer {
   id   Int    @id @default(autoincrement())
   uuid String @unique @default(uuid())
 
   toWarehouseId Int
-  backlogId     Int?
-
-  itemId   Int
-  quantity Int
 
   transferDate DateTime @default(now())
-
-  /// Users-DB ids: who handed the goods over / who received them.
-  issuedById   Int?
-  receivedById Int?
 
   comment String?
 
   createdBy Int?
   createdAt DateTime @default(now())
 
-  toWarehouse Warehouse @relation("TransferTo", fields: [toWarehouseId], references: [id])
-  item        Item      @relation(fields: [itemId], references: [id])
+  toWarehouse Warehouse           @relation("TransferTo", fields: [toWarehouseId], references: [id])
+  items       StockTransferItem[]
 
   @@index([toWarehouseId])
+}
+
+model StockTransferItem {
+  id Int @id @default(autoincrement())
+
+  transferId Int
+  itemId     Int
+  quantity   Int
+
+  transfer StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  item     Item          @relation(fields: [itemId], references: [id])
+
+  @@index([transferId])
   @@index([itemId])
 }
 

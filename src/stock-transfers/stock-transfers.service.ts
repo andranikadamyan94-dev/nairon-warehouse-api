@@ -6,46 +6,48 @@ import {
 
 import { PrismaService } from 'prisma/prisma.service';
 
-import { UsersPrismaService } from '../common/users-prisma.service';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { ItemType } from '../common/enums/item-type.enum';
 
 /**
- * Main → project-warehouse transfers (#1989). One item per document (the
- * printed transfer-waybill form), confirmed atomically: main pool
- * (Item.quantity) down with an OUT movement, sub stock up with an IN movement
- * carrying the warehouseId. No sub→sub or sub→main flows — per the task, subs
- * are replenished ONLY from main.
+ * Main → project-warehouse transfers (#1989). One DOCUMENT with many item
+ * lines (the printed transfer-waybill form), confirmed atomically per line:
+ * main pool (Item.quantity) down with an OUT movement, sub stock up with an
+ * IN movement carrying the warehouseId. No sub→sub or sub→main flows — per
+ * the task, subs are replenished ONLY from main.
  */
 @Injectable()
 export class StockTransfersService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly usersPrisma: UsersPrismaService,
     private readonly stockAlerts: StockAlertService,
   ) {}
 
   async create(
     dto: {
       toWarehouseId: number;
-      backlogId?: number;
-      itemId: number;
-      quantity: number;
+      items: { itemId: number; quantity: number }[];
       transferDate?: string;
-      issuedById?: number;
-      receivedById?: number;
       comment?: string;
     },
     createdBy?: number,
   ) {
-    const quantity = Number(dto.quantity);
-    if (!Number.isInteger(quantity) || quantity < 1) {
-      throw new BadRequestException('Քանակը պետք է լինի ամբողջ դրական թիվ');
+    const lines = (dto.items ?? []).map((l) => ({ itemId: Number(l.itemId), quantity: Number(l.quantity) }));
+    if (!lines.length) {
+      throw new BadRequestException('Ավելացրեք գոնե մեկ ապրանք');
+    }
+    for (const l of lines) {
+      if (!Number.isInteger(l.quantity) || l.quantity < 1) {
+        throw new BadRequestException('Քանակը պետք է լինի ամբողջ դրական թիվ');
+      }
+    }
+    if (new Set(lines.map((l) => l.itemId)).size !== lines.length) {
+      throw new BadRequestException('Նույն ապրանքը կրկնվում է');
     }
 
-    const [wh, item] = await Promise.all([
-      this.prisma.warehouse.findUnique({ where: { id: dto.toWarehouseId }, include: { backlogs: true } }),
-      this.prisma.item.findUnique({ where: { id: dto.itemId } }),
+    const [wh, items] = await Promise.all([
+      this.prisma.warehouse.findUnique({ where: { id: dto.toWarehouseId } }),
+      this.prisma.item.findMany({ where: { id: { in: lines.map((l) => l.itemId) } } }),
     ]);
     if (!wh) throw new NotFoundException('Պահեստը չի գտնվել');
     if (wh.type !== 'PROJECT') {
@@ -54,72 +56,78 @@ export class StockTransfersService {
     if (wh.status !== 'ACTIVE') {
       throw new BadRequestException('Պահեստը ակտիվ չէ');
     }
-    if (!item) throw new NotFoundException('Ապրանքը չի գտնվել');
-    if (item.type !== ItemType.CONSUMABLE) {
-      throw new BadRequestException('Փոխանցվում են միայն ծախսվող ապրանքները (ակտիվները՝ հաջորդ փուլում)');
-    }
-    if (dto.backlogId && !wh.backlogs.some((b) => b.backlogId === dto.backlogId)) {
-      throw new BadRequestException('Նշված նախագիծը կապված չէ այս պահեստի հետ');
+    const itemOf = new Map(items.map((i) => [i.id, i]));
+    for (const l of lines) {
+      const item = itemOf.get(l.itemId);
+      if (!item) throw new NotFoundException(`Ապրանքը չի գտնվել (#${l.itemId})`);
+      if (item.type !== ItemType.CONSUMABLE) {
+        throw new BadRequestException(`«${item.name}»՝ փոխանցվում են միայն ծախսվող ապրանքները (ակտիվները՝ հաջորդ փուլում)`);
+      }
     }
 
     const transfer = await this.prisma.$transaction(async (tx) => {
-      // Guarded decrement — the WHERE keeps the main pool non-negative under
-      // concurrent transfers/issuances.
-      const dec = await tx.item.updateMany({
-        where: { id: item.id, quantity: { gte: quantity } },
-        data: { quantity: { decrement: quantity } },
-      });
-      if (dec.count === 0) {
-        throw new BadRequestException('Հիմնական պահեստում բավարար պաշար չկա');
-      }
-
-      await tx.warehouseStock.upsert({
-        where: { warehouseId_itemId: { warehouseId: wh.id, itemId: item.id } },
-        update: { quantity: { increment: quantity } },
-        create: { warehouseId: wh.id, itemId: item.id, quantity },
-      });
-
       const created = await tx.stockTransfer.create({
         data: {
           toWarehouseId: wh.id,
-          backlogId: dto.backlogId ?? null,
-          itemId: item.id,
-          quantity,
           transferDate: dto.transferDate ? new Date(dto.transferDate) : new Date(),
-          issuedById: dto.issuedById ?? null,
-          receivedById: dto.receivedById ?? null,
           comment: dto.comment?.trim() || null,
           createdBy: createdBy ?? null,
+          items: { create: lines },
         },
       });
 
-      await tx.inventoryMovement.create({
-        data: {
-          itemId: item.id,
-          quantity: -quantity,
-          type: 'OUT',
-          performedBy: createdBy ?? null,
-          notes: `Փոխանցում #${created.id} → ${wh.name}`,
-        },
-      });
-      await tx.inventoryMovement.create({
-        data: {
-          itemId: item.id,
-          quantity,
-          type: 'IN',
-          warehouseId: wh.id,
-          performedBy: createdBy ?? null,
-          notes: `Փոխանցում #${created.id} ← Հիմնական պահեստ`,
-        },
-      });
+      for (const l of lines) {
+        const item = itemOf.get(l.itemId)!;
+        // Guarded decrement — concurrent transfers/issuances must not drive
+        // the main pool negative.
+        const dec = await tx.item.updateMany({
+          where: { id: l.itemId, quantity: { gte: l.quantity } },
+          data: { quantity: { decrement: l.quantity } },
+        });
+        if (dec.count === 0) {
+          throw new BadRequestException(`«${item.name}»՝ հիմնական պահեստում բավարար պաշար չկա`);
+        }
 
-      return created;
+        await tx.warehouseStock.upsert({
+          where: { warehouseId_itemId: { warehouseId: wh.id, itemId: l.itemId } },
+          update: { quantity: { increment: l.quantity } },
+          create: { warehouseId: wh.id, itemId: l.itemId, quantity: l.quantity },
+        });
+
+        await tx.inventoryMovement.create({
+          data: {
+            itemId: l.itemId,
+            quantity: -l.quantity,
+            type: 'OUT',
+            performedBy: createdBy ?? null,
+            notes: `Փոխանցում #${created.id} → ${wh.name}`,
+          },
+        });
+        await tx.inventoryMovement.create({
+          data: {
+            itemId: l.itemId,
+            quantity: l.quantity,
+            type: 'IN',
+            warehouseId: wh.id,
+            performedBy: createdBy ?? null,
+            notes: `Փոխանցում #${created.id} ← Հիմնական պահեստ`,
+          },
+        });
+      }
+
+      return tx.stockTransfer.findUnique({
+        where: { id: created.id },
+        include: {
+          items: { include: { item: { select: { id: true, name: true, code: true, unit: true } } } },
+          toWarehouse: { select: { id: true, name: true, code: true } },
+        },
+      });
     });
 
     // Main pool shrank — low-stock check, outside the transaction as always.
-    this.stockAlerts.check([item.id]);
+    this.stockAlerts.check(lines.map((l) => l.itemId));
 
-    return this.enrich([transfer]).then((r) => r[0]);
+    return transfer;
   }
 
   async findAll(query?: {
@@ -132,14 +140,14 @@ export class StockTransfersService {
     const limit = Number(query?.limit ?? 20);
     const where: any = {};
     if (query?.toWarehouseId) where.toWarehouseId = Number(query.toWarehouseId);
-    if (query?.itemId) where.itemId = Number(query.itemId);
+    if (query?.itemId) where.items = { some: { itemId: Number(query.itemId) } };
 
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.stockTransfer.findMany({
         where,
         include: {
           toWarehouse: { select: { id: true, name: true, code: true } },
-          item: { select: { id: true, name: true, code: true, unit: true } },
+          items: { include: { item: { select: { id: true, name: true, code: true, unit: true } } } },
         },
         orderBy: { id: 'desc' },
         skip: (page - 1) * limit,
@@ -148,24 +156,6 @@ export class StockTransfersService {
       this.prisma.stockTransfer.count({ where }),
     ]);
 
-    return { data: await this.enrich(rows), total, page, limit };
-  }
-
-  /** Resolve users-DB names for the three people on the document. */
-  private async enrich(rows: any[]) {
-    const ids = [
-      ...new Set(
-        rows
-          .flatMap((r) => [r.issuedById, r.receivedById, r.createdBy])
-          .filter((x): x is number => x != null),
-      ),
-    ];
-    const users = await this.usersPrisma.getUsersByIds(ids);
-    const nameOf = new Map(users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
-    return rows.map((r) => ({
-      ...r,
-      issuedByName: r.issuedById ? nameOf.get(r.issuedById) ?? null : null,
-      receivedByName: r.receivedById ? nameOf.get(r.receivedById) ?? null : null,
-    }));
+    return { data: rows, total, page, limit };
   }
 }
