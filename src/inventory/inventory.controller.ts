@@ -63,6 +63,7 @@ export class InventoryController {
       to?: string;
       page?: string;
       limit?: string;
+      warehouseId?: string;
     },
   ) {
     return this.inventoryService.getMovements(query);

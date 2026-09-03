@@ -47,4 +47,10 @@ export class CheckAvailabilityDto {
   @IsOptional()
   @IsInt()
   excludeTaskId?: number;
+
+  /** #1989: pool to draw from — omit/null = main, project-warehouse id = its stock. */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  warehouseId?: number | null;
 }

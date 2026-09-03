@@ -102,6 +102,7 @@ export class InventoryService {
     to?: string;
     page?: string;
     limit?: string;
+    warehouseId?: string;
   }) {
     const page = Number(query?.page ?? 1);
     const limit = Number(query?.limit ?? 20);
@@ -109,6 +110,9 @@ export class InventoryService {
     if (query?.itemId) where.itemId = Number(query.itemId);
     if (query?.taskId) where.taskId = Number(query.taskId);
     if (query?.type) where.type = query.type;
+    // 'main' = the null-warehouse ledger (main pool, incl. all pre-1989 rows)
+    if (query?.warehouseId === 'main') where.warehouseId = null;
+    else if (query?.warehouseId) where.warehouseId = Number(query.warehouseId);
     if (query?.from || query?.to) {
       where.createdAt = {
         ...(query?.from ? { gte: new Date(query.from) } : {}),
@@ -122,6 +126,7 @@ export class InventoryService {
         include: {
           item: true,
           supplier: { select: { id: true, name: true } },
+          warehouse: { select: { id: true, name: true, code: true } },
         },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * limit,

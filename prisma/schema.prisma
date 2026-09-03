@@ -121,6 +121,9 @@ model Item {
 
   inventoryMovements InventoryMovement[]
 
+  warehouseStock WarehouseStock[]
+  stockTransfers StockTransfer[]
+
   resourceReservations ResourceReservation[]
 
   procurementOrderItems ProcurementOrderItem[]
@@ -187,15 +190,133 @@ model InventoryMovement {
 
   notes String?
 
+  /// Sub-warehouse ledger dimension (#1989). NULL = the main warehouse — every
+  /// pre-existing row and every main-pool operation keeps writing null, so
+  /// history needed no repair.
+  warehouseId Int?
+
   createdAt DateTime @default(now())
 
   // RELATIONS
 
-  item     Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
-  supplier Supplier? @relation(fields: [supplierId], references: [id])
+  item      Item       @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  supplier  Supplier?  @relation(fields: [supplierId], references: [id])
+  warehouse Warehouse? @relation(fields: [warehouseId], references: [id])
 
   @@index([itemId])
   @@index([type])
+  @@index([warehouseId])
+}
+
+/// #1989 sub-warehouses. The MAIN row is identity only — its stock is and
+/// stays Item.quantity (no WarehouseStock rows); PROJECT warehouses hold
+/// stock in WarehouseStock and are replenished ONLY by transfer from main.
+model Warehouse {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  name String
+  code String @unique
+
+  type WarehouseType @default(PROJECT)
+
+  /// Responsible person (users-DB id).
+  responsibleId Int?
+
+  location String?
+
+  status WarehouseStatus @default(ACTIVE)
+
+  createdBy Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  backlogs     WarehouseBacklog[]
+  stock        WarehouseStock[]
+  transfersIn  StockTransfer[]      @relation("TransferTo")
+  movements    InventoryMovement[]
+  reservations ResourceReservation[]
+
+  @@index([type])
+  @@index([status])
+}
+
+enum WarehouseType {
+  MAIN
+  PROJECT
+}
+
+enum WarehouseStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// A CRM backlog («նախագիծ» in the team's language) is served by exactly one
+/// warehouse; a warehouse may serve many. Tasks resolve task→backlog→warehouse
+/// and are BLOCKED when their backlog is unlinked (user's call, 2026-09-03).
+model WarehouseBacklog {
+  id Int @id @default(autoincrement())
+
+  warehouseId Int
+  /// CRM Backlog id — cross-service reference, validated at link time.
+  backlogId   Int    @unique
+  /// Name snapshot so lists don't need a CRM round-trip.
+  backlogName String
+
+  createdAt DateTime @default(now())
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@index([warehouseId])
+}
+
+/// Consumable stock held by a PROJECT warehouse (main = Item.quantity).
+model WarehouseStock {
+  id Int @id @default(autoincrement())
+
+  warehouseId Int
+  itemId      Int
+
+  quantity Int @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  item      Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([warehouseId, itemId])
+  @@index([itemId])
+}
+
+/// Main → project-warehouse stock transfer (#1989): single item per document,
+/// mirroring the printed transfer-waybill form. Confirmed atomically: main
+/// pool down, sub stock up, paired OUT/IN movements.
+model StockTransfer {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  toWarehouseId Int
+  backlogId     Int?
+
+  itemId   Int
+  quantity Int
+
+  transferDate DateTime @default(now())
+
+  /// Users-DB ids: who handed the goods over / who received them.
+  issuedById   Int?
+  receivedById Int?
+
+  comment String?
+
+  createdBy Int?
+  createdAt DateTime @default(now())
+
+  toWarehouse Warehouse @relation("TransferTo", fields: [toWarehouseId], references: [id])
+  item        Item      @relation(fields: [itemId], references: [id])
+
+  @@index([toWarehouseId])
+  @@index([itemId])
 }
 
 model ResourceReservation {
@@ -225,6 +346,12 @@ model ResourceReservation {
 
   status ResourceReservationStatus @default(PENDING)
 
+  /// Which warehouse serves this reservation (#1989). NULL = main pool
+  /// (Item.quantity) — every pre-1989 reservation and every non-task flow.
+  /// Set from the task's backlog link at create; issuance, reclaims and
+  /// returns then debit/credit THIS warehouse's stock.
+  warehouseId Int?
+
   startDate DateTime
   endDate   DateTime?
 
@@ -238,6 +365,8 @@ model ResourceReservation {
   // RELATIONS
 
   item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  warehouse Warehouse? @relation(fields: [warehouseId], references: [id])
 
   replacedBy ResourceReservation?  @relation("ReservationReplacement", fields: [replacedByReservationId], references: [id])
   replaces   ResourceReservation[] @relation("ReservationReplacement")

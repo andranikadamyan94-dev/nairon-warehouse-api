@@ -289,10 +289,57 @@ export class ReservationsService {
 
   // ─── create ─────────────────────────────────────────────────────────────────
 
+  /**
+   * #1989 task→backlog→warehouse resolution. Task requests are BLOCKED when
+   * the task's backlog («նախագիծ») isn't linked to any warehouse — the user's
+   * explicit call: every backlog gets linked to main or a sub before people
+   * request. Main link → null (all legacy code paths untouched); sub link →
+   * that warehouse's id, and its stock drives every flow downstream.
+   * Non-task reservations stay on the main pool.
+   */
+  private async resolveTaskWarehouse(taskId?: number | null): Promise<number | null> {
+    if (!taskId) return null;
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    let task: any;
+    try {
+      const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
+        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+      });
+      if (!res.ok) throw new Error(`CRM ${res.status}`);
+      task = await res.json();
+    } catch (e: any) {
+      this.logger.warn(`Task warehouse resolution failed for task ${taskId}: ${e?.message}`);
+      throw new BadRequestException('Առաջադրանքի տվյալները հասանելի չեն (CRM) — փորձեք կրկին');
+    }
+    const backlogId =
+      task?.backlogId ?? task?.sourceBacklogId ?? task?.backlog?.id ?? task?.sourceBacklog?.id ?? null;
+    if (!backlogId) {
+      throw new BadRequestException(
+        'Առաջադրանքի նախագիծը որոշված չէ — պահեստային հայտն արգելափակված է',
+      );
+    }
+    const link = await this.prisma.warehouseBacklog.findUnique({
+      where: { backlogId },
+      include: { warehouse: true },
+    });
+    if (!link) {
+      throw new BadRequestException(
+        'Նախագիծը կապված չէ որևէ պահեստի հետ — դիմեք պահեստի պատասխանատուին',
+      );
+    }
+    if (link.warehouse.type === 'MAIN') return null;
+    if (link.warehouse.status !== 'ACTIVE') {
+      throw new BadRequestException('Նախագծի պահեստը ակտիվ չէ');
+    }
+    return link.warehouseId;
+  }
+
   async create(dto: CreateReservationDto, performedBy?: number) {
     this.logger.log(
       `CREATE reservation | taskId=${dto.taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
     );
+
+    const warehouseId = await this.resolveTaskWarehouse(dto.taskId);
 
     const itemIds = dto.resources.map((r) => r.itemId);
     const items = await this.prisma.item.findMany({
@@ -317,7 +364,7 @@ export class ReservationsService {
       }
     }
 
-    const availability = await this.availabilityService.checkAvailability(dto);
+    const availability = await this.availabilityService.checkAvailability({ ...dto, warehouseId });
 
     await this.prisma.$transaction(async (tx) => {
       for (const resource of dto.resources) {
@@ -341,6 +388,7 @@ export class ReservationsService {
                 projectName: dto.projectName ?? null,
                 entityId: dto.entityId ?? null,
                 entityName: dto.entityName ?? null,
+                warehouseId,
                 startDate: slot.startDate,
                 endDate: slot.endDate,
                 status,
@@ -381,6 +429,7 @@ export class ReservationsService {
               projectName: dto.projectName ?? null,
               entityId: dto.entityId ?? null,
               entityName: dto.entityName ?? null,
+              warehouseId,
               startDate,
               endDate,
               status,
@@ -577,7 +626,18 @@ export class ReservationsService {
       );
     }
 
-    if (reservation.item.quantity < toAllocate) {
+    // #1989: sub-warehouse reservations draw from THEIR stock, not the main pool.
+    if (reservation.warehouseId) {
+      const stock = await this.prisma.warehouseStock.findUnique({
+        where: { warehouseId_itemId: { warehouseId: reservation.warehouseId, itemId: reservation.item.id } },
+        select: { quantity: true },
+      });
+      if ((stock?.quantity ?? 0) < toAllocate) {
+        throw new BadRequestException(
+          `Նախագծային պահեստում բավարար պաշար չկա (${stock?.quantity ?? 0} առկա, ${toAllocate} պահանջվում է)`,
+        );
+      }
+    } else if (reservation.item.quantity < toAllocate) {
       throw new BadRequestException(
         `Insufficient stock: ${reservation.item.quantity} available, ${toAllocate} requested`,
       );
@@ -592,10 +652,25 @@ export class ReservationsService {
         data: { reservationId, action: 'ALLOCATED', performedBy, notes: 'Ապրանքը տրված է' },
       });
 
-      await tx.item.update({
-        where: { id: reservation.item.id },
-        data: { quantity: { decrement: toAllocate } },
-      });
+      if (reservation.warehouseId) {
+        // Guarded — concurrent issuance must not drive sub stock negative.
+        const dec = await tx.warehouseStock.updateMany({
+          where: {
+            warehouseId: reservation.warehouseId,
+            itemId: reservation.item.id,
+            quantity: { gte: toAllocate },
+          },
+          data: { quantity: { decrement: toAllocate } },
+        });
+        if (dec.count === 0) {
+          throw new BadRequestException('Նախագծային պահեստում բավարար պաշար չկա');
+        }
+      } else {
+        await tx.item.update({
+          where: { id: reservation.item.id },
+          data: { quantity: { decrement: toAllocate } },
+        });
+      }
 
       await tx.inventoryMovement.create({
         data: {
@@ -603,6 +678,7 @@ export class ReservationsService {
           quantity: -toAllocate,
           type: 'OUT',
           taskId: reservation.taskId,
+          warehouseId: reservation.warehouseId,
           performedBy,
           notes: `Ամրագրում #${reservationId} — տրված`,
         },
@@ -840,18 +916,27 @@ export class ReservationsService {
       });
 
       if (!damaged) {
-        await tx.item.update({
-          where: { id: reservation.itemId },
-          data: { quantity: { increment: quantity } },
-        });
+        if (reservation.warehouseId) {
+          await tx.warehouseStock.upsert({
+            where: { warehouseId_itemId: { warehouseId: reservation.warehouseId, itemId: reservation.itemId } },
+            update: { quantity: { increment: quantity } },
+            create: { warehouseId: reservation.warehouseId, itemId: reservation.itemId, quantity },
+          });
+        } else {
+          await tx.item.update({
+            where: { id: reservation.itemId },
+            data: { quantity: { increment: quantity } },
+          });
+        }
         await tx.inventoryMovement.create({
           data: {
             itemId: reservation.itemId,
             quantity,
             type: 'IN',
             taskId: reservation.taskId,
+            warehouseId: reservation.warehouseId,
             performedBy,
-            notes: reason ?? `Reservation #${reservationId} — չընդունված քանակի վերադարձ`,
+            notes: reason ?? `Ամրագրում #${reservationId} — չընդունված քանակի վերադարձ`,
           },
         });
       }
@@ -1079,21 +1164,38 @@ export class ReservationsService {
       let newStatus: ResourceReservationStatus;
 
       if (isConsumable) {
-        await tx.item.update({
-          where: { id: allocation.reservation.itemId },
-          data: { quantity: { increment: allocation.quantity } },
-        });
+        // #1989: credit the pool the goods were issued from.
+        const whId = (allocation.reservation as any).warehouseId as number | null;
+        if (whId) {
+          await tx.warehouseStock.upsert({
+            where: { warehouseId_itemId: { warehouseId: whId, itemId: allocation.reservation.itemId } },
+            update: { quantity: { increment: allocation.quantity } },
+            create: { warehouseId: whId, itemId: allocation.reservation.itemId, quantity: allocation.quantity },
+          });
+        } else {
+          await tx.item.update({
+            where: { id: allocation.reservation.itemId },
+            data: { quantity: { increment: allocation.quantity } },
+          });
+        }
         await tx.inventoryMovement.create({
           data: {
             itemId: allocation.reservation.itemId,
             quantity: allocation.quantity,
             type: 'IN',
             taskId: allocation.reservation.taskId,
+            warehouseId: whId,
             performedBy: releasedBy,
             notes: reason ?? `Ամրագրում #${allocation.reservationId} — հատկացումը չեղարկված`,
           },
         });
-        const restoredQty = (allocation.reservation.item?.quantity ?? 0) + (allocation.quantity ?? 0);
+        const poolQty = whId
+          ? (await tx.warehouseStock.findUnique({
+              where: { warehouseId_itemId: { warehouseId: whId, itemId: allocation.reservation.itemId } },
+              select: { quantity: true },
+            }))?.quantity ?? 0
+          : (allocation.reservation.item?.quantity ?? 0) + (allocation.quantity ?? 0);
+        const restoredQty = poolQty;
         newStatus = restoredQty >= allocation.reservation.quantity
           ? ResourceReservationStatus.APPROVED
           : ResourceReservationStatus.PENDING;
@@ -1259,6 +1361,7 @@ export class ReservationsService {
 
     const include = {
       item: true,
+      warehouse: { select: { id: true, name: true, code: true, type: true } },
       allocations: {
         where: { releasedAt: null },
         include: { asset: true },
@@ -1334,7 +1437,7 @@ export class ReservationsService {
           itemId: { in: itemIds },
           status: { notIn: INACTIVE_STATUSES },
         },
-        select: { id: true, itemId: true, taskId: true, quantity: true, startDate: true, endDate: true, status: true },
+        select: { id: true, itemId: true, taskId: true, quantity: true, startDate: true, endDate: true, status: true, warehouseId: true },
       }),
       this.prisma.maintenanceRecord.findMany({
         where: { asset: { itemId: { in: itemIds } } },
@@ -1344,12 +1447,24 @@ export class ReservationsService {
 
     const assetCountMap = new Map<number | null, number>(assetCounts.map((a) => [a.itemId, a._count.id]));
 
+    // #1989: sub-warehouse reservations draw from their own stock rows.
+    const whPairs = [...new Set(data.filter((r: any) => r.warehouseId).map((r: any) => `${r.warehouseId}:${r.itemId}`))];
+    const subStocks = whPairs.length
+      ? await this.prisma.warehouseStock.findMany({
+          where: { OR: whPairs.map((p) => ({ warehouseId: Number(p.split(':')[0]), itemId: Number(p.split(':')[1]) })) },
+          select: { warehouseId: true, itemId: true, quantity: true },
+        })
+      : [];
+    const subStockMap = new Map(subStocks.map((s) => [`${s.warehouseId}:${s.itemId}`, s.quantity]));
+
     const FAR_FUTURE = new Date(8640000000000000);
 
     const enriched = data.map((reservation) => {
       const resEnd = reservation.endDate ?? FAR_FUTURE;
-      const overlapping = (r: { itemId: number; startDate: Date; endDate: Date | null }) =>
+      // Only same-pool reservations compete for the same stock.
+      const overlapping = (r: { itemId: number; startDate: Date; endDate: Date | null; warehouseId?: number | null }) =>
         r.itemId === reservation.itemId &&
+        (r.warehouseId ?? null) === ((reservation as any).warehouseId ?? null) &&
         r.startDate < resEnd &&
         (r.endDate === null || r.endDate > reservation.startDate);
 
@@ -1370,7 +1485,9 @@ export class ReservationsService {
       const totalQuantity =
         reservation.item?.type === ItemType.ASSET
           ? Math.max(0, (assetCountMap.get(reservation.itemId) ?? 0) - assetsUnderMaintenance)
-          : (reservation.item?.quantity ?? 0);
+          : (reservation as any).warehouseId
+            ? subStockMap.get(`${(reservation as any).warehouseId}:${reservation.itemId}`) ?? 0
+            : (reservation.item?.quantity ?? 0);
 
       // For consumables, ALLOCATED reservations already had their quantity deducted
       // from item.quantity, so counting them again in reservedByOthers would double-subtract.
@@ -1473,6 +1590,8 @@ export class ReservationsService {
         };
       }),
       excludeTaskId: taskId,
+      // One task = one warehouse: every reservation of the task shares it.
+      warehouseId: (reservations[0] as any)?.warehouseId ?? null,
     });
 
     const unavailableItemIds = new Set(availabilityResult.unavailableResources.map((r) => r.itemId));
@@ -1544,6 +1663,8 @@ export class ReservationsService {
       `UPDATE reservation | taskId=${taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
     );
 
+    const warehouseId = await this.resolveTaskWarehouse(taskId);
+
     const itemIds = dto.resources.map((r) => r.itemId);
     const items = await this.prisma.item.findMany({
       where: { id: { in: itemIds } },
@@ -1562,6 +1683,7 @@ export class ReservationsService {
     const availability = await this.availabilityService.checkAvailability({
       ...dto,
       excludeTaskId: taskId,
+      warehouseId,
     });
 
     // excludeTaskId removes this task's reservation ROWS from the math, but a
@@ -1780,6 +1902,7 @@ export class ReservationsService {
                   quantity: resource.quantity,
                   entityId: dto.entityId ?? null,
                   entityName: dto.entityName ?? null,
+                  warehouseId,
                   startDate: slot.startDate,
                   endDate: slot.endDate,
                   status,
@@ -1889,6 +2012,7 @@ export class ReservationsService {
                 quantity: resource.quantity,
                 entityId: dto.entityId ?? null,
                 entityName: dto.entityName ?? null,
+                warehouseId,
                 startDate,
                 endDate,
                 status,

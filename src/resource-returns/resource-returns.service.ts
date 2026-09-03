@@ -155,10 +155,20 @@ export class ResourceReturnsService {
           : ResourceReservationStatus.PARTIALLY_ALLOCATED;
         dataPatch = { status: newStatus };
       } else {
-        await tx.item.update({
-          where: { id: ret.reservation.itemId },
-          data: { quantity: { increment: ret.quantity } },
-        });
+        // #1989: credit the pool the goods were issued from.
+        const whId = (ret.reservation as any).warehouseId as number | null;
+        if (whId) {
+          await tx.warehouseStock.upsert({
+            where: { warehouseId_itemId: { warehouseId: whId, itemId: ret.reservation.itemId } },
+            update: { quantity: { increment: ret.quantity } },
+            create: { warehouseId: whId, itemId: ret.reservation.itemId, quantity: ret.quantity },
+          });
+        } else {
+          await tx.item.update({
+            where: { id: ret.reservation.itemId },
+            data: { quantity: { increment: ret.quantity } },
+          });
+        }
 
         // The request shrinks by what came back; acceptance can never exceed
         // either the new request or what is still out.
@@ -202,6 +212,7 @@ export class ResourceReturnsService {
           quantity: ret.quantity,
           type: 'IN',
           taskId: ret.reservation.taskId,
+          warehouseId: (ret.reservation as any).warehouseId ?? null,
           performedBy: receivedBy,
           notes: `Վերադարձ #${ret.id} ստացված`,
         },

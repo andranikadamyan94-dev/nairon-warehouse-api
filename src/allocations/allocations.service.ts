@@ -82,10 +82,20 @@ export class AllocationsService {
             });
           }
 
-          await tx.item.update({
-            where: { id: allocation.reservation.itemId },
-            data: { quantity: { increment: returnQty } },
-          });
+          // #1989: credit the pool the goods were issued from.
+          const whId = (allocation.reservation as any).warehouseId as number | null;
+          if (whId) {
+            await tx.warehouseStock.upsert({
+              where: { warehouseId_itemId: { warehouseId: whId, itemId: allocation.reservation.itemId } },
+              update: { quantity: { increment: returnQty } },
+              create: { warehouseId: whId, itemId: allocation.reservation.itemId, quantity: returnQty },
+            });
+          } else {
+            await tx.item.update({
+              where: { id: allocation.reservation.itemId },
+              data: { quantity: { increment: returnQty } },
+            });
+          }
           touchedItemIds.push(allocation.reservation.itemId);
 
           await tx.inventoryMovement.create({
@@ -94,6 +104,7 @@ export class AllocationsService {
               quantity: returnQty,
               type: 'IN',
               taskId: allocation.reservation.taskId,
+              warehouseId: whId,
               notes: `Վերադարձ ամրագրում #${allocation.reservationId}-ից`,
             },
           });
@@ -156,10 +167,20 @@ export class AllocationsService {
       });
 
       if (isConsumable) {
-        await tx.item.update({
-          where: { id: allocation.reservation.itemId },
-          data: { quantity: { increment: allocation.quantity } },
-        });
+        // #1989: credit the pool the goods were issued from.
+        const whId = (allocation.reservation as any).warehouseId as number | null;
+        if (whId) {
+          await tx.warehouseStock.upsert({
+            where: { warehouseId_itemId: { warehouseId: whId, itemId: allocation.reservation.itemId } },
+            update: { quantity: { increment: allocation.quantity } },
+            create: { warehouseId: whId, itemId: allocation.reservation.itemId, quantity: allocation.quantity },
+          });
+        } else {
+          await tx.item.update({
+            where: { id: allocation.reservation.itemId },
+            data: { quantity: { increment: allocation.quantity } },
+          });
+        }
 
         await tx.inventoryMovement.create({
           data: {
@@ -167,6 +188,7 @@ export class AllocationsService {
             quantity: allocation.quantity,
             type: 'IN',
             taskId: allocation.reservation.taskId,
+            warehouseId: whId,
             notes: `Ամրագրում #${allocation.reservationId} — հատկացումը չեղարկված`,
           },
         });
