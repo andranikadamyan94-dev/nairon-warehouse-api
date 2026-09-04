@@ -18,15 +18,25 @@ import { ItemType } from '../common/enums/item-type.enum';
 export class ObjectsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private async crmObjects(): Promise<
+  // The object catalog changes rarely; a short cache keeps list/summary/
+  // movements enrichment off CRM's back on every page load.
+  private objectsCache: { at: number; data: any[] } | null = null;
+  private static readonly OBJECTS_TTL_MS = 60_000;
+
+  async crmObjects(): Promise<
     { id: number; code: string; name: string; backlogId: number; status: string; plannedCost: number | null }[]
   > {
+    if (this.objectsCache && Date.now() - this.objectsCache.at < ObjectsService.OBJECTS_TTL_MS) {
+      return this.objectsCache.data;
+    }
     const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
     const res = await fetch(`${crmUrl}/api/construction-objects/internal/all`, {
       headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
     });
     if (!res.ok) throw new BadRequestException('Օբյեկտների ցանկը հասանելի չէ (CRM)');
-    return (await res.json()) as any;
+    const data = (await res.json()) as any[];
+    this.objectsCache = { at: Date.now(), data };
+    return data;
   }
 
   /** The CRM object list, for pickers/labels on the warehouse side. */
@@ -43,17 +53,24 @@ export class ObjectsService {
     return { movements, estimateLines };
   }
 
-  /** Ledger rows of one object (raw view, newest first). */
-  async movements(objectId: number) {
-    return this.prisma.inventoryMovement.findMany({
-      where: { objectId },
-      include: {
-        item: { select: { id: true, name: true, code: true, unit: true, category: { select: { name: true } } } },
-        warehouse: { select: { id: true, name: true } },
-      },
-      orderBy: { id: 'desc' },
-      take: 1000,
-    });
+  /** Ledger rows of one object (raw view, newest first, paginated). */
+  async movements(objectId: number, query?: { page?: string; limit?: string }) {
+    const page = Number(query?.page ?? 1);
+    const limit = Number(query?.limit ?? 20);
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.inventoryMovement.findMany({
+        where: { objectId },
+        include: {
+          item: { select: { id: true, name: true, code: true, unit: true, category: { select: { name: true } } } },
+          warehouse: { select: { id: true, name: true } },
+        },
+        orderBy: { id: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.inventoryMovement.count({ where: { objectId } }),
+    ]);
+    return { data: rows, total, page, limit };
   }
 
   /**

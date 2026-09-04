@@ -8,6 +8,7 @@ import { PrismaService } from 'prisma/prisma.service';
 
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
+import { ObjectsService } from '../objects/objects.service';
 
 import { ItemType } from '../common/enums/item-type.enum';
 
@@ -22,6 +23,7 @@ export class InventoryService {
     private readonly prisma: PrismaService,
     private readonly stockAlerts: StockAlertService,
     private readonly usersPrisma: UsersPrismaService,
+    private readonly objectsService: ObjectsService,
   ) {}
 
   async createMovement(dto: InventoryMovementDto) {
@@ -141,18 +143,12 @@ export class InventoryService {
     const performers = await this.usersPrisma.getUsersByIds(performerIds);
     const nameOf = new Map(performers.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
 
-    // #2042: object labels live in CRM — attach them when any row needs one.
+    // #2042: object labels live in CRM — the shared 60s cache serves them.
     let objOf = new Map<number, string>();
     if (rows.some((r: any) => r.objectId != null)) {
       try {
-        const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
-        const res = await fetch(`${crmUrl}/api/construction-objects/internal/all`, {
-          headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
-        });
-        if (res.ok) {
-          const objects = (await res.json()) as { id: number; code: string; name: string }[];
-          objOf = new Map(objects.map((o) => [o.id, `${o.code} — ${o.name}`]));
-        }
+        const objects = await this.objectsService.crmObjects();
+        objOf = new Map(objects.map((o) => [o.id, `${o.code} — ${o.name}`]));
       } catch {
         /* rows render with the bare id */
       }

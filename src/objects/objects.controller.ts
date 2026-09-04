@@ -6,6 +6,7 @@ import {
   Param,
   ParseIntPipe,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 
@@ -57,9 +58,9 @@ export class ObjectsController {
   @UseGuards(PermissionGuard)
   @Permissions(...VIEW_PERMS)
   @Get(':objectId/movements')
-  @ApiOperation({ summary: 'Raw ledger rows of the object' })
-  movements(@Param('objectId', ParseIntPipe) objectId: number) {
-    return this.objectsService.movements(objectId);
+  @ApiOperation({ summary: 'Raw ledger rows of the object (paginated)' })
+  movements(@Param('objectId', ParseIntPipe) objectId: number, @Query() query: any) {
+    return this.objectsService.movements(objectId, query);
   }
 
   @UseGuards(PermissionGuard)

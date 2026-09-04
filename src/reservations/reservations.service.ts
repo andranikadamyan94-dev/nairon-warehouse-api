@@ -718,6 +718,12 @@ export class ReservationsService {
       );
     }
 
+    // #2042: resolve the task's CURRENT object BEFORE the transaction — an
+    // external HTTP call inside an interactive tx would hold a pooled
+    // connection and abort the whole issuance on a slow CRM (~5s tx timeout).
+    const curObj = await this.currentTaskObjectId(reservation.taskId);
+    const effObjectId = curObj === undefined ? ((reservation as any).objectId ?? null) : curObj;
+
     const result = await this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.create({
         data: { reservationId, quantity: toAllocate },
@@ -748,11 +754,9 @@ export class ReservationsService {
       }
 
       // #2042: freeze the cost at issuance — later price changes must not
-      // rewrite this object's spend. The object is re-resolved from the task
-      // so a corrected task attribution applies to future issuances.
+      // rewrite this object's spend. The object was re-resolved above so a
+      // corrected task attribution applies to future issuances.
       const issueCost = reservation.item.unitCost ?? null;
-      const curObj = await this.currentTaskObjectId(reservation.taskId);
-      const effObjectId = curObj === undefined ? ((reservation as any).objectId ?? null) : curObj;
       if (effObjectId !== ((reservation as any).objectId ?? null)) {
         await tx.resourceReservation.update({ where: { id: reservationId }, data: { objectId: effObjectId } });
       }
