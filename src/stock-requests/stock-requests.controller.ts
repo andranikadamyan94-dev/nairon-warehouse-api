@@ -42,6 +42,14 @@ export class StockRequestsController {
     return this.stockRequestsService.create(dto, req.user?.id, ctxOf(req));
   }
 
+  // Requester or main-side staff edit a pending request (guarded in the
+  // service — same audience approve() trusts, plus the creator).
+  @Patch(':id')
+  @ApiOperation({ summary: 'Edit a pending request (lines/comment)' })
+  update(@Param('id', ParseIntPipe) id: number, @Body() dto: any, @Req() req: any) {
+    return this.stockRequestsService.update(id, dto, req.user?.id, ctxOf(req));
+  }
+
   @UseGuards(PermissionGuard)
   @Permissions('manage_stock_transfers')
   @Patch(':id/approve')

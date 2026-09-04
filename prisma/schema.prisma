@@ -800,6 +800,9 @@ model ProcurementDelivery {
   orderId Int
 
   receiptUrl String?
+  /// Number of the accompanying paper (invoice/waybill). Required by the API
+  /// on every new delivery; nullable only for rows recorded before the field.
+  documentNumber String?
   notes      String?
   receivedBy Int?
   receivedAt DateTime @default(now())

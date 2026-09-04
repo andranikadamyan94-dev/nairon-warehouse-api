@@ -48,7 +48,21 @@ export class StockRequestsService {
     }
     await this.warehousesService.assertWarehouseAccess(userId, wh.id, ctx);
 
-    const lines = (dto.items ?? []).map((l) => ({ itemId: Number(l.itemId), quantity: Number(l.quantity) }));
+    const lines = await this.validateLines(dto.items);
+
+    return this.prisma.stockRequest.create({
+      data: {
+        warehouseId: wh.id,
+        comment: dto.comment?.trim() || null,
+        createdBy: userId,
+        items: { create: lines },
+      },
+      include: { items: { include: { item: { select: { id: true, name: true, unit: true } } } } },
+    });
+  }
+
+  private async validateLines(items: { itemId: number; quantity: number }[]) {
+    const lines = (items ?? []).map((l) => ({ itemId: Number(l.itemId), quantity: Number(l.quantity) }));
     if (!lines.length) throw new BadRequestException('Ավելացրեք գոնե մեկ ապրանք');
     for (const l of lines) {
       if (!Number.isInteger(l.quantity) || l.quantity < 1) {
@@ -60,15 +74,62 @@ export class StockRequestsService {
     }
     const found = await this.prisma.item.count({ where: { id: { in: lines.map((l) => l.itemId) } } });
     if (found !== lines.length) throw new NotFoundException('Ապրանքը չի գտնվել');
+    return lines;
+  }
 
-    return this.prisma.stockRequest.create({
-      data: {
-        warehouseId: wh.id,
-        comment: dto.comment?.trim() || null,
-        createdBy: userId,
-        items: { create: lines },
-      },
-      include: { items: { include: { item: { select: { id: true, name: true, unit: true } } } } },
+  /**
+   * Edit a PENDING request's lines/comment. Allowed to the requester (fix
+   * your own ask) and to main-side transfer staff (trim quantities to what
+   * main can actually send before approving) — the same people approve() lets
+   * decide, so this widens nothing.
+   */
+  async update(
+    id: number,
+    dto: { items?: { itemId: number; quantity: number }[]; comment?: string },
+    userId: number,
+    ctx?: Ctx,
+  ) {
+    const req = await this.prisma.stockRequest.findUnique({ where: { id } });
+    if (!req) throw new NotFoundException('Հայտը չի գտնվել');
+    if (req.status !== 'PENDING') {
+      throw new BadRequestException('Միայն սպասող հայտը կարող է խմբագրվել');
+    }
+
+    if (!ctx) {
+      const info = await this.usersPrisma.getUserAccessInfo(userId);
+      ctx = { isSuperAdmin: info.isSuperAdmin, permissionNames: info.permissionNames };
+    }
+    const names = ctx.permissionNames ?? [];
+    const mainSide =
+      ctx.isSuperAdmin ||
+      names.includes('manage_stock_transfers') ||
+      names.includes('manage_warehouses') ||
+      names.includes('manage_warehouse');
+    if (!mainSide && req.createdBy !== userId) {
+      throw new ForbiddenException('Հայտը կարող է խմբագրել միայն ներկայացնողը');
+    }
+
+    const lines = dto.items !== undefined ? await this.validateLines(dto.items) : undefined;
+
+    // Re-check status inside the transaction: an approve() racing this edit
+    // has already executed the transfer, and rewriting the lines afterwards
+    // would leave the request disagreeing with what was actually sent.
+    return this.prisma.$transaction(async (tx) => {
+      const cur = await tx.stockRequest.findUnique({ where: { id }, select: { status: true } });
+      if (cur?.status !== 'PENDING') {
+        throw new BadRequestException('Հայտի վիճակը փոխվել է — թարմացրեք էջը');
+      }
+      return tx.stockRequest.update({
+        where: { id },
+        data: {
+          ...(dto.comment !== undefined ? { comment: dto.comment?.trim() || null } : {}),
+          ...(lines ? { items: { deleteMany: {}, create: lines } } : {}),
+        },
+        include: {
+          warehouse: { select: { id: true, name: true, code: true } },
+          items: { include: { item: { select: { id: true, name: true, unit: true, type: true } } } },
+        },
+      });
     });
   }
 

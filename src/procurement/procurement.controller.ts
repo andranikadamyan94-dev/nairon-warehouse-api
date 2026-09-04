@@ -79,7 +79,7 @@ export class ProcurementController {
   receive(
     @Param('id', ParseIntPipe) id: number,
     @UploadedFile() receipt: Express.Multer.File,
-    @Body() body: { lines?: string | ReceiveDeliveryLineDto[]; notes?: string },
+    @Body() body: { lines?: string | ReceiveDeliveryLineDto[]; notes?: string; documentNumber?: string },
     @LoggedInUser('id') userId?: number,
   ) {
     // multipart carries everything as strings, so a per-line array arrives
@@ -94,7 +94,12 @@ export class ProcurementController {
     } else if (Array.isArray(body?.lines)) {
       lines = body.lines;
     }
-    return this.procurementService.receive(id, receipt, { lines, notes: body?.notes }, userId);
+    return this.procurementService.receive(
+      id,
+      receipt,
+      { lines, notes: body?.notes, documentNumber: body?.documentNumber },
+      userId,
+    );
   }
 
   @UseGuards(PermissionGuard)

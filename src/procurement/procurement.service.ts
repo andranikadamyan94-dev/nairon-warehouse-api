@@ -268,6 +268,12 @@ export class ProcurementService {
         'Մատակարարումը գրանցելու համար պարտադիր է կցել փաստաթուղթ',
       );
     }
+    // The paper's own number (invoice/waybill №) — without it the stored file
+    // can't be reconciled against the supplier's books.
+    const documentNumber = dto?.documentNumber?.trim();
+    if (!documentNumber) {
+      throw new BadRequestException('Փաստաթղթի համարը պարտադիր է');
+    }
 
     const remaining = (line: { quantity: number; receivedQuantity: number }) =>
       line.quantity - (line.receivedQuantity ?? 0);
@@ -314,6 +320,7 @@ export class ProcurementService {
           data: {
             orderId: id,
             receiptUrl,
+            documentNumber,
             notes: dto?.notes,
             receivedBy,
           },
@@ -355,7 +362,7 @@ export class ProcurementService {
               // #2042: the purchase price is this receipt's real cost — freeze it.
               unitCost: line.unitPrice ?? null,
               totalCost: line.unitPrice != null ? quantity * line.unitPrice : null,
-              notes: `Գնման պատվեր #${id}, առաքում #${delivery.id}`,
+              notes: `Գնման պատվեր #${id}, առաքում #${delivery.id}, փաստ. № ${documentNumber}`,
             },
           });
         }
