@@ -28,25 +28,31 @@ export class ResourceReturnsService {
   };
 
   /** Unreleased allocation quantity — what the task physically holds. */
-  /** #2042: reverse flows return value at the issuance's frozen cost. */
-  private async reverseUnitCost(
+  /** #2042: reverse flows mirror the ISSUANCE — frozen cost AND object.
+   *  taskId null matches only task-less rows (undefined would drop the filter). */
+  private async reverseCostInfo(
     tx: any,
-    args: { taskId?: number | null; itemId: number; warehouseId?: number | null },
-  ): Promise<number | null> {
+    args: { taskId?: number | null; itemId: number; warehouseId?: number | null; fallbackObjectId?: number | null },
+  ): Promise<{ unitCost: number | null; objectId: number | null }> {
     const lastOut = await tx.inventoryMovement.findFirst({
       where: {
         type: 'OUT',
         itemId: args.itemId,
-        taskId: args.taskId ?? undefined,
+        taskId: args.taskId ?? null,
         warehouseId: args.warehouseId ?? null,
-        unitCost: { not: null },
       },
       orderBy: { id: 'desc' },
-      select: { unitCost: true },
+      select: { unitCost: true, objectId: true },
     });
-    if (lastOut?.unitCost != null) return lastOut.unitCost;
-    const item = await tx.item.findUnique({ where: { id: args.itemId }, select: { unitCost: true } });
-    return item?.unitCost ?? null;
+    let unitCost = lastOut?.unitCost ?? null;
+    if (unitCost == null) {
+      const item = await tx.item.findUnique({ where: { id: args.itemId }, select: { unitCost: true } });
+      unitCost = item?.unitCost ?? null;
+    }
+    return {
+      unitCost,
+      objectId: lastOut ? (lastOut.objectId ?? null) : (args.fallbackObjectId ?? null),
+    };
   }
 
   private async issuedOf(tx: any, reservationId: number): Promise<number> {
@@ -236,10 +242,11 @@ export class ResourceReturnsService {
         });
       }
 
-      const retCost = await this.reverseUnitCost(tx, {
+      const rc = await this.reverseCostInfo(tx, {
         taskId: ret.reservation.taskId,
         itemId: ret.reservation.itemId,
         warehouseId: (ret.reservation as any).warehouseId ?? null,
+        fallbackObjectId: (ret.reservation as any).objectId ?? null,
       });
       await tx.inventoryMovement.create({
         data: {
@@ -248,9 +255,9 @@ export class ResourceReturnsService {
           type: 'IN',
           taskId: ret.reservation.taskId,
           warehouseId: (ret.reservation as any).warehouseId ?? null,
-          objectId: (ret.reservation as any).objectId ?? null,
-          unitCost: retCost,
-          totalCost: retCost != null ? ret.quantity * retCost : null,
+          objectId: rc.objectId,
+          unitCost: rc.unitCost,
+          totalCost: rc.unitCost != null ? ret.quantity * rc.unitCost : null,
           performedBy: receivedBy,
           notes: `Վերադարձ #${ret.id} ստացված`,
         },

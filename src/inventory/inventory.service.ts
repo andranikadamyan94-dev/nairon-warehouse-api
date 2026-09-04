@@ -103,6 +103,7 @@ export class InventoryService {
     page?: string;
     limit?: string;
     warehouseId?: string;
+    objectId?: string;
   }) {
     const page = Number(query?.page ?? 1);
     const limit = Number(query?.limit ?? 20);
@@ -113,6 +114,7 @@ export class InventoryService {
     // 'main' = the null-warehouse ledger (main pool, incl. all pre-1989 rows)
     if (query?.warehouseId === 'main') where.warehouseId = null;
     else if (query?.warehouseId) where.warehouseId = Number(query.warehouseId);
+    if (query?.objectId) where.objectId = Number(query.objectId);
     if (query?.from || query?.to) {
       where.createdAt = {
         ...(query?.from ? { gte: new Date(query.from) } : {}),
@@ -139,8 +141,29 @@ export class InventoryService {
     const performers = await this.usersPrisma.getUsersByIds(performerIds);
     const nameOf = new Map(performers.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
 
+    // #2042: object labels live in CRM — attach them when any row needs one.
+    let objOf = new Map<number, string>();
+    if (rows.some((r: any) => r.objectId != null)) {
+      try {
+        const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+        const res = await fetch(`${crmUrl}/api/construction-objects/internal/all`, {
+          headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+        });
+        if (res.ok) {
+          const objects = (await res.json()) as { id: number; code: string; name: string }[];
+          objOf = new Map(objects.map((o) => [o.id, `${o.code} — ${o.name}`]));
+        }
+      } catch {
+        /* rows render with the bare id */
+      }
+    }
+
     return {
-      data: rows.map((r) => ({ ...r, performedByName: r.performedBy ? nameOf.get(r.performedBy) ?? null : null })),
+      data: rows.map((r: any) => ({
+        ...r,
+        performedByName: r.performedBy ? nameOf.get(r.performedBy) ?? null : null,
+        objectLabel: r.objectId != null ? objOf.get(r.objectId) ?? `#${r.objectId}` : null,
+      })),
       total,
       page,
       limit,

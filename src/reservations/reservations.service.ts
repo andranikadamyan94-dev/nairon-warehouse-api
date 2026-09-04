@@ -312,7 +312,14 @@ export class ReservationsService {
       select: { warehouseId: true, objectId: true },
     });
     if (existing) {
-      return { warehouseId: existing.warehouseId ?? null, objectId: (existing as any).objectId ?? null };
+      // The WAREHOUSE stays frozen; the OBJECT follows the task (user's call
+      // 2026-09-05) — re-resolve it, falling back to the stamped value when
+      // CRM is unreachable.
+      const cur = await this.currentTaskObjectId(taskId);
+      return {
+        warehouseId: existing.warehouseId ?? null,
+        objectId: cur === undefined ? ((existing as any).objectId ?? null) : cur,
+      };
     }
     const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
     let task: any;
@@ -350,26 +357,51 @@ export class ReservationsService {
     return { warehouseId: link.warehouseId, objectId };
   }
 
-  /** #2042: the reverse-flow cost — the latest issuance's frozen unit cost
-   *  for this task+item+pool, falling back to the item's current cost. */
-  private async reverseUnitCost(
+  /** #2042: reverse flows mirror the ISSUANCE — its frozen unit cost AND the
+   *  object it was attributed to. taskId null must match only task-less rows
+   *  (undefined would drop the filter and borrow another task's issuance).
+   *  Fallbacks: the item's current cost, the reservation's stamped object. */
+  private async reverseCostInfo(
     tx: any,
-    args: { taskId?: number | null; itemId: number; warehouseId?: number | null },
-  ): Promise<number | null> {
+    args: { taskId?: number | null; itemId: number; warehouseId?: number | null; fallbackObjectId?: number | null },
+  ): Promise<{ unitCost: number | null; objectId: number | null }> {
     const lastOut = await tx.inventoryMovement.findFirst({
       where: {
         type: 'OUT',
         itemId: args.itemId,
-        taskId: args.taskId ?? undefined,
+        taskId: args.taskId ?? null,
         warehouseId: args.warehouseId ?? null,
-        unitCost: { not: null },
       },
       orderBy: { id: 'desc' },
-      select: { unitCost: true },
+      select: { unitCost: true, objectId: true },
     });
-    if (lastOut?.unitCost != null) return lastOut.unitCost;
-    const item = await tx.item.findUnique({ where: { id: args.itemId }, select: { unitCost: true } });
-    return item?.unitCost ?? null;
+    let unitCost = lastOut?.unitCost ?? null;
+    if (unitCost == null) {
+      const item = await tx.item.findUnique({ where: { id: args.itemId }, select: { unitCost: true } });
+      unitCost = item?.unitCost ?? null;
+    }
+    return {
+      unitCost,
+      objectId: lastOut ? (lastOut.objectId ?? null) : (args.fallbackObjectId ?? null),
+    };
+  }
+
+  /** #2042: the task's CURRENT object from CRM — undefined when unreachable
+   *  (callers then fall back to the stamped value). The warehouse binding
+   *  stays frozen; the object deliberately follows the task. */
+  private async currentTaskObjectId(taskId?: number | null): Promise<number | null | undefined> {
+    if (!taskId) return null;
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    try {
+      const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
+        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+      });
+      if (!res.ok) return undefined;
+      const task = (await res.json()) as any;
+      return task?.objectId ?? null;
+    } catch {
+      return undefined;
+    }
   }
 
   async create(dto: CreateReservationDto, performedBy?: number) {
@@ -716,8 +748,14 @@ export class ReservationsService {
       }
 
       // #2042: freeze the cost at issuance — later price changes must not
-      // rewrite this object's spend.
+      // rewrite this object's spend. The object is re-resolved from the task
+      // so a corrected task attribution applies to future issuances.
       const issueCost = reservation.item.unitCost ?? null;
+      const curObj = await this.currentTaskObjectId(reservation.taskId);
+      const effObjectId = curObj === undefined ? ((reservation as any).objectId ?? null) : curObj;
+      if (effObjectId !== ((reservation as any).objectId ?? null)) {
+        await tx.resourceReservation.update({ where: { id: reservationId }, data: { objectId: effObjectId } });
+      }
       await tx.inventoryMovement.create({
         data: {
           itemId: reservation.item.id,
@@ -725,7 +763,7 @@ export class ReservationsService {
           type: 'OUT',
           taskId: reservation.taskId,
           warehouseId: reservation.warehouseId,
-          objectId: (reservation as any).objectId ?? null,
+          objectId: effObjectId,
           unitCost: issueCost,
           totalCost: issueCost != null ? toAllocate * issueCost : null,
           performedBy,
@@ -977,10 +1015,11 @@ export class ReservationsService {
             data: { quantity: { increment: quantity } },
           });
         }
-        const rcCost = await this.reverseUnitCost(tx, {
+        const rc = await this.reverseCostInfo(tx, {
           taskId: reservation.taskId,
           itemId: reservation.itemId,
           warehouseId: reservation.warehouseId,
+          fallbackObjectId: (reservation as any).objectId ?? null,
         });
         await tx.inventoryMovement.create({
           data: {
@@ -989,9 +1028,9 @@ export class ReservationsService {
             type: 'IN',
             taskId: reservation.taskId,
             warehouseId: reservation.warehouseId,
-            objectId: (reservation as any).objectId ?? null,
-            unitCost: rcCost,
-            totalCost: rcCost != null ? quantity * rcCost : null,
+            objectId: rc.objectId,
+            unitCost: rc.unitCost,
+            totalCost: rc.unitCost != null ? quantity * rc.unitCost : null,
             performedBy,
             notes: reason ?? `Ամրագրում #${reservationId} — չընդունված քանակի վերադարձ`,
           },
@@ -1235,10 +1274,11 @@ export class ReservationsService {
             data: { quantity: { increment: allocation.quantity } },
           });
         }
-        const relCost = await this.reverseUnitCost(tx, {
+        const rel = await this.reverseCostInfo(tx, {
           taskId: allocation.reservation.taskId,
           itemId: allocation.reservation.itemId,
           warehouseId: whId,
+          fallbackObjectId: (allocation.reservation as any).objectId ?? null,
         });
         await tx.inventoryMovement.create({
           data: {
@@ -1247,9 +1287,9 @@ export class ReservationsService {
             type: 'IN',
             taskId: allocation.reservation.taskId,
             warehouseId: whId,
-            objectId: (allocation.reservation as any).objectId ?? null,
-            unitCost: relCost,
-            totalCost: relCost != null ? allocation.quantity * relCost : null,
+            objectId: rel.objectId,
+            unitCost: rel.unitCost,
+            totalCost: rel.unitCost != null ? allocation.quantity * rel.unitCost : null,
             performedBy: releasedBy,
             notes: reason ?? `Ամրագրում #${allocation.reservationId} — հատկացումը չեղարկված`,
           },

@@ -29,6 +29,20 @@ export class ObjectsService {
     return (await res.json()) as any;
   }
 
+  /** The CRM object list, for pickers/labels on the warehouse side. */
+  list() {
+    return this.crmObjects();
+  }
+
+  /** Cross-service delete guard: does the warehouse hold data for this object? */
+  async usage(objectId: number) {
+    const [movements, estimateLines] = await Promise.all([
+      this.prisma.inventoryMovement.count({ where: { objectId } }),
+      this.prisma.objectEstimateLine.count({ where: { objectId } }),
+    ]);
+    return { movements, estimateLines };
+  }
+
   /** Ledger rows of one object (raw view, newest first). */
   async movements(objectId: number) {
     return this.prisma.inventoryMovement.findMany({

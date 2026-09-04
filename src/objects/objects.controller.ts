@@ -13,6 +13,8 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { ObjectsService } from './objects.service';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
+import { Public } from '../auth/decorators/public.decorator';
+import { InternalGuard } from '../auth/guards/internal.guard';
 
 const VIEW_PERMS = [
   'view_resources',
@@ -27,6 +29,22 @@ const VIEW_PERMS = [
 @Controller('objects')
 export class ObjectsController {
   constructor(private readonly objectsService: ObjectsService) {}
+
+  // CRM asks before deleting an object. Before ':objectId' routes.
+  @Public()
+  @UseGuards(InternalGuard)
+  @Get('internal/usage/:objectId')
+  usage(@Param('objectId', ParseIntPipe) objectId: number) {
+    return this.objectsService.usage(objectId);
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions(...VIEW_PERMS)
+  @Get()
+  @ApiOperation({ summary: 'Object labels (CRM proxy) for pickers/filters' })
+  list() {
+    return this.objectsService.list();
+  }
 
   @UseGuards(PermissionGuard)
   @Permissions(...VIEW_PERMS)
