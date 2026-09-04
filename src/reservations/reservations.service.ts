@@ -297,19 +297,23 @@ export class ReservationsService {
    * that warehouse's id, and its stock drives every flow downstream.
    * Non-task reservations stay on the main pool.
    */
-  private async resolveTaskWarehouse(taskId?: number | null): Promise<number | null> {
-    if (!taskId) return null;
+  private async resolveTaskWarehouse(
+    taskId?: number | null,
+  ): Promise<{ warehouseId: number | null; objectId: number | null }> {
+    if (!taskId) return { warehouseId: null, objectId: null };
     // Binding freeze (2026-09-04): once a task has any non-cancelled
-    // reservation, its warehouse is settled — availability, updates and new
-    // rows all follow the stamped pool. A backlog re-link only affects tasks
-    // starting fresh, and an unlinked backlog (or a CRM outage) can never
-    // lock an in-flight task out of managing its existing rows.
+    // reservation, its warehouse AND object are settled — availability,
+    // updates and new rows all follow the stamped binding. A backlog re-link
+    // only affects tasks starting fresh, and an unlinked backlog (or a CRM
+    // outage) can never lock an in-flight task out of managing its rows.
     const existing = await this.prisma.resourceReservation.findFirst({
       where: { taskId, status: { notIn: INACTIVE_STATUSES } },
       orderBy: { id: 'desc' },
-      select: { warehouseId: true },
+      select: { warehouseId: true, objectId: true },
     });
-    if (existing) return existing.warehouseId ?? null;
+    if (existing) {
+      return { warehouseId: existing.warehouseId ?? null, objectId: (existing as any).objectId ?? null };
+    }
     const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
     let task: any;
     try {
@@ -338,11 +342,34 @@ export class ReservationsService {
         'Նախագիծը կապված չէ որևէ պահեստի հետ — դիմեք պահեստի պատասխանատուին',
       );
     }
-    if (link.warehouse.type === 'MAIN') return null;
+    const objectId = task?.objectId ?? null;
+    if (link.warehouse.type === 'MAIN') return { warehouseId: null, objectId };
     if (link.warehouse.status !== 'ACTIVE') {
       throw new BadRequestException('Նախագծի պահեստը ակտիվ չէ');
     }
-    return link.warehouseId;
+    return { warehouseId: link.warehouseId, objectId };
+  }
+
+  /** #2042: the reverse-flow cost — the latest issuance's frozen unit cost
+   *  for this task+item+pool, falling back to the item's current cost. */
+  private async reverseUnitCost(
+    tx: any,
+    args: { taskId?: number | null; itemId: number; warehouseId?: number | null },
+  ): Promise<number | null> {
+    const lastOut = await tx.inventoryMovement.findFirst({
+      where: {
+        type: 'OUT',
+        itemId: args.itemId,
+        taskId: args.taskId ?? undefined,
+        warehouseId: args.warehouseId ?? null,
+        unitCost: { not: null },
+      },
+      orderBy: { id: 'desc' },
+      select: { unitCost: true },
+    });
+    if (lastOut?.unitCost != null) return lastOut.unitCost;
+    const item = await tx.item.findUnique({ where: { id: args.itemId }, select: { unitCost: true } });
+    return item?.unitCost ?? null;
   }
 
   async create(dto: CreateReservationDto, performedBy?: number) {
@@ -350,7 +377,7 @@ export class ReservationsService {
       `CREATE reservation | taskId=${dto.taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
     );
 
-    const warehouseId = await this.resolveTaskWarehouse(dto.taskId);
+    const { warehouseId, objectId } = await this.resolveTaskWarehouse(dto.taskId);
 
     const itemIds = dto.resources.map((r) => r.itemId);
     const items = await this.prisma.item.findMany({
@@ -400,6 +427,7 @@ export class ReservationsService {
                 entityId: dto.entityId ?? null,
                 entityName: dto.entityName ?? null,
                 warehouseId,
+                objectId,
                 startDate: slot.startDate,
                 endDate: slot.endDate,
                 status,
@@ -441,6 +469,7 @@ export class ReservationsService {
               entityId: dto.entityId ?? null,
               entityName: dto.entityName ?? null,
               warehouseId,
+              objectId,
               startDate,
               endDate,
               status,
@@ -686,6 +715,9 @@ export class ReservationsService {
         });
       }
 
+      // #2042: freeze the cost at issuance — later price changes must not
+      // rewrite this object's spend.
+      const issueCost = reservation.item.unitCost ?? null;
       await tx.inventoryMovement.create({
         data: {
           itemId: reservation.item.id,
@@ -693,6 +725,9 @@ export class ReservationsService {
           type: 'OUT',
           taskId: reservation.taskId,
           warehouseId: reservation.warehouseId,
+          objectId: (reservation as any).objectId ?? null,
+          unitCost: issueCost,
+          totalCost: issueCost != null ? toAllocate * issueCost : null,
           performedBy,
           notes: `Ամրագրում #${reservationId} — տրված`,
         },
@@ -942,6 +977,11 @@ export class ReservationsService {
             data: { quantity: { increment: quantity } },
           });
         }
+        const rcCost = await this.reverseUnitCost(tx, {
+          taskId: reservation.taskId,
+          itemId: reservation.itemId,
+          warehouseId: reservation.warehouseId,
+        });
         await tx.inventoryMovement.create({
           data: {
             itemId: reservation.itemId,
@@ -949,6 +989,9 @@ export class ReservationsService {
             type: 'IN',
             taskId: reservation.taskId,
             warehouseId: reservation.warehouseId,
+            objectId: (reservation as any).objectId ?? null,
+            unitCost: rcCost,
+            totalCost: rcCost != null ? quantity * rcCost : null,
             performedBy,
             notes: reason ?? `Ամրագրում #${reservationId} — չընդունված քանակի վերադարձ`,
           },
@@ -1192,6 +1235,11 @@ export class ReservationsService {
             data: { quantity: { increment: allocation.quantity } },
           });
         }
+        const relCost = await this.reverseUnitCost(tx, {
+          taskId: allocation.reservation.taskId,
+          itemId: allocation.reservation.itemId,
+          warehouseId: whId,
+        });
         await tx.inventoryMovement.create({
           data: {
             itemId: allocation.reservation.itemId,
@@ -1199,6 +1247,9 @@ export class ReservationsService {
             type: 'IN',
             taskId: allocation.reservation.taskId,
             warehouseId: whId,
+            objectId: (allocation.reservation as any).objectId ?? null,
+            unitCost: relCost,
+            totalCost: relCost != null ? allocation.quantity * relCost : null,
             performedBy: releasedBy,
             notes: reason ?? `Ամրագրում #${allocation.reservationId} — հատկացումը չեղարկված`,
           },
@@ -1689,7 +1740,7 @@ export class ReservationsService {
       `UPDATE reservation | taskId=${taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
     );
 
-    const warehouseId = await this.resolveTaskWarehouse(taskId);
+    const { warehouseId, objectId } = await this.resolveTaskWarehouse(taskId);
 
     const itemIds = dto.resources.map((r) => r.itemId);
     const items = await this.prisma.item.findMany({
@@ -1929,6 +1980,7 @@ export class ReservationsService {
                   entityId: dto.entityId ?? null,
                   entityName: dto.entityName ?? null,
                   warehouseId,
+                  objectId,
                   startDate: slot.startDate,
                   endDate: slot.endDate,
                   status,
@@ -2039,6 +2091,7 @@ export class ReservationsService {
                 entityId: dto.entityId ?? null,
                 entityName: dto.entityName ?? null,
                 warehouseId,
+                objectId,
                 startDate,
                 endDate,
                 status,

@@ -7,6 +7,27 @@ import { ResourceReservationStatus } from '../common/enums/resource-reservation-
 
 @Injectable()
 export class AllocationsService {
+  /** #2042: reverse flows return value at the issuance's frozen cost. */
+  private async reverseUnitCost(
+    tx: any,
+    args: { taskId?: number | null; itemId: number; warehouseId?: number | null },
+  ): Promise<number | null> {
+    const lastOut = await tx.inventoryMovement.findFirst({
+      where: {
+        type: 'OUT',
+        itemId: args.itemId,
+        taskId: args.taskId ?? undefined,
+        warehouseId: args.warehouseId ?? null,
+        unitCost: { not: null },
+      },
+      orderBy: { id: 'desc' },
+      select: { unitCost: true },
+    });
+    if (lastOut?.unitCost != null) return lastOut.unitCost;
+    const item = await tx.item.findUnique({ where: { id: args.itemId }, select: { unitCost: true } });
+    return item?.unitCost ?? null;
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly stockAlerts: StockAlertService,
@@ -98,6 +119,11 @@ export class AllocationsService {
           }
           touchedItemIds.push(allocation.reservation.itemId);
 
+          const retCost = await this.reverseUnitCost(tx, {
+            taskId: allocation.reservation.taskId,
+            itemId: allocation.reservation.itemId,
+            warehouseId: whId,
+          });
           await tx.inventoryMovement.create({
             data: {
               itemId: allocation.reservation.itemId,
@@ -105,6 +131,9 @@ export class AllocationsService {
               type: 'IN',
               taskId: allocation.reservation.taskId,
               warehouseId: whId,
+              objectId: (allocation.reservation as any).objectId ?? null,
+              unitCost: retCost,
+              totalCost: retCost != null ? returnQty * retCost : null,
               notes: `Վերադարձ ամրագրում #${allocation.reservationId}-ից`,
             },
           });
@@ -182,6 +211,11 @@ export class AllocationsService {
           });
         }
 
+        const relCost = await this.reverseUnitCost(tx, {
+          taskId: allocation.reservation.taskId,
+          itemId: allocation.reservation.itemId,
+          warehouseId: whId,
+        });
         await tx.inventoryMovement.create({
           data: {
             itemId: allocation.reservation.itemId,
@@ -189,6 +223,9 @@ export class AllocationsService {
             type: 'IN',
             taskId: allocation.reservation.taskId,
             warehouseId: whId,
+            objectId: (allocation.reservation as any).objectId ?? null,
+            unitCost: relCost,
+            totalCost: relCost != null ? allocation.quantity * relCost : null,
             notes: `Ամրագրում #${allocation.reservationId} — հատկացումը չեղարկված`,
           },
         });

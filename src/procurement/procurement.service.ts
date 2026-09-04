@@ -352,6 +352,9 @@ export class ProcurementService {
               quantity,
               type: 'IN',
               supplierId: order.supplierId ?? undefined,
+              // #2042: the purchase price is this receipt's real cost — freeze it.
+              unitCost: line.unitPrice ?? null,
+              totalCost: line.unitPrice != null ? quantity * line.unitPrice : null,
               notes: `Գնման պատվեր #${id}, առաքում #${delivery.id}`,
             },
           });

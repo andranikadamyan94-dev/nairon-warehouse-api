@@ -59,6 +59,16 @@ export class CreateItemDto {
   @Min(0)
   minQuantity?: number | null;
 
+  /** #2042: current unit cost (AMD), frozen onto movements at write time.
+   *  Manually maintained until the cost-update policy is decided. */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Transform(({ value }) => (value === null || value === '' ? null : Number(value)))
+  @ValidateIf((_, value) => value !== null)
+  @IsNumber()
+  @Min(0)
+  unitCost?: number | null;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()

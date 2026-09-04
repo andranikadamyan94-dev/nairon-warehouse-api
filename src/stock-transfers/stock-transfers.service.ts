@@ -141,12 +141,16 @@ export class StockTransfersService {
         const label = direction === 'TO_SUB'
           ? { out: `Փոխանցում #${created.id} → ${wh.name}`, in: `Փոխանցում #${created.id} ← Հիմնական պահեստ` }
           : { out: `Փոխանցում #${created.id} → Հիմնական պահեստ`, in: `Փոխանցում #${created.id} ← ${wh.name}` };
+        // #2042: transfers carry the current cost along (no object — pool moves).
+        const trCost = (item as any).unitCost ?? null;
         await tx.inventoryMovement.create({
           data: {
             itemId: l.itemId,
             quantity: -l.quantity,
             type: 'OUT',
             warehouseId: direction === 'TO_SUB' ? null : wh.id,
+            unitCost: trCost,
+            totalCost: trCost != null ? l.quantity * trCost : null,
             performedBy: createdBy ?? null,
             notes: label.out,
           },
@@ -157,6 +161,8 @@ export class StockTransfersService {
             quantity: l.quantity,
             type: 'IN',
             warehouseId: direction === 'TO_SUB' ? wh.id : null,
+            unitCost: trCost,
+            totalCost: trCost != null ? l.quantity * trCost : null,
             performedBy: createdBy ?? null,
             notes: label.in,
           },

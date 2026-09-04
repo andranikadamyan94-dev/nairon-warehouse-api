@@ -103,6 +103,12 @@ model Item {
   /// counter, so a threshold here would be meaningless.
   minQuantity Float?
 
+  /// #2042 cost layer: the CURRENT unit cost (AMD), snapshotted onto every
+  /// movement at write time. Manually maintained for now — the update policy
+  /// (weighted average at receive, last price, …) is a pending decision, and
+  /// changing it later only changes who writes this field.
+  unitCost Float?
+
   /// Set when a low-stock alert has been sent, cleared when stock recovers
   /// above the threshold. This is what makes the alert fire once per breach
   /// instead of on every write while stock sits low — quantity is mutated from
@@ -124,6 +130,7 @@ model Item {
   warehouseStock     WarehouseStock[]
   stockTransferItems StockTransferItem[]
   stockRequestItems  StockRequestItem[]
+  estimateLines      ObjectEstimateLine[]
 
   resourceReservations ResourceReservation[]
 
@@ -203,6 +210,16 @@ model InventoryMovement {
   /// history needed no repair.
   warehouseId Int?
 
+  /// #2042: the construction object this movement attributes to (via the
+  /// task's object link, stamped at reservation create). One ledger row feeds
+  /// both the task view and the object view — no double booking.
+  objectId Int?
+
+  /// #2042 cost freeze: the item's unit cost AT WRITE TIME (AMD) and the
+  /// positive line value (|quantity| × unitCost). Never recomputed.
+  unitCost  Float?
+  totalCost Float?
+
   createdAt DateTime @default(now())
 
   // RELATIONS
@@ -214,6 +231,7 @@ model InventoryMovement {
   @@index([itemId])
   @@index([type])
   @@index([warehouseId])
+  @@index([objectId])
 }
 
 /// #1989 sub-warehouses. The MAIN row is identity only — its stock is and
@@ -401,6 +419,31 @@ model StockRequestItem {
   @@index([requestId])
 }
 
+/// #2042 estimate (նախահաշիվ): planned material lines per construction object
+/// (object ids live in CRM). Actuals come from the movement ledger; deviations
+/// are pure computation over the two.
+model ObjectEstimateLine {
+  id Int @id @default(autoincrement())
+
+  /// CRM ConstructionObject id (cross-service reference).
+  objectId Int
+  itemId   Int
+
+  plannedQuantity Float
+  /// Planned unit cost (AMD); planned value = quantity × this.
+  plannedUnitCost Float?
+
+  note String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([objectId, itemId])
+  @@index([objectId])
+}
+
 model ResourceReservation {
   id   Int    @id @default(autoincrement())
   uuid String @unique @default(uuid())
@@ -433,6 +476,10 @@ model ResourceReservation {
   /// Set from the task's backlog link at create; issuance, reclaims and
   /// returns then debit/credit THIS warehouse's stock.
   warehouseId Int?
+
+  /// #2042: the task's construction object at create time — movements this
+  /// reservation produces inherit it.
+  objectId Int?
 
   startDate DateTime
   endDate   DateTime?
