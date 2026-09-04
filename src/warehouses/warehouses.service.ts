@@ -147,6 +147,13 @@ export class WarehousesService {
     ];
     const users = await this.usersPrisma.getUsersByIds(respIds);
     const nameOf = new Map(users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
+    // Rosters describe who works a warehouse TODAY — departed people drop out
+    // of the display (and out of the row on the next roster save, since the
+    // edit form round-trips this list). The responsible NAME stays even when
+    // deactivated: a blank there would hide that a replacement is needed.
+    const activeIds = new Set(
+      await this.usersPrisma.filterActive(rows.flatMap((w) => w.employees.map((e) => e.userId))),
+    );
 
     // A client's backlog exists once per project, so links often share a name
     // (six «Սյունար» tags) — attach the project name live for disambiguation,
@@ -164,7 +171,9 @@ export class WarehousesService {
       data: rows.map((w) => ({
         ...w,
         responsibleName: w.responsibleId ? nameOf.get(w.responsibleId) ?? null : null,
-        employees: w.employees.map((e) => ({ ...e, name: nameOf.get(e.userId) ?? null })),
+        employees: w.employees
+          .filter((e) => activeIds.has(e.userId))
+          .map((e) => ({ ...e, name: nameOf.get(e.userId) ?? null })),
         backlogs: w.backlogs.map((b) => ({
           ...b,
           backlogName: liveOf.get(b.backlogId)?.name ?? b.backlogName,
