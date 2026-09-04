@@ -389,6 +389,25 @@ export class ReservationsService {
   /** #2042: the task's CURRENT object from CRM — undefined when unreachable
    *  (callers then fall back to the stamped value). The warehouse binding
    *  stays frozen; the object deliberately follows the task. */
+  /**
+   * 2026-09-05 policy: the task's object is changeable only until the first
+   * issuance. Any ledger row for the task (OUT, and the INs that can only
+   * follow an OUT) freezes it. Atomic: the frozen check and the re-stamp of
+   * pending requests live in one transaction, so an issuance racing this
+   * call can't slip a stale object stamp through.
+   */
+  async restampTaskObject(taskId: number, objectId: number | null) {
+    return this.prisma.$transaction(async (tx) => {
+      const movements = await tx.inventoryMovement.count({ where: { taskId } });
+      if (movements > 0) return { frozen: true, movements };
+      const upd = await tx.resourceReservation.updateMany({
+        where: { taskId, status: { notIn: ['CANCELLED', 'REJECTED'] } },
+        data: { objectId },
+      });
+      return { frozen: false, updated: upd.count };
+    });
+  }
+
   private async currentTaskObjectId(taskId?: number | null): Promise<number | null | undefined> {
     if (!taskId) return null;
     const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';

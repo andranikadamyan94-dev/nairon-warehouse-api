@@ -39,6 +39,20 @@ export class ObjectsService {
     return data;
   }
 
+  /** One object's catalog row. A freshly created object may postdate the
+   *  cached catalog — a miss busts the cache and retries once, so a new
+   *  object's summary is never served with null metadata for a TTL. */
+  async crmObject(objectId: number) {
+    let all = await this.crmObjects();
+    let row = all.find((o) => o.id === objectId);
+    if (!row && this.objectsCache) {
+      this.objectsCache = null;
+      all = await this.crmObjects();
+      row = all.find((o) => o.id === objectId);
+    }
+    return row;
+  }
+
   /** The CRM object list, for pickers/labels on the warehouse side. */
   list() {
     return this.crmObjects();
@@ -134,8 +148,8 @@ export class ObjectsService {
 
   /** Planned vs actual: object cost header + per-estimate-line deviations. */
   async summary(objectId: number) {
-    const [objects, materials, estimate] = await Promise.all([
-      this.crmObjects().catch(() => []),
+    const [object, materials, estimate] = await Promise.all([
+      this.crmObject(objectId).then((o) => o ?? null).catch(() => null),
       this.materials(objectId),
       this.prisma.objectEstimateLine.findMany({
         where: { objectId },
@@ -143,7 +157,6 @@ export class ObjectsService {
         orderBy: { id: 'asc' },
       }),
     ]);
-    const object = objects.find((o) => o.id === objectId) ?? null;
     const actualMaterialCost = Math.round(materials.reduce((s, m) => s + (m.netCost ?? 0), 0) * 100) / 100;
     const actualByItem = new Map(materials.map((m) => [m.itemId, m]));
 
