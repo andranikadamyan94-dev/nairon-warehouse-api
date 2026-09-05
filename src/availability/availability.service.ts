@@ -29,6 +29,10 @@ export class AvailabilityService {
     startDate: Date,
     endDate: Date | null,
     excludeTaskId?: number,
+    // #1989: which pool the request draws from — null/undefined = main
+    // (Item.quantity), a project-warehouse id = its WarehouseStock row. Only
+    // same-pool reservations compete.
+    warehouseId?: number | null,
   ): Promise<number> {
     // Open-ended reservations (endDate = null) conflict with any window that starts after them.
     // For bounded windows, also include open-ended reservations that started before the window ends.
@@ -47,6 +51,8 @@ export class AvailabilityService {
 
     const usableAssets = {
       itemId: item.id,
+      // #1989 workspaces: only assets homed in the requesting pool count.
+      warehouseId: warehouseId ?? null,
       status: { notIn: [AssetStatus.DAMAGED, AssetStatus.RETIRED] },
     };
 
@@ -62,6 +68,7 @@ export class AvailabilityService {
     // further away.
     const reservationWhere = {
       itemId: item.id,
+      warehouseId: warehouseId ?? null,
       ...reservationOverlapFilter,
       status: { notIn: INACTIVE_STATUSES },
       ...(excludeTaskId ? { taskId: { not: excludeTaskId } } : {}),
@@ -88,8 +95,18 @@ export class AvailabilityService {
           }),
     ]);
 
-    let available =
-      item.type === ItemType.ASSET ? assetCount : (item.quantity ?? 0);
+    let available: number;
+    if (item.type === ItemType.ASSET) {
+      available = assetCount;
+    } else if (warehouseId) {
+      const stock = await this.prisma.warehouseStock.findUnique({
+        where: { warehouseId_itemId: { warehouseId, itemId: item.id } },
+        select: { quantity: true },
+      });
+      available = stock?.quantity ?? 0;
+    } else {
+      available = item.quantity ?? 0;
+    }
 
     available = Math.max(0, available - underMaintenance);
     const reservedSum = overlappingReservations._sum.quantity ?? 0;
@@ -137,6 +154,7 @@ export class AvailabilityService {
                 slot.startDate,
                 slot.endDate,
                 dto.excludeTaskId,
+                dto.warehouseId,
               );
 
               if (available < requestedResource.quantity) {
@@ -156,6 +174,7 @@ export class AvailabilityService {
             new Date(dto.startDate),
             endDate,
             dto.excludeTaskId,
+            dto.warehouseId,
           );
 
           if (available < requestedResource.quantity) {

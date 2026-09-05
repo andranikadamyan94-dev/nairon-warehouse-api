@@ -57,3 +57,14 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # Runtime file uploads (procurement receipts, etc.) — user data, not source.
 uploads/
+
+# Real credentials live in these — .env alone did not cover them, so a
+# `git add -A` would have committed live database passwords.
+.env.neon-backup
+.env.staging
+.env.production.bak
+*.bak
+
+# Local scratch: a hand-written enum migration and a truncate script.
+prisma/manual_migration.sql
+prisma/truncate.sql

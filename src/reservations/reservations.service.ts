@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -288,10 +289,146 @@ export class ReservationsService {
 
   // ─── create ─────────────────────────────────────────────────────────────────
 
+  /**
+   * #1989 task→backlog→warehouse resolution. Task requests are BLOCKED when
+   * the task's backlog («նախագիծ») isn't linked to any warehouse — the user's
+   * explicit call: every backlog gets linked to main or a sub before people
+   * request. Main link → null (all legacy code paths untouched); sub link →
+   * that warehouse's id, and its stock drives every flow downstream.
+   * Non-task reservations stay on the main pool.
+   */
+  private async resolveTaskWarehouse(
+    taskId?: number | null,
+  ): Promise<{ warehouseId: number | null; objectId: number | null }> {
+    if (!taskId) return { warehouseId: null, objectId: null };
+    // Binding freeze (2026-09-04): once a task has any non-cancelled
+    // reservation, its warehouse AND object are settled — availability,
+    // updates and new rows all follow the stamped binding. A backlog re-link
+    // only affects tasks starting fresh, and an unlinked backlog (or a CRM
+    // outage) can never lock an in-flight task out of managing its rows.
+    const existing = await this.prisma.resourceReservation.findFirst({
+      where: { taskId, status: { notIn: INACTIVE_STATUSES } },
+      orderBy: { id: 'desc' },
+      select: { warehouseId: true, objectId: true },
+    });
+    if (existing) {
+      // The WAREHOUSE stays frozen; the OBJECT follows the task (user's call
+      // 2026-09-05) — re-resolve it, falling back to the stamped value when
+      // CRM is unreachable.
+      const cur = await this.currentTaskObjectId(taskId);
+      return {
+        warehouseId: existing.warehouseId ?? null,
+        objectId: cur === undefined ? ((existing as any).objectId ?? null) : cur,
+      };
+    }
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    let task: any;
+    try {
+      const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
+        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+      });
+      if (!res.ok) throw new Error(`CRM ${res.status}`);
+      task = await res.json();
+    } catch (e: any) {
+      this.logger.warn(`Task warehouse resolution failed for task ${taskId}: ${e?.message}`);
+      throw new BadRequestException('Առաջադրանքի տվյալները հասանելի չեն (CRM) — փորձեք կրկին');
+    }
+    const backlogId =
+      task?.backlogId ?? task?.sourceBacklogId ?? task?.backlog?.id ?? task?.sourceBacklog?.id ?? null;
+    if (!backlogId) {
+      throw new BadRequestException(
+        'Առաջադրանքի նախագիծը որոշված չէ — պահեստային հայտն արգելափակված է',
+      );
+    }
+    const link = await this.prisma.warehouseBacklog.findUnique({
+      where: { backlogId },
+      include: { warehouse: true },
+    });
+    if (!link) {
+      throw new BadRequestException(
+        'Նախագիծը կապված չէ որևէ պահեստի հետ — դիմեք պահեստի պատասխանատուին',
+      );
+    }
+    const objectId = task?.objectId ?? null;
+    if (link.warehouse.type === 'MAIN') return { warehouseId: null, objectId };
+    if (link.warehouse.status !== 'ACTIVE') {
+      throw new BadRequestException('Նախագծի պահեստը ակտիվ չէ');
+    }
+    return { warehouseId: link.warehouseId, objectId };
+  }
+
+  /** #2042: reverse flows mirror the ISSUANCE — its frozen unit cost AND the
+   *  object it was attributed to. taskId null must match only task-less rows
+   *  (undefined would drop the filter and borrow another task's issuance).
+   *  Fallbacks: the item's current cost, the reservation's stamped object. */
+  private async reverseCostInfo(
+    tx: any,
+    args: { taskId?: number | null; itemId: number; warehouseId?: number | null; fallbackObjectId?: number | null },
+  ): Promise<{ unitCost: number | null; objectId: number | null }> {
+    const lastOut = await tx.inventoryMovement.findFirst({
+      where: {
+        type: 'OUT',
+        itemId: args.itemId,
+        taskId: args.taskId ?? null,
+        warehouseId: args.warehouseId ?? null,
+      },
+      orderBy: { id: 'desc' },
+      select: { unitCost: true, objectId: true },
+    });
+    let unitCost = lastOut?.unitCost ?? null;
+    if (unitCost == null) {
+      const item = await tx.item.findUnique({ where: { id: args.itemId }, select: { unitCost: true } });
+      unitCost = item?.unitCost ?? null;
+    }
+    return {
+      unitCost,
+      objectId: lastOut ? (lastOut.objectId ?? null) : (args.fallbackObjectId ?? null),
+    };
+  }
+
+  /** #2042: the task's CURRENT object from CRM — undefined when unreachable
+   *  (callers then fall back to the stamped value). The warehouse binding
+   *  stays frozen; the object deliberately follows the task. */
+  /**
+   * 2026-09-05 policy: the task's object is changeable only until the first
+   * issuance. Any ledger row for the task (OUT, and the INs that can only
+   * follow an OUT) freezes it. Atomic: the frozen check and the re-stamp of
+   * pending requests live in one transaction, so an issuance racing this
+   * call can't slip a stale object stamp through.
+   */
+  async restampTaskObject(taskId: number, objectId: number | null) {
+    return this.prisma.$transaction(async (tx) => {
+      const movements = await tx.inventoryMovement.count({ where: { taskId } });
+      if (movements > 0) return { frozen: true, movements };
+      const upd = await tx.resourceReservation.updateMany({
+        where: { taskId, status: { notIn: ['CANCELLED', 'REJECTED'] } },
+        data: { objectId },
+      });
+      return { frozen: false, updated: upd.count };
+    });
+  }
+
+  private async currentTaskObjectId(taskId?: number | null): Promise<number | null | undefined> {
+    if (!taskId) return null;
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    try {
+      const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
+        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+      });
+      if (!res.ok) return undefined;
+      const task = (await res.json()) as any;
+      return task?.objectId ?? null;
+    } catch {
+      return undefined;
+    }
+  }
+
   async create(dto: CreateReservationDto, performedBy?: number) {
     this.logger.log(
       `CREATE reservation | taskId=${dto.taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
     );
+
+    const { warehouseId, objectId } = await this.resolveTaskWarehouse(dto.taskId);
 
     const itemIds = dto.resources.map((r) => r.itemId);
     const items = await this.prisma.item.findMany({
@@ -316,7 +453,7 @@ export class ReservationsService {
       }
     }
 
-    const availability = await this.availabilityService.checkAvailability(dto);
+    const availability = await this.availabilityService.checkAvailability({ ...dto, warehouseId });
 
     await this.prisma.$transaction(async (tx) => {
       for (const resource of dto.resources) {
@@ -340,6 +477,8 @@ export class ReservationsService {
                 projectName: dto.projectName ?? null,
                 entityId: dto.entityId ?? null,
                 entityName: dto.entityName ?? null,
+                warehouseId,
+                objectId,
                 startDate: slot.startDate,
                 endDate: slot.endDate,
                 status,
@@ -380,6 +519,8 @@ export class ReservationsService {
               projectName: dto.projectName ?? null,
               entityId: dto.entityId ?? null,
               entityName: dto.entityName ?? null,
+              warehouseId,
+              objectId,
               startDate,
               endDate,
               status,
@@ -445,6 +586,9 @@ export class ReservationsService {
           throw new BadRequestException(`Asset ${asset.id} unavailable`);
         if (asset.itemId !== reservation.itemId)
           throw new BadRequestException(`Asset ${asset.id} does not belong to requested item type`);
+        // #1989 workspaces: the asset must be homed in the reservation's pool.
+        if (((asset as any).warehouseId ?? null) !== ((reservation as any).warehouseId ?? null))
+          throw new BadRequestException('Ակտիվը այս ամրագրման պահեստում չէ');
 
         const activeAllocationCount = await tx.reservationAllocation.count({
           where: { reservationId: allocation.reservationId, releasedAt: null },
@@ -525,7 +669,7 @@ export class ReservationsService {
 
   // ─── approve consumable ──────────────────────────────────────────────────────
 
-  async approveConsumable(reservationId: number, performedBy?: number) {
+  async approveConsumable(reservationId: number, performedBy?: number, quantity?: number) {
     const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id: reservationId },
       include: { item: true },
@@ -554,18 +698,50 @@ export class ReservationsService {
       where: { reservationId, releasedAt: null },
       _sum: { quantity: true },
     });
-    const toAllocate = reservation.quantity - (alreadyAllocated._sum.quantity ?? 0);
-    if (toAllocate <= 0) {
+    const outstanding = reservation.quantity - (alreadyAllocated._sum.quantity ?? 0);
+    if (outstanding <= 0) {
       throw new BadRequestException(
         `Reservation ${reservationId} is already fully allocated`,
       );
     }
 
-    if (reservation.item.quantity < toAllocate) {
+    // Deliberate partial issuance (#1880): staff may hand out part of the
+    // request now — even with full stock on the shelf — and the remainder
+    // stays open. No quantity means the old behavior: everything outstanding.
+    const toAllocate = quantity ?? outstanding;
+    // Integer only: quantities are Int columns — a fractional value would die
+    // in Prisma as a 500 instead of an honest 400.
+    if (!Number.isInteger(toAllocate) || toAllocate <= 0) {
+      throw new BadRequestException('Տրամադրվող քանակը պետք է լինի դրական ամբողջ թիվ');
+    }
+    if (toAllocate > outstanding) {
+      throw new BadRequestException(
+        `Տրամադրվող քանակը (${toAllocate}) գերազանցում է չտրամադրված մնացորդը (${outstanding})`,
+      );
+    }
+
+    // #1989: sub-warehouse reservations draw from THEIR stock, not the main pool.
+    if (reservation.warehouseId) {
+      const stock = await this.prisma.warehouseStock.findUnique({
+        where: { warehouseId_itemId: { warehouseId: reservation.warehouseId, itemId: reservation.item.id } },
+        select: { quantity: true },
+      });
+      if ((stock?.quantity ?? 0) < toAllocate) {
+        throw new BadRequestException(
+          `Նախագծային պահեստում բավարար պաշար չկա (${stock?.quantity ?? 0} առկա, ${toAllocate} պահանջվում է)`,
+        );
+      }
+    } else if (reservation.item.quantity < toAllocate) {
       throw new BadRequestException(
         `Insufficient stock: ${reservation.item.quantity} available, ${toAllocate} requested`,
       );
     }
+
+    // #2042: resolve the task's CURRENT object BEFORE the transaction — an
+    // external HTTP call inside an interactive tx would hold a pooled
+    // connection and abort the whole issuance on a slow CRM (~5s tx timeout).
+    const curObj = await this.currentTaskObjectId(reservation.taskId);
+    const effObjectId = curObj === undefined ? ((reservation as any).objectId ?? null) : curObj;
 
     const result = await this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.create({
@@ -573,37 +749,69 @@ export class ReservationsService {
       });
 
       await tx.reservationAllocationHistory.create({
-        data: { reservationId, action: 'ALLOCATED', performedBy, notes: 'Consumable approved' },
+        data: { reservationId, action: 'ALLOCATED', performedBy, notes: 'Ապրանքը տրված է' },
       });
 
-      await tx.item.update({
-        where: { id: reservation.item.id },
-        data: { quantity: { decrement: toAllocate } },
-      });
+      if (reservation.warehouseId) {
+        // Guarded — concurrent issuance must not drive sub stock negative.
+        const dec = await tx.warehouseStock.updateMany({
+          where: {
+            warehouseId: reservation.warehouseId,
+            itemId: reservation.item.id,
+            quantity: { gte: toAllocate },
+          },
+          data: { quantity: { decrement: toAllocate } },
+        });
+        if (dec.count === 0) {
+          throw new BadRequestException('Նախագծային պահեստում բավարար պաշար չկա');
+        }
+      } else {
+        await tx.item.update({
+          where: { id: reservation.item.id },
+          data: { quantity: { decrement: toAllocate } },
+        });
+      }
 
+      // #2042: freeze the cost at issuance — later price changes must not
+      // rewrite this object's spend. The object was re-resolved above so a
+      // corrected task attribution applies to future issuances.
+      const issueCost = reservation.item.unitCost ?? null;
+      if (effObjectId !== ((reservation as any).objectId ?? null)) {
+        await tx.resourceReservation.update({ where: { id: reservationId }, data: { objectId: effObjectId } });
+      }
       await tx.inventoryMovement.create({
         data: {
           itemId: reservation.item.id,
           quantity: -toAllocate,
           type: 'OUT',
           taskId: reservation.taskId,
+          warehouseId: reservation.warehouseId,
+          objectId: effObjectId,
+          unitCost: issueCost,
+          totalCost: issueCost != null ? toAllocate * issueCost : null,
           performedBy,
-          notes: `Reservation #${reservationId} approved`,
+          notes: `Ամրագրում #${reservationId} — տրված`,
         },
       });
 
+      const newStatus =
+        toAllocate < outstanding
+          ? ResourceReservationStatus.PARTIALLY_ALLOCATED
+          : ResourceReservationStatus.ALLOCATED;
       await tx.resourceReservation.update({
         where: { id: reservationId },
-        data: { status: ResourceReservationStatus.ALLOCATED },
+        data: { status: newStatus },
       });
 
-      await this.writeStatusHistory(
-        tx,
-        reservationId,
-        reservation.status as ResourceReservationStatus,
-        ResourceReservationStatus.ALLOCATED,
-        { performedBy },
-      );
+      if (reservation.status !== newStatus) {
+        await this.writeStatusHistory(
+          tx,
+          reservationId,
+          reservation.status as ResourceReservationStatus,
+          newStatus,
+          { performedBy },
+        );
+      }
 
       return { success: true };
     });
@@ -614,14 +822,291 @@ export class ReservationsService {
     void this.notifyRequesters(
       reservation,
       'Ամրագրումը հաստատվել է',
-      'Ձեր առաջադրանքի համար կատարված ամրագրումը հաստատվել է և ռեսուրսը տրամադրվել է։',
+      toAllocate < outstanding
+        ? 'Ձեր առաջադրանքի համար կատարված ամրագրումը մասնակի տրամադրվել է։ Մնացորդը դեռ սպասվում է։'
+        : 'Ձեր առաջադրանքի համար կատարված ամրագրումը հաստատվել է և ռեսուրսը տրամադրվել է։',
       [
         { label: 'Ռեսուրս', value: reservation.item.name },
-        { label: 'Քանակ', value: String(reservation.quantity) },
+        { label: 'Տրամադրված', value: String(toAllocate) },
+        ...(toAllocate < outstanding
+          ? [{ label: 'Մնացորդ', value: String(outstanding - toAllocate) }]
+          : []),
       ],
     );
 
     return result;
+  }
+
+  // ─── task-side acceptance (#1882/#1883) ─────────────────────────────────────
+
+  /**
+   * The task confirms it physically received issued goods. Any of the task's
+   * three role slots may confirm (validated against CRM); partial acceptance
+   * is allowed with an explanatory comment that stays visible to warehouse
+   * staff. Invariant: accepted ≤ issued ≤ requested. Accepting the full
+   * requested quantity flips the reservation to COMPLETED — this is that
+   * status's only setter.
+   */
+  async accept(
+    reservationId: number,
+    userId: number,
+    quantity: number,
+    comment?: string,
+  ) {
+    const reservation = await this.prisma.resourceReservation.findUnique({
+      where: { id: reservationId },
+      include: { item: true },
+    });
+    if (!reservation) throw new NotFoundException('Reservation not found');
+    if (INACTIVE_STATUSES.includes(reservation.status as ResourceReservationStatus)) {
+      throw new BadRequestException(`Reservation is already ${reservation.status}`);
+    }
+    if (!reservation.taskId) {
+      throw new BadRequestException('Միայն առաջադրանքի ամրագրումները կարող են ընդունվել այս ձևով');
+    }
+    // Goods only. An asset reservation flipped COMPLETED while the asset is
+    // physically out would look FREE to availability — a double-booking trap.
+    if (reservation.item.type !== ItemType.CONSUMABLE) {
+      throw new BadRequestException('Միայն ապրանքային (ծախսվող) ամրագրումները կարող են ընդունվել');
+    }
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new BadRequestException('Ընդունվող քանակը պետք է լինի դրական ամբողջ թիվ');
+    }
+
+    const { isSuperAdmin } = await this.usersPrisma.getUserAccessInfo(userId);
+    if (!isSuperAdmin) {
+      await this.assertTaskRole(reservation.taskId, userId);
+    }
+
+    // Optimistic concurrency: two role-holders confirming at once must not
+    // silently overwrite each other's acceptance — the write only lands if
+    // acceptedQuantity is still what this attempt validated against.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = await this.prisma.resourceReservation.findUnique({
+        where: { id: reservationId },
+        select: { quantity: true, status: true, acceptedQuantity: true, acceptanceComment: true },
+      });
+      if (!current) throw new NotFoundException('Reservation not found');
+
+      const issuedAgg = await this.prisma.reservationAllocation.aggregate({
+        where: { reservationId, releasedAt: null },
+        _sum: { quantity: true },
+      });
+      const issued = issuedAgg._sum.quantity ?? 0;
+      const acceptable = issued - (current.acceptedQuantity ?? 0);
+      if (acceptable <= 0) {
+        throw new BadRequestException('Ընդունելու ենթակա տրամադրված քանակ չկա');
+      }
+      if (quantity > acceptable) {
+        throw new BadRequestException(
+          `Ընդունվող քանակը (${quantity}) գերազանցում է տրամադրված չընդունված մնացորդը (${acceptable})`,
+        );
+      }
+      if (quantity < acceptable && !comment?.trim()) {
+        throw new BadRequestException(
+          'Մասնակի ընդունման դեպքում պարտադիր է նշել պատճառը',
+        );
+      }
+
+      const newAccepted = (current.acceptedQuantity ?? 0) + quantity;
+      const completes = newAccepted >= current.quantity;
+      const stamp = `[${new Date().toISOString().slice(0, 10)}] ${comment?.trim() ?? ''}`.trim();
+
+      const landed = await this.prisma.$transaction(async (tx) => {
+        const res = await tx.resourceReservation.updateMany({
+          where: { id: reservationId, acceptedQuantity: current.acceptedQuantity ?? 0 },
+          data: {
+            acceptedQuantity: newAccepted,
+            ...(comment?.trim()
+              ? {
+                  acceptanceComment: current.acceptanceComment
+                    ? `${current.acceptanceComment}\n${stamp}`
+                    : stamp,
+                }
+              : {}),
+            ...(completes ? { status: ResourceReservationStatus.COMPLETED } : {}),
+          },
+        });
+        if (res.count === 0) return false;
+        if (completes) {
+          await this.writeStatusHistory(
+            tx,
+            reservationId,
+            current.status as ResourceReservationStatus,
+            ResourceReservationStatus.COMPLETED,
+            { performedBy: userId, reason: 'Ամբողջ քանակն ընդունվել է առաջադրանքի կողմից' },
+          );
+        }
+        return true;
+      });
+
+      if (landed) {
+        return this.prisma.resourceReservation.findUnique({ where: { id: reservationId } });
+      }
+      // someone else's acceptance landed first — re-validate against fresh state
+    }
+    throw new BadRequestException('Զուգահեռ ընդունում է կատարվել — թարմացրեք էջը և կրկնեք');
+  }
+
+  /**
+   * Take back the ISSUED-BUT-UNACCEPTED remainder (2026-09-02, closes the
+   * dispute dead-end): goods the task refused to confirm come off `issued`,
+   * reopening the issuance ceiling so replacements can go out. Damaged goods
+   * are scrapped — no stock credit (they left the shelf at issuance and are
+   * not coming back to it); usable ones return to stock with an IN movement.
+   * Never touches what the task accepted: the cap is issued − accepted.
+   */
+  async reclaim(
+    reservationId: number,
+    performedBy: number | undefined,
+    quantity: number,
+    damaged: boolean,
+    reason?: string,
+  ) {
+    const reservation = await this.prisma.resourceReservation.findUnique({
+      where: { id: reservationId },
+      include: { item: true },
+    });
+    if (!reservation) throw new NotFoundException('Reservation not found');
+    if (INACTIVE_STATUSES.includes(reservation.status as ResourceReservationStatus)) {
+      throw new BadRequestException(`Reservation is already ${reservation.status}`);
+    }
+    if (reservation.item.type !== ItemType.CONSUMABLE) {
+      throw new BadRequestException('Հետ վերցնելը կիրառելի է միայն ապրանքային ամրագրումների համար');
+    }
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+      throw new BadRequestException('Քանակը պետք է լինի դրական ամբողջ թիվ');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const active = await tx.reservationAllocation.findMany({
+        where: { reservationId, releasedAt: null },
+        orderBy: { id: 'desc' },
+      });
+      const issued = active.reduce((s, a) => s + (a.quantity ?? 1), 0);
+      const accepted = (reservation as any).acceptedQuantity ?? 0;
+      const reclaimable = issued - accepted;
+      if (quantity > reclaimable) {
+        throw new BadRequestException(
+          `Հետ վերցվող քանակը (${quantity}) գերազանցում է տրամադրված չընդունված մնացորդը (${reclaimable})`,
+        );
+      }
+
+      // Reduce newest allocations first; split a row when only part of it is
+      // reclaimed, so every released unit is a real, dated row in history.
+      let remaining = quantity;
+      for (const alloc of active) {
+        if (remaining <= 0) break;
+        const take = Math.min(alloc.quantity ?? 1, remaining);
+        if (take === (alloc.quantity ?? 1)) {
+          await tx.reservationAllocation.update({
+            where: { id: alloc.id },
+            data: { releasedAt: new Date() },
+          });
+        } else {
+          await tx.reservationAllocation.update({
+            where: { id: alloc.id },
+            data: { quantity: (alloc.quantity ?? 1) - take },
+          });
+          await tx.reservationAllocation.create({
+            data: { reservationId, quantity: take, releasedAt: new Date() },
+          });
+        }
+        remaining -= take;
+      }
+      await tx.reservationAllocationHistory.create({
+        data: {
+          reservationId,
+          action: 'RELEASED',
+          performedBy,
+          notes: damaged
+            ? `Հետ է վերցվել ${quantity} հատ՝ վնասված (պաշար չի վերադարձվել)${reason ? ` — ${reason}` : ''}`
+            : `Հետ է վերցվել ${quantity} հատ՝ պիտանի (վերադարձվել է պաշար)${reason ? ` — ${reason}` : ''}`,
+        },
+      });
+
+      if (!damaged) {
+        if (reservation.warehouseId) {
+          await tx.warehouseStock.upsert({
+            where: { warehouseId_itemId: { warehouseId: reservation.warehouseId, itemId: reservation.itemId } },
+            update: { quantity: { increment: quantity } },
+            create: { warehouseId: reservation.warehouseId, itemId: reservation.itemId, quantity },
+          });
+        } else {
+          await tx.item.update({
+            where: { id: reservation.itemId },
+            data: { quantity: { increment: quantity } },
+          });
+        }
+        const rc = await this.reverseCostInfo(tx, {
+          taskId: reservation.taskId,
+          itemId: reservation.itemId,
+          warehouseId: reservation.warehouseId,
+          fallbackObjectId: (reservation as any).objectId ?? null,
+        });
+        await tx.inventoryMovement.create({
+          data: {
+            itemId: reservation.itemId,
+            quantity,
+            type: 'IN',
+            taskId: reservation.taskId,
+            warehouseId: reservation.warehouseId,
+            objectId: rc.objectId,
+            unitCost: rc.unitCost,
+            totalCost: rc.unitCost != null ? quantity * rc.unitCost : null,
+            performedBy,
+            notes: reason ?? `Ամրագրում #${reservationId} — չընդունված քանակի վերադարձ`,
+          },
+        });
+      }
+
+      // Acceptance-aware status: the reservation goes back to waiting for the
+      // replacement issue (or plain APPROVED when nothing is out at all).
+      const newIssued = issued - quantity;
+      const newStatus =
+        newIssued === 0 && accepted === 0
+          ? ResourceReservationStatus.APPROVED
+          : ResourceReservationStatus.PARTIALLY_ALLOCATED;
+      if (reservation.status !== newStatus) {
+        await tx.resourceReservation.update({
+          where: { id: reservationId },
+          data: { status: newStatus },
+        });
+        await this.writeStatusHistory(
+          tx,
+          reservationId,
+          reservation.status as ResourceReservationStatus,
+          newStatus,
+          { performedBy, reason: reason ?? 'Չընդունված քանակը հետ է վերցվել' },
+        );
+      }
+
+      return { reclaimed: quantity, damaged, issuedNow: newIssued };
+    });
+  }
+
+  /** The acceptor/executor/responsible slots of the task, asked from CRM —
+   * the warehouse has no task-role data of its own. */
+  private async assertTaskRole(taskId: number, userId: number) {
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    let task: any;
+    try {
+      const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
+        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      task = await res.json();
+    } catch {
+      throw new BadRequestException('Առաջադրանքի տվյալները հասանելի չեն — փորձեք կրկին');
+    }
+    const inRole = ['acceptors', 'executors', 'responsibles'].some((r) =>
+      (task?.[r] ?? []).some((u: any) => (u.id ?? u.userId) === userId),
+    );
+    if (!inRole) {
+      throw new ForbiddenException(
+        'Ընդունել կարող են միայն առաջադրանքի Կատարողը, Ստուգողը կամ Պատասխանատուն',
+      );
+    }
   }
 
   // ─── cancel ──────────────────────────────────────────────────────────────────
@@ -652,7 +1137,7 @@ export class ReservationsService {
             assetId: alloc.assetId,
             action: 'RELEASED',
             performedBy,
-            notes: reason ?? 'Cancelled',
+            notes: reason ?? 'Չեղարկված',
           },
         });
       }
@@ -729,7 +1214,7 @@ export class ReservationsService {
             assetId: alloc.assetId,
             action: 'RELEASED',
             performedBy,
-            notes: reason ?? 'Rejected',
+            notes: reason ?? 'Մերժված',
           },
         });
       }
@@ -770,6 +1255,16 @@ export class ReservationsService {
 
     const isConsumable = allocation.reservation.item.type === ItemType.CONSUMABLE;
 
+    // Once acceptance has started, a raw whole-row release is a three-way
+    // footgun: it takes back goods the task confirmed KEEPING, credits them
+    // to stock, and wrecks the accepted ≤ issued invariant. The reclaim flow
+    // handles the unaccepted remainder correctly.
+    if (isConsumable && ((allocation.reservation as any).acceptedQuantity ?? 0) > 0) {
+      throw new BadRequestException(
+        'Ընդունումն արդեն սկսված է — չընդունված մնացորդը հետ վերցրեք «Հետ վերցնել» գործողությամբ',
+      );
+    }
+
     const result = await this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.update({
         where: { id: allocationId },
@@ -788,9 +1283,25 @@ export class ReservationsService {
       let newStatus: ResourceReservationStatus;
 
       if (isConsumable) {
-        await tx.item.update({
-          where: { id: allocation.reservation.itemId },
-          data: { quantity: { increment: allocation.quantity } },
+        // #1989: credit the pool the goods were issued from.
+        const whId = (allocation.reservation as any).warehouseId as number | null;
+        if (whId) {
+          await tx.warehouseStock.upsert({
+            where: { warehouseId_itemId: { warehouseId: whId, itemId: allocation.reservation.itemId } },
+            update: { quantity: { increment: allocation.quantity } },
+            create: { warehouseId: whId, itemId: allocation.reservation.itemId, quantity: allocation.quantity },
+          });
+        } else {
+          await tx.item.update({
+            where: { id: allocation.reservation.itemId },
+            data: { quantity: { increment: allocation.quantity } },
+          });
+        }
+        const rel = await this.reverseCostInfo(tx, {
+          taskId: allocation.reservation.taskId,
+          itemId: allocation.reservation.itemId,
+          warehouseId: whId,
+          fallbackObjectId: (allocation.reservation as any).objectId ?? null,
         });
         await tx.inventoryMovement.create({
           data: {
@@ -798,11 +1309,21 @@ export class ReservationsService {
             quantity: allocation.quantity,
             type: 'IN',
             taskId: allocation.reservation.taskId,
+            warehouseId: whId,
+            objectId: rel.objectId,
+            unitCost: rel.unitCost,
+            totalCost: rel.unitCost != null ? allocation.quantity * rel.unitCost : null,
             performedBy: releasedBy,
-            notes: reason ?? `Reservation #${allocation.reservationId} allocation cancelled`,
+            notes: reason ?? `Ամրագրում #${allocation.reservationId} — հատկացումը չեղարկված`,
           },
         });
-        const restoredQty = (allocation.reservation.item?.quantity ?? 0) + (allocation.quantity ?? 0);
+        const poolQty = whId
+          ? (await tx.warehouseStock.findUnique({
+              where: { warehouseId_itemId: { warehouseId: whId, itemId: allocation.reservation.itemId } },
+              select: { quantity: true },
+            }))?.quantity ?? 0
+          : (allocation.reservation.item?.quantity ?? 0) + (allocation.quantity ?? 0);
+        const restoredQty = poolQty;
         newStatus = restoredQty >= allocation.reservation.quantity
           ? ResourceReservationStatus.APPROVED
           : ResourceReservationStatus.PENDING;
@@ -941,11 +1462,20 @@ export class ReservationsService {
 
     const where: any = { ...(extraWhere ?? {}) };
 
-    if (query.status) {
+    // Default = the working list (completed rows hidden); 'ALL' is the
+    // explicit everything-included view the client's «Բոլորը» option sends —
+    // the old unlabeled default read as "all" while quietly filtering.
+    if (query.status === 'ALL') {
+      // no status filter
+    } else if (query.status) {
       where.status = query.status;
     } else {
       where.status = { not: ResourceReservationStatus.COMPLETED };
     }
+
+    // #1989 workspaces: scope the list to the selected warehouse.
+    if (query.warehouseId === 'main') where.warehouseId = null;
+    else if (query.warehouseId) where.warehouseId = Number(query.warehouseId);
 
     if (query.search) {
       where.OR = [
@@ -966,29 +1496,65 @@ export class ReservationsService {
       : query.sortBy === 'createdAt' ? [{ createdAt: order }, { id: 'desc' }]
       : [{ createdAt: 'desc' }, { taskId: 'asc' }, { id: 'desc' }];
 
-    const [data, total] = await Promise.all([
-      this.prisma.resourceReservation.findMany({
+    const include = {
+      item: true,
+      warehouse: { select: { id: true, name: true, code: true, type: true } },
+      allocations: {
+        where: { releasedAt: null },
+        include: { asset: true },
+      },
+      allocationHistory: {
+        include: { asset: true },
+        orderBy: { performedAt: 'asc' as const },
+      },
+      statusHistory: {
+        orderBy: { performedAt: 'asc' as const },
+      },
+    };
+
+    let data: any[];
+    let total: number;
+    if (query.groupByTask === '1') {
+      // Group-key pagination (2026-09-03): a page holds N task-groups (a
+      // taskless reservation is its own group), and every group arrives with
+      // ALL its matching rows — grouping can't be split by a page boundary.
+      // Keys keep the requested sort: a group ranks where its best-ranked row
+      // ranks.
+      const keyRows = await this.prisma.resourceReservation.findMany({
         where,
-        skip: (page - 1) * limit,
-        take: limit,
-        include: {
-          item: true,
-          allocations: {
-            where: { releasedAt: null },
-            include: { asset: true },
-          },
-          allocationHistory: {
-            include: { asset: true },
-            orderBy: { performedAt: 'asc' },
-          },
-          statusHistory: {
-            orderBy: { performedAt: 'asc' },
-          },
-        },
+        select: { id: true, taskId: true },
         orderBy,
-      }),
-      this.prisma.resourceReservation.count({ where }),
-    ]);
+      });
+      const seen = new Set<string>();
+      const keys: { id: number; taskId: number | null }[] = [];
+      for (const r of keyRows) {
+        const k = r.taskId != null ? `t${r.taskId}` : `r${r.id}`;
+        if (!seen.has(k)) {
+          seen.add(k);
+          keys.push(r);
+        }
+      }
+      total = keys.length;
+      const slice = keys.slice((page - 1) * limit, page * limit);
+      const taskIds = slice.filter((s) => s.taskId != null).map((s) => s.taskId as number);
+      const soloIds = slice.filter((s) => s.taskId == null).map((s) => s.id);
+      data = await this.prisma.resourceReservation.findMany({
+        where: { AND: [where, { OR: [{ taskId: { in: taskIds } }, { id: { in: soloIds } }] }] },
+        include,
+        orderBy,
+      });
+    } else {
+      [data, total] = await Promise.all([
+        this.prisma.resourceReservation.findMany({
+          where,
+          skip: (page - 1) * limit,
+          take: limit,
+          include,
+          orderBy,
+        }),
+        this.prisma.resourceReservation.count({ where }),
+      ]);
+    }
 
     if (data.length === 0) return { data: [], total, page, limit };
 
@@ -996,7 +1562,9 @@ export class ReservationsService {
 
     const [assetCounts, activeReservations, maintenanceRecords] = await Promise.all([
       this.prisma.asset.groupBy({
-        by: ['itemId'],
+        // Pool-aware (#1989 wave 2): an asset reservation's ceiling is the
+        // assets homed in ITS warehouse.
+        by: ['itemId', 'warehouseId'],
         where: {
           itemId: { in: itemIds },
           status: { notIn: [AssetStatus.DAMAGED, AssetStatus.RETIRED] },
@@ -1008,7 +1576,7 @@ export class ReservationsService {
           itemId: { in: itemIds },
           status: { notIn: INACTIVE_STATUSES },
         },
-        select: { id: true, itemId: true, taskId: true, quantity: true, startDate: true, endDate: true, status: true },
+        select: { id: true, itemId: true, taskId: true, quantity: true, startDate: true, endDate: true, status: true, warehouseId: true },
       }),
       this.prisma.maintenanceRecord.findMany({
         where: { asset: { itemId: { in: itemIds } } },
@@ -1016,14 +1584,28 @@ export class ReservationsService {
       }),
     ]);
 
-    const assetCountMap = new Map<number | null, number>(assetCounts.map((a) => [a.itemId, a._count.id]));
+    const assetCountMap = new Map<string, number>(
+      assetCounts.map((a: any) => [`${a.itemId}:${a.warehouseId ?? 'main'}`, a._count.id]),
+    );
+
+    // #1989: sub-warehouse reservations draw from their own stock rows.
+    const whPairs = [...new Set(data.filter((r: any) => r.warehouseId).map((r: any) => `${r.warehouseId}:${r.itemId}`))];
+    const subStocks = whPairs.length
+      ? await this.prisma.warehouseStock.findMany({
+          where: { OR: whPairs.map((p) => ({ warehouseId: Number(p.split(':')[0]), itemId: Number(p.split(':')[1]) })) },
+          select: { warehouseId: true, itemId: true, quantity: true },
+        })
+      : [];
+    const subStockMap = new Map(subStocks.map((s) => [`${s.warehouseId}:${s.itemId}`, s.quantity]));
 
     const FAR_FUTURE = new Date(8640000000000000);
 
     const enriched = data.map((reservation) => {
       const resEnd = reservation.endDate ?? FAR_FUTURE;
-      const overlapping = (r: { itemId: number; startDate: Date; endDate: Date | null }) =>
+      // Only same-pool reservations compete for the same stock.
+      const overlapping = (r: { itemId: number; startDate: Date; endDate: Date | null; warehouseId?: number | null }) =>
         r.itemId === reservation.itemId &&
+        (r.warehouseId ?? null) === ((reservation as any).warehouseId ?? null) &&
         r.startDate < resEnd &&
         (r.endDate === null || r.endDate > reservation.startDate);
 
@@ -1043,8 +1625,14 @@ export class ReservationsService {
 
       const totalQuantity =
         reservation.item?.type === ItemType.ASSET
-          ? Math.max(0, (assetCountMap.get(reservation.itemId) ?? 0) - assetsUnderMaintenance)
-          : (reservation.item?.quantity ?? 0);
+          ? Math.max(
+              0,
+              (assetCountMap.get(`${reservation.itemId}:${(reservation as any).warehouseId ?? 'main'}`) ?? 0) -
+                assetsUnderMaintenance,
+            )
+          : (reservation as any).warehouseId
+            ? subStockMap.get(`${(reservation as any).warehouseId}:${reservation.itemId}`) ?? 0
+            : (reservation.item?.quantity ?? 0);
 
       // For consumables, ALLOCATED reservations already had their quantity deducted
       // from item.quantity, so counting them again in reservedByOthers would double-subtract.
@@ -1092,7 +1680,10 @@ export class ReservationsService {
     const reservations = await this.prisma.resourceReservation.findMany({
       where: {
         taskId,
-        status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.COMPLETED] },
+        // COMPLETED stays visible: a fully accepted reservation must keep its
+        // card in the task modal (vanishing on accept read as data loss —
+        // 2026-09-01). Only CANCELLED disappears.
+        status: { not: ResourceReservationStatus.CANCELLED },
         replacedByReservationId: null,
       },
       include: {
@@ -1103,11 +1694,15 @@ export class ReservationsService {
       orderBy: { id: 'asc' },
     });
 
-    // Group by itemId — HOUR items have one DB row per working day
-    const byItem = new Map<number, typeof reservations>();
+    // Group by itemId — HOUR items have one DB row per working day. COMPLETED
+    // reservations each stand alone: folding one into an active group for the
+    // same item (completed earlier + freshly re-requested) would blend two
+    // different lifecycles into one bogus row.
+    const byItem = new Map<number | string, typeof reservations>();
     for (const r of reservations) {
-      if (!byItem.has(r.itemId)) byItem.set(r.itemId, []);
-      byItem.get(r.itemId)!.push(r);
+      const key = r.status === ResourceReservationStatus.COMPLETED ? `done-${r.id}` : r.itemId;
+      if (!byItem.has(key)) byItem.set(key, []);
+      byItem.get(key)!.push(r);
     }
 
     const groups = Array.from(byItem.values());
@@ -1140,6 +1735,8 @@ export class ReservationsService {
         };
       }),
       excludeTaskId: taskId,
+      // One task = one warehouse: every reservation of the task shares it.
+      warehouseId: (reservations[0] as any)?.warehouseId ?? null,
     });
 
     const unavailableItemIds = new Set(availabilityResult.unavailableResources.map((r) => r.itemId));
@@ -1171,6 +1768,13 @@ export class ReservationsService {
         (sum, r) => sum + r.allocations.reduce((s, a) => s + (a.quantity ?? 1), 0),
         0,
       );
+      // The acceptance handshake (#1882): what is currently in the task's
+      // hands (issued = unreleased allocations) vs what they've confirmed.
+      const issuedQuantity = group.reduce(
+        (sum, r) => sum + r.allocations.filter((a) => !a.releasedAt).reduce((s, a) => s + (a.quantity ?? 1), 0),
+        0,
+      );
+      const acceptedQuantity = group.reduce((s, r) => s + ((r as any).acceptedQuantity ?? 0), 0);
       return [{
         reservationId: first.id,
         itemId: first.itemId,
@@ -1179,6 +1783,8 @@ export class ReservationsService {
         unit: first.item.unit ?? undefined,
         requestedQuantity: first.quantity,
         allocatedQuantity,
+        issuedQuantity,
+        acceptedQuantity,
         status: first.status,
         startTime: undefined,
         endTime: undefined,
@@ -1202,6 +1808,8 @@ export class ReservationsService {
       `UPDATE reservation | taskId=${taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
     );
 
+    const { warehouseId, objectId } = await this.resolveTaskWarehouse(taskId);
+
     const itemIds = dto.resources.map((r) => r.itemId);
     const items = await this.prisma.item.findMany({
       where: { id: { in: itemIds } },
@@ -1220,6 +1828,7 @@ export class ReservationsService {
     const availability = await this.availabilityService.checkAvailability({
       ...dto,
       excludeTaskId: taskId,
+      warehouseId,
     });
 
     // excludeTaskId removes this task's reservation ROWS from the math, but a
@@ -1278,7 +1887,7 @@ export class ReservationsService {
                 reservationId: existing.id,
                 assetId: alloc.assetId,
                 action: 'RELEASED',
-                notes: 'Released due to task update',
+                notes: 'Ազատված՝ առաջադրանքի փոփոխության պատճառով',
               },
             });
           }
@@ -1291,7 +1900,7 @@ export class ReservationsService {
             existing.id,
             existing.status as ResourceReservationStatus,
             ResourceReservationStatus.CANCELLED,
-            { reason: 'Resource removed from task', performedBy },
+            { reason: 'Ռեսուրսը հեռացվել է առաջադրանքից', performedBy },
           );
         }
       }
@@ -1320,7 +1929,7 @@ export class ReservationsService {
                     reservationId: existing.id,
                     assetId: alloc.assetId,
                     action: 'RELEASED',
-                    notes: 'Released due to task update',
+                    notes: 'Ազատված՝ առաջադրանքի փոփոխության պատճառով',
                   },
                 });
               }
@@ -1380,7 +1989,7 @@ export class ReservationsService {
                       reservationId: existing.id,
                       assetId: alloc.assetId,
                       action: 'RELEASED',
-                      notes: 'Released due to quantity decrease',
+                      notes: 'Ազատված՝ քանակի նվազման պատճառով',
                     },
                   });
                 }
@@ -1420,7 +2029,7 @@ export class ReservationsService {
                   {
                     previousQuantity: quantityChanged ? existing.quantity : undefined,
                     newQuantity: quantityChanged ? targetQuantity : undefined,
-                    reason: 'Task updated',
+                    reason: 'Առաջադրանքը թարմացվել է',
                     performedBy,
                   },
                 );
@@ -1438,12 +2047,14 @@ export class ReservationsService {
                   quantity: resource.quantity,
                   entityId: dto.entityId ?? null,
                   entityName: dto.entityName ?? null,
+                  warehouseId,
+                  objectId,
                   startDate: slot.startDate,
                   endDate: slot.endDate,
                   status,
                 },
               });
-              await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Task updated', performedBy });
+              await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Առաջադրանքը թարմացվել է', performedBy });
             }
           }
         } else {
@@ -1484,7 +2095,7 @@ export class ReservationsService {
                     reservationId: existing.id,
                     assetId: alloc.assetId,
                     action: 'RELEASED',
-                    notes: 'Released due to quantity decrease',
+                    notes: 'Ազատված՝ քանակի նվազման պատճառով',
                   },
                 });
               }
@@ -1495,6 +2106,13 @@ export class ReservationsService {
             let newStatus: ResourceReservationStatus;
             if (unavailable) newStatus = ResourceReservationStatus.PENDING;
             else if (effectiveAllocCount === 0) newStatus = ResourceReservationStatus.APPROVED;
+            else if (
+              // A request reduced down to what was already accepted has nothing
+              // left to issue or confirm — close it, or it sits ALLOCATED forever.
+              effectiveAllocCount >= targetQuantity &&
+              ((existing as any).acceptedQuantity ?? 0) >= targetQuantity
+            )
+              newStatus = ResourceReservationStatus.COMPLETED;
             else if (effectiveAllocCount >= targetQuantity) newStatus = ResourceReservationStatus.ALLOCATED;
             else newStatus = ResourceReservationStatus.PARTIALLY_ALLOCATED;
 
@@ -1522,7 +2140,7 @@ export class ReservationsService {
                 {
                   previousQuantity: quantityChanged ? existing.quantity : undefined,
                   newQuantity: quantityChanged ? targetQuantity : undefined,
-                  reason: 'Task updated',
+                  reason: 'Առաջադրանքը թարմացվել է',
                   performedBy,
                 },
               );
@@ -1540,12 +2158,14 @@ export class ReservationsService {
                 quantity: resource.quantity,
                 entityId: dto.entityId ?? null,
                 entityName: dto.entityName ?? null,
+                warehouseId,
+                objectId,
                 startDate,
                 endDate,
                 status,
               },
             });
-            await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Task updated', performedBy });
+            await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Առաջադրանքը թարմացվել է', performedBy });
           }
         }
       }

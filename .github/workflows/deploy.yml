@@ -62,6 +62,9 @@ jobs:
               REPO_DIR=/opt/nairon/staging-src/nairon-warehouse-api
               ENV_DIR=/opt/nairon/staging
             fi
+            # The VPS's stored token expired (2026-09-03 outage): authenticate
+            # each pull with the run's own ephemeral GITHUB_TOKEN instead.
+            git -C $REPO_DIR remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
             git -C $REPO_DIR fetch origin
             git -C $REPO_DIR checkout $BRANCH
             git -C $REPO_DIR pull origin $BRANCH

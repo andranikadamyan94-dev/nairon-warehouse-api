@@ -24,10 +24,12 @@ export class ResourceReturnsController {
   findAll(
     @Query('status') status?: ResourceReturnStatus,
     @Query('taskId') taskId?: string,
+    @Query('warehouseId') warehouseId?: string,
   ) {
     return this.service.findAll({
       status,
       taskId: taskId ? Number(taskId) : undefined,
+      warehouseId,
     });
   }
 

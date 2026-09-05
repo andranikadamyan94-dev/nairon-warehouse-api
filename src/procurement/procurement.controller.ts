@@ -1,7 +1,7 @@
 import {
   BadRequestException,
   Body, Controller, Delete, Get, Param, ParseIntPipe,
-  Patch, Post, UploadedFile, UseGuards, UseInterceptors, Query,
+  Patch, Post, Req, UploadedFile, UseGuards, UseInterceptors, Query,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -26,6 +26,17 @@ export class ProcurementController {
   @ApiOperation({ summary: 'Get all procurement orders' })
   findAll(@Query() query: any) { return this.procurementService.findAll(query); }
 
+  // Receiving belongs to the warehouse side of the 2026-09-01 split: orders
+  // the procurement side has confirmed (ORDERED) plus anything mid-delivery,
+  // served to the Ընդունումներ page under warehouse permissions.
+  // Deliberately NOT view_resources: receivable orders carry supplier names
+  // and unit prices — broad viewers have no business seeing purchase terms.
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_inventory', 'manage_warehouse')
+  @Get('receivable')
+  @ApiOperation({ summary: 'Orders awaiting or amid delivery (warehouse receiving list)' })
+  findReceivable(@Query() query: any) { return this.procurementService.findReceivable(query); }
+
   @UseGuards(PermissionGuard)
   @Permissions('view_procurement', 'manage_procurement')
   @Get(':id')
@@ -36,7 +47,9 @@ export class ProcurementController {
   @Permissions('manage_procurement')
   @Post()
   @ApiOperation({ summary: 'Create procurement order' })
-  create(@Body() dto: CreateProcurementDto) { return this.procurementService.create(dto); }
+  create(@Body() dto: CreateProcurementDto, @LoggedInUser('id') userId?: number) {
+    return this.procurementService.create(dto, userId);
+  }
 
   @UseGuards(PermissionGuard)
   @Permissions('manage_procurement')
@@ -49,13 +62,13 @@ export class ProcurementController {
   @UseGuards(PermissionGuard)
   @Permissions('manage_procurement')
   @Patch(':id/order')
-  @ApiOperation({ summary: 'Mark order as ORDERED' })
+  @ApiOperation({ summary: 'Confirm the purchase — order placed with the supplier, hands off to warehouse receiving' })
   markOrdered(@Param('id', ParseIntPipe) id: number) {
-    return this.procurementService.updateStatus(id, ProcurementOrderStatus.ORDERED);
+    return this.procurementService.confirmOrdered(id);
   }
 
   @UseGuards(PermissionGuard)
-  @Permissions('manage_procurement')
+  @Permissions('manage_inventory', 'manage_warehouse')
   @Patch(':id/receive')
   @UseInterceptors(FileInterceptor('receipt'))
   @ApiConsumes('multipart/form-data')
@@ -66,7 +79,7 @@ export class ProcurementController {
   receive(
     @Param('id', ParseIntPipe) id: number,
     @UploadedFile() receipt: Express.Multer.File,
-    @Body() body: { lines?: string | ReceiveDeliveryLineDto[]; notes?: string },
+    @Body() body: { lines?: string | ReceiveDeliveryLineDto[]; notes?: string; documentNumber?: string },
     @LoggedInUser('id') userId?: number,
   ) {
     // multipart carries everything as strings, so a per-line array arrives
@@ -81,11 +94,16 @@ export class ProcurementController {
     } else if (Array.isArray(body?.lines)) {
       lines = body.lines;
     }
-    return this.procurementService.receive(id, receipt, { lines, notes: body?.notes }, userId);
+    return this.procurementService.receive(
+      id,
+      receipt,
+      { lines, notes: body?.notes, documentNumber: body?.documentNumber },
+      userId,
+    );
   }
 
   @UseGuards(PermissionGuard)
-  @Permissions('manage_procurement')
+  @Permissions('manage_inventory', 'manage_warehouse')
   @Patch(':id/close-short')
   @ApiOperation({
     summary: 'Settle a partially delivered order — the outstanding quantity is not coming',
@@ -100,9 +118,16 @@ export class ProcurementController {
   @UseGuards(PermissionGuard)
   @Permissions('manage_procurement')
   @Patch(':id/cancel')
-  @ApiOperation({ summary: 'Cancel procurement order' })
-  cancel(@Param('id', ParseIntPipe) id: number) {
-    return this.procurementService.updateStatus(id, ProcurementOrderStatus.CANCELLED);
+  @ApiOperation({
+    summary:
+      'Cancel procurement order — creator (or super-admin) only; voids the finance transfers and, mid-delivery, settles the remainder short instead',
+  })
+  cancel(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { reason?: string },
+    @Req() req: any,
+  ) {
+    return this.procurementService.cancel(id, req.user?.id, !!req.isSuperAdmin, body?.reason);
   }
 
   @UseGuards(PermissionGuard)

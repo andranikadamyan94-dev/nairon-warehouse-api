@@ -36,7 +36,11 @@ async function bootstrap() {
       process.env.FRONTEND_URL,
     ].filter(Boolean),
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    // Every client app's axios interceptor attaches X-Entity-ID once an
+    // entity is selected. Without it here the preflight is refused and the
+    // request never reaches a route — crm-api, hr-api and auth-api were
+    // already fixed for this, this one was missed.
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Entity-ID'],
     credentials: true,
   });
 

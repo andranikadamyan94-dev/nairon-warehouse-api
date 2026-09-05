@@ -15,9 +15,12 @@ export class AssetsService {
     });
   }
 
-  findAll(query?: { status?: string; search?: string; sortBy?: string; sortOrder?: string }) {
+  findAll(query?: { status?: string; search?: string; sortBy?: string; sortOrder?: string; warehouseId?: string }) {
     const where: any = {};
     if (query?.status) where.status = query.status;
+    // #1989 workspaces: 'main' = the null-homed pool (all pre-existing rows).
+    if (query?.warehouseId === 'main') where.warehouseId = null;
+    else if (query?.warehouseId) where.warehouseId = Number(query.warehouseId);
     if (query?.search) {
       where.OR = [
         { serialNumber: { contains: query.search, mode: 'insensitive' } },
@@ -81,6 +84,18 @@ export class AssetsService {
     const startDate = new Date(query.startDate);
     const endDate = query.endDate ? new Date(query.endDate) : null;
 
+    // #1989 workspaces: offer only assets homed in the reservation's pool —
+    // a sub-linked task must not be handed a main-warehouse asset (or vice
+    // versa). Without a reservation context, the main pool is assumed.
+    let poolWarehouseId: number | null = null;
+    if (query.reservationId) {
+      const resv = await this.prisma.resourceReservation.findUnique({
+        where: { id: query.reservationId },
+        select: { warehouseId: true },
+      });
+      poolWarehouseId = resv?.warehouseId ?? null;
+    }
+
     const ownReservationFilter = query.reservationId
       ? { reservationId: { not: query.reservationId } }
       : {};
@@ -104,6 +119,7 @@ export class AssetsService {
     return this.prisma.asset.findMany({
       where: {
         itemId: query.itemId,
+        warehouseId: poolWarehouseId,
         allocations: {
           none: {
             releasedAt: null,

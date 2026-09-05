@@ -7,6 +7,8 @@ import {
 import { PrismaService } from 'prisma/prisma.service';
 
 import { StockAlertService } from '../common/notifications/stock-alert.service';
+import { UsersPrismaService } from '../common/users-prisma.service';
+import { ObjectsService } from '../objects/objects.service';
 
 import { ItemType } from '../common/enums/item-type.enum';
 
@@ -20,6 +22,8 @@ export class InventoryService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stockAlerts: StockAlertService,
+    private readonly usersPrisma: UsersPrismaService,
+    private readonly objectsService: ObjectsService,
   ) {}
 
   async createMovement(dto: InventoryMovementDto) {
@@ -87,20 +91,78 @@ export class InventoryService {
     return movement;
   }
 
-  async getMovements(itemId?: number) {
-    return this.prisma.inventoryMovement.findMany({
-      where: itemId
-        ? {
-            itemId,
-          }
-        : undefined,
-      include: {
-        item: true,
-        supplier: { select: { id: true, name: true } },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
+  /**
+   * The movements ledger (2026-09-02 page + waybill export): filterable and
+   * paginated, with performer names resolved from the shared users DB so the
+   * page never shows bare ids.
+   */
+  async getMovements(query?: {
+    itemId?: string;
+    taskId?: string;
+    type?: string;
+    from?: string;
+    to?: string;
+    page?: string;
+    limit?: string;
+    warehouseId?: string;
+    objectId?: string;
+  }) {
+    const page = Number(query?.page ?? 1);
+    const limit = Number(query?.limit ?? 20);
+    const where: any = {};
+    if (query?.itemId) where.itemId = Number(query.itemId);
+    if (query?.taskId) where.taskId = Number(query.taskId);
+    if (query?.type) where.type = query.type;
+    // 'main' = the null-warehouse ledger (main pool, incl. all pre-1989 rows)
+    if (query?.warehouseId === 'main') where.warehouseId = null;
+    else if (query?.warehouseId) where.warehouseId = Number(query.warehouseId);
+    if (query?.objectId) where.objectId = Number(query.objectId);
+    if (query?.from || query?.to) {
+      where.createdAt = {
+        ...(query?.from ? { gte: new Date(query.from) } : {}),
+        ...(query?.to ? { lte: new Date(`${query.to}T23:59:59.999Z`) } : {}),
+      };
+    }
+
+    const [rows, total] = await this.prisma.$transaction([
+      this.prisma.inventoryMovement.findMany({
+        where,
+        include: {
+          item: true,
+          supplier: { select: { id: true, name: true } },
+          warehouse: { select: { id: true, name: true, code: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.inventoryMovement.count({ where }),
+    ]);
+
+    const performerIds = [...new Set(rows.map((r) => r.performedBy).filter((x): x is number => x != null))];
+    const performers = await this.usersPrisma.getUsersByIds(performerIds);
+    const nameOf = new Map(performers.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
+
+    // #2042: object labels live in CRM — the shared 60s cache serves them.
+    let objOf = new Map<number, string>();
+    if (rows.some((r: any) => r.objectId != null)) {
+      try {
+        const objects = await this.objectsService.crmObjects();
+        objOf = new Map(objects.map((o) => [o.id, `${o.code} — ${o.name}`]));
+      } catch {
+        /* rows render with the bare id */
+      }
+    }
+
+    return {
+      data: rows.map((r: any) => ({
+        ...r,
+        performedByName: r.performedBy ? nameOf.get(r.performedBy) ?? null : null,
+        objectLabel: r.objectId != null ? objOf.get(r.objectId) ?? `#${r.objectId}` : null,
+      })),
+      total,
+      page,
+      limit,
+    };
   }
 }

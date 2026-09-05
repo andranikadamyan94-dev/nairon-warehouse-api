@@ -11,6 +11,8 @@ import {
 } from '@nestjs/common';
 
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Public } from '../auth/decorators/public.decorator';
+import { InternalGuard } from '../auth/guards/internal.guard';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { LoggedInUser } from '../auth/decorators/logged-in-user.decorator';
 
@@ -60,6 +62,20 @@ export class ReservationsController {
     return this.reservationsService.getTaskReservations(+taskId);
   }
 
+  // 2026-09-05 policy: a task's object may change only until the warehouse
+  // has issued ANYTHING for it. CRM calls this on every object change — it
+  // re-stamps pending requests atomically, or reports the task frozen.
+  @Public()
+  @UseGuards(InternalGuard)
+  @Patch('internal/task/:taskId/object')
+  @ApiOperation({ summary: 'Re-stamp a task\'s pending reservations to a new object, or report it frozen (internal)' })
+  restampTaskObject(
+    @Param('taskId') taskId: string,
+    @Body() body: { objectId?: number | null },
+  ) {
+    return this.reservationsService.restampTaskObject(+taskId, body?.objectId ?? null);
+  }
+
   @Post('allocate')
   @UseGuards(PermissionGuard)
   @Permissions('manage_reservations')
@@ -87,13 +103,47 @@ export class ReservationsController {
     return this.reservationsService.releaseAllocation(dto.allocationId, undefined, dto.reason);
   }
 
-  // Warehouse staff approves a consumable reservation (no specific asset to assign)
+  // Warehouse staff approves a consumable reservation (no specific asset to
+  // assign). An optional quantity issues just part of the request (#1880) —
+  // the remainder stays open as PARTIALLY_ALLOCATED.
   @Patch(':id/approve')
   @UseGuards(PermissionGuard)
   @Permissions('manage_reservations')
-  @ApiOperation({ summary: 'Approve consumable reservation' })
-  approveConsumable(@Param('id') id: string, @LoggedInUser('id') userId: number) {
-    return this.reservationsService.approveConsumable(+id, userId);
+  @ApiOperation({ summary: 'Approve consumable reservation (optionally a partial quantity)' })
+  approveConsumable(
+    @Param('id') id: string,
+    @LoggedInUser('id') userId: number,
+    @Body() body?: { quantity?: number },
+  ) {
+    return this.reservationsService.approveConsumable(+id, userId, body?.quantity);
+  }
+
+  // The task side confirms physical receipt of issued goods (#1882/#1883).
+  // Warehouse staff take back the issued-but-unaccepted remainder (#dispute
+  // resolution): damaged goods are scrapped, usable ones return to stock —
+  // either way the issuance ceiling reopens for replacements.
+  @Patch(':id/reclaim')
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
+  @ApiOperation({ summary: 'Take back issued-but-unaccepted goods (damaged = no stock credit)' })
+  reclaim(
+    @Param('id') id: string,
+    @LoggedInUser('id') userId: number,
+    @Body() body: { quantity: number; damaged?: boolean; reason?: string },
+  ) {
+    return this.reservationsService.reclaim(+id, userId, Number(body?.quantity), !!body?.damaged, body?.reason);
+  }
+
+  // Any authenticated task participant may call; the service validates the
+  // caller against the task's role slots in CRM.
+  @Patch(':id/accept')
+  @ApiOperation({ summary: 'Task-side acceptance of issued goods (partial allowed with a comment)' })
+  accept(
+    @Param('id') id: string,
+    @LoggedInUser('id') userId: number,
+    @Body() body: { quantity: number; comment?: string },
+  ) {
+    return this.reservationsService.accept(+id, userId, Number(body?.quantity), body?.comment);
   }
 
   // Cancel any active reservation, releasing any allocations
