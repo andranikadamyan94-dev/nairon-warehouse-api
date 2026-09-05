@@ -1462,7 +1462,12 @@ export class ReservationsService {
 
     const where: any = { ...(extraWhere ?? {}) };
 
-    if (query.status) {
+    // Default = the working list (completed rows hidden); 'ALL' is the
+    // explicit everything-included view the client's «Բոլորը» option sends —
+    // the old unlabeled default read as "all" while quietly filtering.
+    if (query.status === 'ALL') {
+      // no status filter
+    } else if (query.status) {
       where.status = query.status;
     } else {
       where.status = { not: ResourceReservationStatus.COMPLETED };
