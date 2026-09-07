@@ -393,6 +393,12 @@ export class ProcurementService {
     );
 
     const complete = result.status === ProcurementOrderStatus.RECEIVED;
+    // #1885: requisitions this order was raised for are now satisfied.
+    if (complete) {
+      await this.prisma.purchaseRequisition
+        .updateMany({ where: { orderId: id, status: 'APPROVED' }, data: { status: 'FULFILLED' } })
+        .catch(() => {});
+    }
 
     // On completion, reconcile finance against what actually arrived. Normally
     // that equals the ordered value and settleWithFinance is a no-op; it only

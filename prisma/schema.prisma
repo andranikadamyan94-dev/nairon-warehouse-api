@@ -137,6 +137,7 @@ model Item {
   procurementOrderItems ProcurementOrderItem[]
 
   supplierItems SupplierItem[]
+  requisitionLines PurchaseRequisitionLine[]
 
   categoryId Int?
 
@@ -765,9 +766,121 @@ model ProcurementOrder {
   items      ProcurementOrderItem[]
   deliveries ProcurementDelivery[]
   payments   ProcurementPayment[]
+  /// Requisitions this order was raised for (#1885 sprint).
+  requisitions PurchaseRequisition[]
 
   @@index([supplierId])
   @@index([status])
+}
+
+/// #1885/#1888-#1894 — the demand side of procurement: any department files
+/// a requisition (what to buy, how much, for when); procurement reviews it
+/// and converts it into a ProcurementOrder (which carries supplier/prices —
+/// the requisition deliberately does not). Lines may name items not yet in
+/// the catalog; procurement resolves them before approval.
+enum PurchaseRequisitionStatus {
+  DRAFT
+  SUBMITTED
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  CANCELLED
+  FULFILLED
+}
+
+model PurchaseRequisition {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  status PurchaseRequisitionStatus @default(DRAFT)
+
+  title       String?
+  comment     String?
+  /// #1888: the period the goods are needed for.
+  periodStart DateTime? @db.Date
+  periodEnd   DateTime? @db.Date
+
+  /// Requester's active entity (x-entity-id) — informational.
+  entityId  Int?
+  createdBy Int
+
+  /// #1893/#1894: the CRM task this requisition serves — either the task
+  /// created FROM it or an existing task it was attached to.
+  taskId     Int?
+  taskOrigin String? // CREATED | ATTACHED
+
+  /// The order procurement raised for it (approve = convert).
+  orderId Int?
+  order   ProcurementOrder? @relation(fields: [orderId], references: [id])
+
+  rejectionReason String?
+  reviewedBy      Int?
+  reviewedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines       PurchaseRequisitionLine[]
+  comments    PurchaseRequisitionComment[]
+  attachments PurchaseRequisitionAttachment[]
+
+  @@index([createdBy])
+  @@index([status])
+  @@index([taskId])
+  @@index([orderId])
+}
+
+model PurchaseRequisitionLine {
+  id            Int @id @default(autoincrement())
+  requisitionId Int
+
+  /// Catalog item once known (picked at creation or resolved by procurement).
+  itemId   Int?
+  /// Free text is allowed — the item may not exist yet (#1888).
+  itemName String
+  /// Auto-filled from the catalog, editable (#1888).
+  code     String?
+  unit     ItemUnit?
+  quantity Float
+
+  /// Snapshots at creation, for the form's context (#1888): on hand, and
+  /// already-ordered-not-received. Not recomputed later.
+  stockQuantity    Float?
+  expectedQuantity Float?
+  note             String?
+
+  requisition PurchaseRequisition @relation(fields: [requisitionId], references: [id], onDelete: Cascade)
+  item        Item?               @relation(fields: [itemId], references: [id])
+
+  @@index([requisitionId])
+  @@index([itemId])
+}
+
+model PurchaseRequisitionComment {
+  id            Int      @id @default(autoincrement())
+  requisitionId Int
+  userId        Int
+  text          String
+  createdAt     DateTime @default(now())
+
+  requisition PurchaseRequisition @relation(fields: [requisitionId], references: [id], onDelete: Cascade)
+
+  @@index([requisitionId])
+}
+
+model PurchaseRequisitionAttachment {
+  id            Int      @id @default(autoincrement())
+  requisitionId Int
+  uploadedBy    Int?
+  name          String
+  url           String
+  size          Int
+  mimeType      String
+  createdAt     DateTime @default(now())
+
+  requisition PurchaseRequisition @relation(fields: [requisitionId], references: [id], onDelete: Cascade)
+
+  @@index([requisitionId])
 }
 
 model ProcurementOrderItem {

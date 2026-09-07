@@ -27,6 +27,7 @@ import { ResourceReturnsModule } from './resource-returns/resource-returns.modul
 import { WarehousesModule } from './warehouses/warehouses.module';
 import { StockTransfersModule } from './stock-transfers/stock-transfers.module';
 import { StockRequestsModule } from './stock-requests/stock-requests.module';
+import { PurchaseRequisitionsModule } from './purchase-requisitions/purchase-requisitions.module';
 import { ObjectsModule } from './objects/objects.module';
 
 @Global()
@@ -57,6 +58,7 @@ import { ObjectsModule } from './objects/objects.module';
     WarehousesModule,
     StockTransfersModule,
     StockRequestsModule,
+    PurchaseRequisitionsModule,
     ObjectsModule,
   ],
   controllers: [SourceController],
