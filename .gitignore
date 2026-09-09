@@ -68,3 +68,11 @@ uploads/
 # Local scratch: a hand-written enum migration and a truncate script.
 prisma/manual_migration.sql
 prisma/truncate.sql
+
+# Environment files — never commit a real one.
+# Broad by design: listing individual names is how .env.staging was tracked
+# with live credentials in it. Templates are opted back in explicitly.
+.env*
+!.env.example
+!.env*.example
+!.env.production
