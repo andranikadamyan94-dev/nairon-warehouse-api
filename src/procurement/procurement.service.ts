@@ -121,9 +121,10 @@ export class ProcurementService {
    * carried an organization at all, and for the occasional purchase booked
    * against the wrong one.
    *
-   * The money follows. Transfers finance has already booked are left where
-   * they are — that expense is reported — and their ids come back so the
-   * caller can say which ones did not move.
+   * The money follows, including transfers finance has already booked: that
+   * expense is exactly what was filed under the wrong organization, so it
+   * moves too and finance writes an approval-log line on each. Their ids come
+   * back so the client can say how many booked transfers were re-filed.
    */
   async setEntity(id: number, entityId: number | null, isSuperAdmin: boolean) {
     if (!isSuperAdmin) {
@@ -138,7 +139,7 @@ export class ProcurementService {
       include,
     });
 
-    let financeSkippedBooked: number[] = [];
+    let financeMovedBooked: number[] = [];
     const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
     try {
       const res = await fetch(`${financeUrl}/api/transfer/external/entity-by-ref`, {
@@ -151,10 +152,10 @@ export class ProcurementService {
       });
       if (res.ok) {
         const body = await res.json();
-        financeSkippedBooked = body?.skippedBooked ?? [];
+        financeMovedBooked = body?.movedBooked ?? [];
         this.logger.log(
           `Order #${id}: finance transfers re-filed under entity ${entityId ?? 'none'} ` +
-            `(moved ${(body?.moved ?? []).length}, already booked ${financeSkippedBooked.length})`,
+            `(${(body?.moved ?? []).length} moved, ${financeMovedBooked.length} of them already booked)`,
         );
       } else {
         this.logger.warn(`Order #${id}: finance refused the organization change (${res.status})`);
@@ -165,7 +166,7 @@ export class ProcurementService {
       this.logger.warn(`Order #${id}: could not reach finance to re-file transfers — ${e?.message ?? e}`);
     }
 
-    return { ...updated, financeSkippedBooked };
+    return { ...updated, financeMovedBooked };
   }
 
   async update(id: number, dto: UpdateProcurementDto) {
