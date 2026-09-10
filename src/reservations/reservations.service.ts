@@ -27,6 +27,7 @@ import {
 import { CreateReservationDto } from './dto/create-reservation.dto';
 import { AllocateReservationDto } from './dto/allocate-reservation.dto';
 import { ReallocateResourceDto } from './dto/reallocate-resource.dto';
+import { roundQty } from '../common/quantity';
 
 const INACTIVE_STATUSES = [
   ResourceReservationStatus.CANCELLED,
@@ -1652,8 +1653,10 @@ export class ReservationsService {
 
       return {
         ...reservation,
-        freeQuantity: Math.max(0, totalQuantity - reservedByOthers),
-        globalFreeQuantity: Math.max(0, totalQuantity - reservedAll),
+        // Rounded: subtracting floats leaves residue that would otherwise
+        // reach the list as 0.3000000000000007 and skew "is any left" checks.
+        freeQuantity: roundQty(Math.max(0, totalQuantity - reservedByOthers)),
+        globalFreeQuantity: roundQty(Math.max(0, totalQuantity - reservedAll)),
       };
     });
 
