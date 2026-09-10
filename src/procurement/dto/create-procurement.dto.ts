@@ -23,6 +23,13 @@ export class CreateProcurementDto {
   @IsInt()
   supplierId?: number;
 
+  /** Which organization the purchase is for. Defaults to the buyer's active
+   *  one when the client does not name it; travels to finance at finalize. */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt()
+  entityId?: number;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()

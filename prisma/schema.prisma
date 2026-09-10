@@ -737,6 +737,11 @@ model ProcurementOrder {
   supplier   Supplier? @relation(fields: [supplierId], references: [id])
 
   notes             String?
+  /// Which organization the purchase is for. Stamped from the buyer's active
+  /// organization at create; a super-admin may correct it later, including on
+  /// orders placed before this existed (hence nullable). Travels to finance so
+  /// the spend is reported against the right organization.
+  entityId          Int?
   /// Deposit the supplier requires before shipping. Raised as its own finance
   /// transfer at finalize; the balance transfer is what remains after it.
   prepaymentAmount  Float?
@@ -770,6 +775,7 @@ model ProcurementOrder {
   requisitions PurchaseRequisition[]
 
   @@index([supplierId])
+  @@index([entityId])
   @@index([status])
 }
 
