@@ -9,6 +9,7 @@ import { ResourceReservationStatus } from '../common/enums/resource-reservation-
 import { splitIntoWorkingDaySlots } from '../common/utils/date.utils';
 
 import { CheckAvailabilityDto } from './dto/check-availability.dto';
+import { roundQty } from '../common/quantity';
 
 const INACTIVE_STATUSES = [
   ResourceReservationStatus.CANCELLED,
@@ -113,7 +114,9 @@ export class AvailabilityService {
     const alreadyInStockFigure = handedOut?._sum.quantity ?? 0;
     available = Math.max(0, available - Math.max(0, reservedSum - alreadyInStockFigure));
 
-    return available;
+    // Rounded before anyone compares it: float residue on weighed goods can
+    // leave a hair above zero and read as "some left".
+    return roundQty(available);
   }
 
   async checkAvailability(dto: CheckAvailabilityDto) {
