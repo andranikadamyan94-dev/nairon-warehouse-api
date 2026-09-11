@@ -107,8 +107,6 @@ export class PurchaseRequisitionsService {
     if (!req.entityId || !(await this.holdsInEntity(userId, req.entityId, APPROVE_PERMISSION))) {
       throw new ForbiddenException('Դուք այս կազմակերպության գնման հայտերը հաստատելու թույլտվություն չունեք');
     }
-    // Four eyes: the person who filed it does not also approve it.
-    if (req.createdBy === userId) throw new ForbiddenException('Սեփական հայտը հնարավոր չէ հաստատել կամ մերժել');
     if (req.status !== 'PENDING_APPROVAL') throw new BadRequestException('Հայտը հաստատման սպասման մեջ չէ');
   }
 
