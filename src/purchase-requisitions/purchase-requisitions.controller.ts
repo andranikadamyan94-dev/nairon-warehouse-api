@@ -35,7 +35,7 @@ const entityOf = (req: any): number | null => {
 export class PurchaseRequisitionsController {
   constructor(private readonly service: PurchaseRequisitionsService) {}
 
-  /** Anyone signed in may file a requisition (#1891) — their own to see/edit. */
+  /** Filing needs create_purchase_requisition in the active organization (the service checks). */
   @Post()
   @ApiOperation({ summary: 'File a purchase requisition (draft or submitted)' })
   create(@Body() dto: any, @Req() req: any) {
@@ -52,6 +52,18 @@ export class PurchaseRequisitionsController {
   @Get('by-task/:taskId')
   byTask(@Param('taskId', ParseIntPipe) taskId: number) {
     return this.service.findByTask(taskId);
+  }
+
+  /**
+   * The organization's approval desk. The guard admits anyone holding the
+   * permission somewhere; the service narrows it to the active organization.
+   */
+  @UseGuards(PermissionGuard)
+  @Permissions('approve_purchase_requisition')
+  @Get('approvals')
+  @ApiOperation({ summary: 'Requisitions of the active organization awaiting (or past) its approval' })
+  approvals(@Query() query: any, @Req() req: any) {
+    return this.service.findForApproval(req.user?.id, entityOf(req), query ?? {});
   }
 
   @UseGuards(PermissionGuard)
@@ -88,6 +100,24 @@ export class PurchaseRequisitionsController {
     const taskId = body?.taskId != null ? Number(body.taskId) : null;
     const origin = body?.origin === 'CREATED' ? 'CREATED' : 'ATTACHED';
     return this.service.setTask(id, req.user?.id, taskId, origin, ctxOf(req));
+  }
+
+  // ── Organization approval ─────────────────────────────────────────────────
+
+  @UseGuards(PermissionGuard)
+  @Permissions('approve_purchase_requisition')
+  @Patch(':id/org-approve')
+  @ApiOperation({ summary: 'Organization approval — lets the requisition through to procurement' })
+  orgApprove(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.service.orgApprove(id, req.user?.id);
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('approve_purchase_requisition')
+  @Patch(':id/org-reject')
+  @ApiOperation({ summary: 'Organization rejection, with a reason for the requester' })
+  orgReject(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any) {
+    return this.service.orgReject(id, req.user?.id, body?.reason);
   }
 
   // ── Procurement ───────────────────────────────────────────────────────────

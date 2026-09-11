@@ -786,6 +786,9 @@ model ProcurementOrder {
 /// the catalog; procurement resolves them before approval.
 enum PurchaseRequisitionStatus {
   DRAFT
+  /// Sent by the requester, waiting for the organization's approver
+  /// (approve_purchase_requisition) — procurement does not see it yet.
+  PENDING_APPROVAL
   SUBMITTED
   IN_REVIEW
   APPROVED
@@ -822,6 +825,12 @@ model PurchaseRequisition {
   rejectionReason String?
   reviewedBy      Int?
   reviewedAt      DateTime?
+
+  /// The organization's approval decision (2026-09-11): who let it through
+  /// to procurement — or, when status is REJECTED with reviewedBy empty,
+  /// who turned it down before procurement ever saw it.
+  decidedBy Int?
+  decidedAt DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

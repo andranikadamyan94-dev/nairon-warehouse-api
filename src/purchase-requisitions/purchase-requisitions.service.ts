@@ -21,18 +21,33 @@ export type LineInput = {
   note?: string | null;
 };
 
-const EDITABLE = ['DRAFT', 'SUBMITTED'];
+// A requester may still change the lines while the organization is deciding;
+// once approved, what procurement receives is what was approved.
+const EDITABLE = ['DRAFT', 'PENDING_APPROVAL'];
 const REVIEWABLE = ['SUBMITTED', 'IN_REVIEW'];
-const CANCELLABLE = ['DRAFT', 'SUBMITTED', 'IN_REVIEW'];
+const CANCELLABLE = ['DRAFT', 'PENDING_APPROVAL', 'SUBMITTED', 'IN_REVIEW'];
+/** What procurement's queue lists: nothing the organization has not let through. */
+const QUEUE_HIDDEN = ['DRAFT', 'PENDING_APPROVAL'];
+
+export const CREATE_PERMISSION = 'create_purchase_requisition';
+export const APPROVE_PERMISSION = 'approve_purchase_requisition';
 /** Orders whose lines still count as "coming" for the expected-quantity snapshot. */
 const OPEN_ORDER_STATUSES = ['PENDING_FINANCE_APPROVAL', 'FINANCE_APPROVED', 'ORDERED', 'PARTIALLY_RECEIVED'];
 
 /**
- * #1885/#1888-#1894 purchase requisitions. Any authenticated person files one
- * (their own are theirs to see and edit); procurement (manage_procurement)
- * reviews, resolves catalog items for free-text lines, then approves — which
- * raises a DRAFT ProcurementOrder from the lines — or rejects with a reason.
- * FULFILLED is set by the order's receive flow when it completes.
+ * #1885/#1888-#1894 purchase requisitions. Someone holding
+ * create_purchase_requisition in their organization files one (their own are
+ * theirs to see and edit) — it waits as PENDING_APPROVAL until someone holding
+ * approve_purchase_requisition in THAT organization lets it through (→
+ * SUBMITTED) or turns it down (→ REJECTED with a reason). Only then does
+ * procurement (manage_procurement) see it: review, resolve catalog items for
+ * free-text lines, approve — which raises a DRAFT ProcurementOrder from the
+ * lines — or reject. FULFILLED is set by the order's receive flow when it
+ * completes.
+ *
+ * Both new permissions are resolved for the requisition's own organization,
+ * not the caller's active one — a right granted in organization A never
+ * approves a request filed in organization B.
  *
  * Notifications deliberately absent — platform-wide pass after this sprint.
  */
@@ -64,7 +79,37 @@ export class PurchaseRequisitionsService {
   private async assertCanSee(req: any, userId: number, ctx?: Ctx) {
     if (req.createdBy === userId) return;
     const c = await this.resolveCtx(userId, ctx);
-    if (!this.isProcurement(c)) throw new ForbiddenException('Դուք այս հայտի հասանելիություն չունեք');
+    if (this.isProcurement(c)) return;
+    // The organization's approvers read what they are asked to decide on.
+    if (req.entityId && (await this.holdsInEntity(userId, req.entityId, APPROVE_PERMISSION))) return;
+    throw new ForbiddenException('Դուք այս հայտի հասանելիություն չունեք');
+  }
+
+  /**
+   * Does the caller hold `permission` — or super-admin — resolved for ONE
+   * organization? The route guard resolves against every organization at
+   * once, which is fine for "may open this route" but not for "may decide for
+   * this organization".
+   */
+  private async holdsInEntity(userId: number, entityId: number, permission: string): Promise<boolean> {
+    const info = await this.usersPrisma.getUserAccessInfo(userId, entityId);
+    return info.isSuperAdmin || info.permissionNames.includes(permission);
+  }
+
+  private async assertMayFile(userId: number, entityId: number | null) {
+    if (!entityId) throw new BadRequestException('Ընտրեք կազմակերպությունը, որի անունից ներկայացնում եք հայտը');
+    if (!(await this.holdsInEntity(userId, entityId, CREATE_PERMISSION))) {
+      throw new ForbiddenException('Դուք այս կազմակերպությունում գնման հայտ ներկայացնելու թույլտվություն չունեք');
+    }
+  }
+
+  private async assertMayDecide(req: any, userId: number) {
+    if (!req.entityId || !(await this.holdsInEntity(userId, req.entityId, APPROVE_PERMISSION))) {
+      throw new ForbiddenException('Դուք այս կազմակերպության գնման հայտերը հաստատելու թույլտվություն չունեք');
+    }
+    // Four eyes: the person who filed it does not also approve it.
+    if (req.createdBy === userId) throw new ForbiddenException('Սեփական հայտը հնարավոր չէ հաստատել կամ մերժել');
+    if (req.status !== 'PENDING_APPROVAL') throw new BadRequestException('Հայտը հաստատման սպասման մեջ չէ');
   }
 
   // ── Lines ─────────────────────────────────────────────────────────────────
@@ -134,11 +179,12 @@ export class PurchaseRequisitionsService {
     userId: number,
     entityId: number | null,
   ) {
+    await this.assertMayFile(userId, entityId);
     const lines = await this.buildLines(dto.lines);
     this.assertPeriod(dto.periodStart, dto.periodEnd);
     const created = await this.prisma.purchaseRequisition.create({
       data: {
-        status: dto.draft ? 'DRAFT' : 'SUBMITTED',
+        status: dto.draft ? 'DRAFT' : 'PENDING_APPROVAL',
         title: dto.title?.trim() || null,
         comment: dto.comment?.trim() || null,
         periodStart: dto.periodStart ? new Date(dto.periodStart) : null,
@@ -190,11 +236,37 @@ export class PurchaseRequisitionsService {
     return this.page({ createdBy: userId, ...(query.status ? { status: query.status as any } : {}) }, query);
   }
 
-  /** Procurement queue: everything except drafts (a draft is the requester's own). */
+  /**
+   * Procurement queue: everything the organization has let through. Drafts
+   * are the requester's own; PENDING_APPROVAL is the organization's to decide
+   * — neither reaches procurement, whatever status filter is asked for.
+   */
   async findAll(userId: number, query: { status?: string; page?: string; limit?: string; search?: string }, ctx?: Ctx) {
     const c = await this.resolveCtx(userId, ctx);
     if (!this.isProcurement(c)) throw new ForbiddenException('Դուք գնումների հայտերը դիտելու թույլտվություն չունեք');
-    const where: any = query.status ? { status: query.status } : { status: { not: 'DRAFT' } };
+    const where: any = query.status && !QUEUE_HIDDEN.includes(query.status)
+      ? { status: query.status }
+      : { status: { notIn: QUEUE_HIDDEN } };
+    if (query.search?.trim()) {
+      where.OR = [
+        { title: { contains: query.search.trim(), mode: 'insensitive' } },
+        { lines: { some: { itemName: { contains: query.search.trim(), mode: 'insensitive' } } } },
+      ];
+    }
+    return this.page(where, query);
+  }
+
+  /**
+   * The organization's approval desk: every non-draft requisition filed in
+   * the caller's active organization, for holders of
+   * approve_purchase_requisition there. PENDING_APPROVAL is what needs them;
+   * the rest is the history of what they (or procurement) decided.
+   */
+  async findForApproval(userId: number, entityId: number | null, query: { status?: string; page?: string; limit?: string; search?: string }) {
+    if (!entityId || !(await this.holdsInEntity(userId, entityId, APPROVE_PERMISSION))) {
+      throw new ForbiddenException('Դուք այս կազմակերպության գնման հայտերը հաստատելու թույլտվություն չունեք');
+    }
+    const where: any = { entityId, status: query.status ? query.status : { not: 'DRAFT' } };
     if (query.search?.trim()) {
       where.OR = [
         { title: { contains: query.search.trim(), mode: 'insensitive' } },
@@ -243,7 +315,8 @@ export class PurchaseRequisitionsService {
     const req = await this.getOrThrow(id);
     if (req.createdBy !== userId) throw new ForbiddenException('Հայտը կարող է ուղարկել միայն ներկայացնողը');
     if (req.status !== 'DRAFT') throw new BadRequestException('Հայտն արդեն ուղարկված է');
-    await this.prisma.purchaseRequisition.update({ where: { id }, data: { status: 'SUBMITTED' } });
+    await this.assertMayFile(userId, req.entityId);
+    await this.prisma.purchaseRequisition.update({ where: { id }, data: { status: 'PENDING_APPROVAL' } });
     return this.findOne(id, userId);
   }
 
@@ -264,6 +337,31 @@ export class PurchaseRequisitionsService {
       data: taskId ? { taskId, taskOrigin: origin } : { taskId: null, taskOrigin: null },
     });
     return this.findOne(id, userId, ctx);
+  }
+
+  // ── Organization approval (approve_purchase_requisition in the requisition's organization) ──
+
+  /** Let the requisition through to procurement. */
+  async orgApprove(id: number, userId: number) {
+    const req = await this.getOrThrow(id);
+    await this.assertMayDecide(req, userId);
+    await this.prisma.purchaseRequisition.update({
+      where: { id },
+      data: { status: 'SUBMITTED', decidedBy: userId, decidedAt: new Date() },
+    });
+    return this.findOne(id, userId, { permissionNames: [APPROVE_PERMISSION] });
+  }
+
+  /** Turn it down before procurement ever sees it — the reason goes back to the requester. */
+  async orgReject(id: number, userId: number, reason?: string) {
+    if (!reason?.trim()) throw new BadRequestException('Մերժման պատճառը պարտադիր է');
+    const req = await this.getOrThrow(id);
+    await this.assertMayDecide(req, userId);
+    await this.prisma.purchaseRequisition.update({
+      where: { id },
+      data: { status: 'REJECTED', rejectionReason: reason.trim(), decidedBy: userId, decidedAt: new Date() },
+    });
+    return this.findOne(id, userId, { permissionNames: [APPROVE_PERMISSION] });
   }
 
   // ── Procurement actions (manage_procurement, guard-checked) ───────────────
@@ -327,6 +425,9 @@ export class PurchaseRequisitionsService {
       const order = await tx.procurementOrder.create({
         data: {
           createdBy: userId,
+          // The purchase is for the organization that asked for it, so the
+          // order — and the finance transfers it raises — file there.
+          entityId: req.entityId ?? null,
           notes: `Գնման հայտ #${req.id}${req.title ? ` — ${req.title}` : ''}`,
           items: { create: [...byItem].map(([itemId, quantity]) => ({ itemId, quantity })) },
         },
@@ -403,13 +504,14 @@ export class PurchaseRequisitionsService {
   }
 
   private async decorate(rows: any[]) {
-    const ids = [...new Set(rows.flatMap((r) => [r.createdBy, r.reviewedBy, ...(r.comments ?? []).map((c: any) => c.userId)]).filter((x): x is number => x != null))];
+    const ids = [...new Set(rows.flatMap((r) => [r.createdBy, r.reviewedBy, r.decidedBy, ...(r.comments ?? []).map((c: any) => c.userId)]).filter((x): x is number => x != null))];
     const users = ids.length ? await this.usersPrisma.getUsersByIds(ids) : [];
     const nameOf = new Map(users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
     return rows.map((r) => ({
       ...r,
       createdByName: nameOf.get(r.createdBy) ?? null,
       reviewedByName: r.reviewedBy ? nameOf.get(r.reviewedBy) ?? null : null,
+      decidedByName: r.decidedBy ? nameOf.get(r.decidedBy) ?? null : null,
       comments: (r.comments ?? []).map((c: any) => ({ ...c, authorName: nameOf.get(c.userId) ?? null })),
     }));
   }
