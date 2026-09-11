@@ -258,7 +258,14 @@ export class WarehousesService {
     if (!wh) throw new NotFoundException('Պահեստը չի գտնվել');
     // The main row's identity is fixed, but linking backlogs TO main is the
     // explicit way a «նախագիծ» opts into the main pool (unlinked = blocked).
-    if (wh.type === 'MAIN' && (dto.name !== undefined || dto.code !== undefined || dto.status !== undefined)) {
+    // Only an actual change is refused: the edit form sends every field it
+    // shows, unchanged values included, so a key being present means nothing
+    // (2026-09-11 — the main row's responsible/staff could not be saved).
+    const mainIdentityChanged =
+      (dto.name !== undefined && dto.name.trim() !== wh.name) ||
+      (dto.code !== undefined && dto.code.trim() !== wh.code) ||
+      (dto.status !== undefined && dto.status !== wh.status);
+    if (wh.type === 'MAIN' && mainIdentityChanged) {
       throw new BadRequestException('Հիմնական պահեստի անվանումը, կոդը և կարգավիճակը խմբագրելի չեն');
     }
     if (dto.code && dto.code.trim() !== wh.code) {
