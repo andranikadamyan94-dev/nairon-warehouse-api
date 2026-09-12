@@ -640,3 +640,60 @@ model ResourceReturn {
   @@index([reservationId])
   @@index([status])
 }
+
+/// One write, carried out once, however many times it is asked for.
+///
+/// The transport between a caller and this service is not reliable: a request
+/// can commit here and its answer never arrive, and the caller — an assistant,
+/// a browser on a flaky connection, a proxy that retries — has no way to tell
+/// that apart from a request that never landed. Asking again is the obvious
+/// thing to do and, for a create, it makes a second row.
+///
+/// So a caller may name its intent with an opaque `Idempotency-Key`, and this
+/// table remembers what that intent produced. Repeating it replays the first
+/// answer instead of doing the work twice.
+///
+/// The status matters more than it looks. It is flipped to SUCCEEDED INSIDE the
+/// same transaction as the business write, so the two facts cannot disagree:
+/// a row still saying IN_FLIGHT after a crash is proof the write did not
+/// commit, which is what makes it safe to let a later attempt take the lease
+/// over rather than refusing forever.
+model WriteOperation {
+  id Int @id @default(autoincrement())
+
+  /// The caller's opaque key. Unique across the service, which is what makes
+  /// the database — not this code — decide which concurrent attempt proceeds.
+  key String @unique
+
+  /// Who claimed it. A key belongs to the person who took it; nobody else can
+  /// redeem it, so a leaked key cannot replay somebody else's write back at
+  /// them or act in their name.
+  userId Int
+
+  /// The workspace they were acting as, when they declared one.
+  entityId Int?
+
+  /// Method and path, so the same key cannot be reused for a different action.
+  route String
+
+  /// SHA-256 of the canonicalised request body. The same key with a different
+  /// body is a mistake worth reporting, not a replay to serve.
+  fingerprint String
+
+  /// IN_FLIGHT or SUCCEEDED. A failure releases the key instead of recording
+  /// one, so a corrected retry is not blocked by a refused attempt.
+  status String @default("IN_FLIGHT")
+
+  /// What the first attempt answered, replayed verbatim to the ones after it.
+  result Json?
+
+  /// The row that was written, when there was one — for the trail, and for
+  /// anyone reconciling by hand.
+  resourceId Int?
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([userId])
+  @@index([createdAt])
+}

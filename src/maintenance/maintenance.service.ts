@@ -5,10 +5,12 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from 'prisma/prisma.service';
 import { AssetStatus } from '../common/enums/asset-status.enum';
+import { MaintenanceStatus } from '../common/enums/maintenance-status.enum';
 import { CreateMaintenanceRecordDto } from './dto/create-maintenance-record.dto';
 import { UpdateMaintenanceRecordDto } from './dto/update-maintenance-record.dto';
 import { WarehouseActor } from '../auth/actor';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
+import { TxClient } from '../common/operations/operations.service';
 
 const include = {
   asset: { include: { item: true } },
@@ -36,8 +38,34 @@ export class MaintenanceService {
     await this.workspaces.assertMayTouch(actor, 'maintenance', id);
   }
 
-  async createRecord(dto: CreateMaintenanceRecordDto, actor: WarehouseActor) {
-    const asset = await this.prisma.asset.findUnique({
+  /**
+   * Once a job has left the drafting stage its details are part of a decision
+   * somebody else has already made. PENDING_FINANCE means finance is looking at
+   * an amount and a date; FINANCE_APPROVED means they agreed to them; COMPLETED
+   * means the work is done. Editing underneath any of those changes the record
+   * without changing the decision, which is the kind of quiet divergence nobody
+   * notices until it is expensive.
+   *
+   * DRAFT and FINANCE_REJECTED are open: the first has been agreed by nobody,
+   * and the second is exactly the case where the details need fixing before
+   * being sent again.
+   */
+  private assertEditableState(status: string) {
+    const open = [MaintenanceStatus.DRAFT, MaintenanceStatus.FINANCE_REJECTED];
+    if (!open.includes(status as MaintenanceStatus)) {
+      throw new BadRequestException(
+        'Այս սպասարկումն այլեւս խմբագրելի չէ — այն արդեն ուղարկվել է ֆինանսներին կամ ավարտված է',
+      );
+    }
+  }
+
+  /**
+   * `tx` lets a caller run this inside a transaction it also writes its own
+   * bookkeeping into — see OperationsService. Absent, it is an ordinary call.
+   */
+  async createRecord(dto: CreateMaintenanceRecordDto, actor: WarehouseActor, tx?: TxClient) {
+    const db = tx ?? this.prisma;
+    const asset = await db.asset.findUnique({
       where: { id: dto.assetId },
     });
     if (!asset) throw new NotFoundException('Asset not found');
@@ -45,7 +73,7 @@ export class MaintenanceService {
     if (asset.status === AssetStatus.RETIRED)
       throw new BadRequestException('Cannot maintain retired asset');
 
-    return this.prisma.maintenanceRecord.create({
+    return db.maintenanceRecord.create({
       data: {
         assetId: dto.assetId,
         maintainerId: dto.maintainerId ?? null,
@@ -309,10 +337,23 @@ export class MaintenanceService {
     });
     if (!record) throw new NotFoundException('Maintenance record not found');
     await this.assertMayEdit(actor, id);
+    this.assertEditableState(record.status);
     if (dto.assetId !== undefined && Number(dto.assetId) !== record.assetId) {
       throw new BadRequestException(
         'Սարքավորումը փոխել հնարավոր չէ — ստեղծեք նոր սպասարկման գրառում',
       );
+    }
+    // Taken by the DTO and written by nothing, until now. `amount` is
+    // finalize's — it becomes a finance transfer — and `endDate` is set by
+    // finishing the job, not by editing it. Both are refused out loud rather
+    // than accepted and dropped.
+    if (dto.amount !== undefined) {
+      throw new BadRequestException(
+        'Գումարը սահմանվում է ֆինանսներին ուղարկելիս, ոչ թե խմբագրելիս',
+      );
+    }
+    if (dto.endDate !== undefined) {
+      throw new BadRequestException('Ավարտի ամսաթիվը սահմանվում է աշխատանքն ավարտելիս');
     }
 
     return this.prisma.maintenanceRecord.update({

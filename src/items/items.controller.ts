@@ -22,11 +22,16 @@ import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { Actor } from '../auth/decorators/actor.decorator';
 import { WarehouseActor } from '../auth/actor';
 import { PREFLIGHT_OK } from '../common/preflight/preflight';
+import { OperationsService } from '../common/operations/operations.service';
+import { OperationKey } from '../common/operations/operation-key.decorator';
 
 @ApiTags('Items')
 @Controller('items')
 export class ItemsController {
-  constructor(private readonly itemsService: ItemsService) {}
+  constructor(
+    private readonly itemsService: ItemsService,
+    private readonly operations: OperationsService,
+  ) {}
 
   @UseGuards(PermissionGuard)
   @Permissions('manage_items')
@@ -37,14 +42,27 @@ export class ItemsController {
   @ApiResponse({
     status: 201,
   })
-  create(
+  async create(
     @Body()
     dto: CreateItemDto,
 
     @Actor()
     actor: WarehouseActor,
+
+    /*
+     * Creating an item twice makes two items, and a caller whose answer went
+     * missing has no way to know which happened. A key — opaque, optional, and
+     * ignored by every client that predates it — makes the second attempt
+     * replay the first instead of doing the work again.
+     */
+    @OperationKey()
+    operationKey?: string,
   ) {
-    return this.itemsService.create(dto, actor);
+    const { result } = await this.operations.runOnce(
+      { key: operationKey, actor, route: 'POST /items', body: dto },
+      (tx) => this.itemsService.create(dto, actor, tx),
+    );
+    return result;
   }
 
   /**

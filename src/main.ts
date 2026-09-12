@@ -40,7 +40,7 @@ async function bootstrap() {
     // entity is selected. Without it here the preflight is refused and the
     // request never reaches a route — crm-api, hr-api and auth-api were
     // already fixed for this, this one was missed.
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Entity-ID'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Entity-ID', 'Idempotency-Key'],
     credentials: true,
   });
 

@@ -22,18 +22,32 @@ import { UpdateMaintenanceRecordDto } from './dto/update-maintenance-record.dto'
 import { Actor } from '../auth/decorators/actor.decorator';
 import { WarehouseActor } from '../auth/actor';
 import { PREFLIGHT_OK } from '../common/preflight/preflight';
+import { OperationsService } from '../common/operations/operations.service';
+import { OperationKey } from '../common/operations/operation-key.decorator';
 
 @ApiTags('Maintenance')
 @Controller('maintenance')
 export class MaintenanceController {
-  constructor(private readonly maintenanceService: MaintenanceService) {}
+  constructor(
+    private readonly maintenanceService: MaintenanceService,
+    private readonly operations: OperationsService,
+  ) {}
 
   @UseGuards(PermissionGuard)
   @Permissions('manage_maintenance')
   @Post()
   @ApiOperation({ summary: 'Create maintenance record' })
-  createRecord(@Body() dto: CreateMaintenanceRecordDto, @Actor() actor: WarehouseActor) {
-    return this.maintenanceService.createRecord(dto, actor);
+  async createRecord(
+    @Body() dto: CreateMaintenanceRecordDto,
+    @Actor() actor: WarehouseActor,
+    /* See POST /items: an optional key makes a lost answer safe to retry. */
+    @OperationKey() operationKey?: string,
+  ) {
+    const { result } = await this.operations.runOnce(
+      { key: operationKey, actor, route: 'POST /maintenance', body: dto },
+      (tx) => this.maintenanceService.createRecord(dto, actor, tx),
+    );
+    return result;
   }
 
   /** Writes nothing; see src/common/preflight/preflight.ts. */

@@ -1,5 +1,4 @@
 import {
-  IsBoolean,
   IsEnum,
   IsInt,
   IsNumber,
@@ -58,11 +57,6 @@ export class CreateItemDto {
   @IsNumber()
   @Min(0)
   minQuantity?: number | null;
-
-  @ApiPropertyOptional()
-  @IsOptional()
-  @IsBoolean()
-  maintenanceRequired?: boolean;
 
   @ApiPropertyOptional()
   @IsOptional()
