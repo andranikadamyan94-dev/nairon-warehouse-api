@@ -4,19 +4,43 @@ import { PrismaService } from 'prisma/prisma.service';
 
 import { CreateAssetDto } from './dto/create-asset.dto';
 import { UpdateAssetDto } from './dto/update-asset.dto';
+import { WarehouseActor } from '../auth/actor';
+import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 
 @Injectable()
 export class AssetsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly workspaces: ResourceWorkspaceService,
+  ) {}
 
-  create(dto: CreateAssetDto) {
+  /**
+   * An asset is a serial-numbered instance of an item, so it is wherever the
+   * item is. Creating one is therefore the item's question, and it is asked
+   * before the row exists rather than after.
+   */
+  async assertMayCreateFor(actor: WarehouseActor, itemId: number) {
+    await this.workspaces.assertMayTouch(actor, 'item', itemId);
+  }
+
+  /** May this person change this asset? */
+  async assertMayEdit(actor: WarehouseActor, id: number) {
+    await this.workspaces.assertMayTouch(actor, 'asset', id);
+  }
+
+  async create(dto: CreateAssetDto, actor: WarehouseActor) {
+    await this.assertMayCreateFor(actor, dto.itemId);
+
     return this.prisma.asset.create({
       data: dto,
     });
   }
 
-  findAll(query?: { status?: string; search?: string; sortBy?: string; sortOrder?: string }) {
-    const where: any = {};
+  findAll(
+    query?: { status?: string; search?: string; sortBy?: string; sortOrder?: string },
+    actor?: WarehouseActor,
+  ) {
+    const where: any = actor ? { ...(this.workspaces.scopeFor(actor, ['item', 'category']) ?? {}) } : {};
     if (query?.status) where.status = query.status;
     if (query?.search) {
       where.OR = [
@@ -33,9 +57,11 @@ export class AssetsService {
     return this.prisma.asset.findMany({ where, include: { item: true }, orderBy });
   }
 
-  async findOne(id: number) {
-    const asset = await this.prisma.asset.findUnique({
-      where: { id },
+  async findOne(id: number, actor?: WarehouseActor) {
+    // Out of scope answers as missing, the same as an id that was never used.
+    const scope = actor ? this.workspaces.scopeFor(actor, ['item', 'category']) : undefined;
+    const asset = await this.prisma.asset.findFirst({
+      where: { id, ...(scope ?? {}) },
 
       include: {
         item: true,
@@ -55,8 +81,11 @@ export class AssetsService {
     return asset;
   }
 
-  async update(id: number, dto: UpdateAssetDto) {
-    await this.findOne(id);
+  async update(id: number, dto: UpdateAssetDto, actor: WarehouseActor) {
+    await this.findOne(id, actor);
+    await this.assertMayEdit(actor, id);
+    // Moving an asset onto another item can move it between companies.
+    if (dto.itemId !== undefined) await this.assertMayCreateFor(actor, dto.itemId);
 
     return this.prisma.asset.update({
       where: { id },
@@ -64,8 +93,9 @@ export class AssetsService {
     });
   }
 
-  async remove(id: number) {
-    await this.findOne(id);
+  async remove(id: number, actor: WarehouseActor) {
+    await this.findOne(id, actor);
+    await this.assertMayEdit(actor, id);
 
     return this.prisma.asset.delete({
       where: { id },

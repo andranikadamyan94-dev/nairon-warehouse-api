@@ -6,6 +6,8 @@ import { ResourceReturnStatus } from '../common/enums/resource-return-status.enu
 
 import { LoggedInUser } from '../auth/decorators/logged-in-user.decorator';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
+import { Actor } from '../auth/decorators/actor.decorator';
+import { WarehouseActor } from '../auth/actor';
 
 @ApiTags('resource-returns')
 @ApiBearerAuth()
@@ -16,19 +18,20 @@ export class ResourceReturnsController {
   @Post()
   @UseGuards(PermissionGuard)
   @Permissions('view_warehouse', 'manage_resource_returns')
-  create(@Body() dto: CreateReturnDto) {
-    return this.service.create(dto);
+  create(@Body() dto: CreateReturnDto, @Actor() actor: WarehouseActor) {
+    return this.service.create(dto, actor);
   }
 
   @Get()
   findAll(
+    @Actor() actor: WarehouseActor,
     @Query('status') status?: ResourceReturnStatus,
     @Query('taskId') taskId?: string,
   ) {
-    return this.service.findAll({
-      status,
-      taskId: taskId ? Number(taskId) : undefined,
-    });
+    return this.service.findAll(
+      { status, taskId: taskId ? Number(taskId) : undefined },
+      actor,
+    );
   }
 
   @Patch(':id/receive')

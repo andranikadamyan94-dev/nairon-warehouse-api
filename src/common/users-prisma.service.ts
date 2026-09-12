@@ -87,11 +87,28 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
 
 
   /**
-   * Effective access for a user. Entity is IGNORED: permissions are role-level,
-   * so a user's effective set is the union of every permission granted to any of
-   * their roles. `entityId` is accepted for signature parity with the other APIs
-   * but unused — the warehouse is a single shared physical pool across entities,
-   * and `entityId` on a reservation is a reporting label, not a scoping key.
+   * Effective access for a user, IN a workspace when one is given.
+   *
+   * The old note here said entityId was accepted only for signature parity and
+   * was unused. That was never quite true of the query — pass a real workspace
+   * and both the assignment and the grant have to match it, or be wildcards —
+   * it was true of the callers, which all passed nothing. Warehouse Domain
+   * Hardening changed the callers, not this query: WarehouseActorService passes
+   * the workspace the caller declared, once it has checked that the caller
+   * actually holds a role there.
+   *
+   * entityId 0 still means "no workspace context: every assignment counts". In
+   * hr-api the same 0 was tightened to "only global assignments count" (Phase
+   * 4B.4). It is deliberately NOT tightened here: no warehouse client sends a
+   * workspace, so the tightening would take every scoped role's access away at
+   * once and lock real people out of a working service. What replaces it is
+   * narrower and safer — a caller that declares a workspace is resolved in it,
+   * and a caller that declares one they have no role in never reaches here.
+   *
+   * The reservation half of the old note stands and is worth keeping: entityId
+   * on a reservation is which company ASKED, not which company owns the goods.
+   * It is caller-supplied, NULL on many rows, and routinely differs from the
+   * item's own catalogue workspace — a reporting label, never a scoping key.
    *
    * isSuperAdmin is derived from role level 0 via a LEFT JOIN, so a super-admin
    * role resolves even when it has no explicit permission grants.
@@ -138,6 +155,29 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
       ),
     ];
     return { isSuperAdmin, isGlobalSuperAdmin, permissionNames };
+  }
+
+  /**
+   * The workspaces this person holds a role in, straight from their own
+   * assignments. This is the server-side half of every workspace decision: a
+   * caller may say which workspace they are acting as, and this says whether
+   * that was ever theirs to say.
+   *
+   * `wildcard` is an assignment with entityId 0 — every workspace, which is
+   * what every assignment in this installation currently is. Deactivation is
+   * not re-checked; AuthGuard has already refused a deactivated caller.
+   */
+  async getUserWorkspaces(userId: number): Promise<{ wildcard: boolean; entityIds: number[] }> {
+    const rows = await this.$queryRaw<{ entityId: number }[]>`
+      SELECT DISTINCT ur."entityId" AS "entityId"
+      FROM "UserRole" ur
+      WHERE ur."userId" = ${userId}
+    `;
+    const ids = rows.map((r) => Number(r.entityId));
+    return {
+      wildcard: ids.includes(0),
+      entityIds: [...new Set(ids.filter((id) => id > 0))].sort((a, b) => a - b),
+    };
   }
 
   /**

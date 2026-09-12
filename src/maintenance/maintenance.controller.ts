@@ -18,6 +18,10 @@ import { Public } from '../auth/decorators/public.decorator';
 import { InternalGuard } from '../auth/guards/internal.guard';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { FinalizeMaintenanceDto } from './dto/finalize-maintenance.dto';
+import { UpdateMaintenanceRecordDto } from './dto/update-maintenance-record.dto';
+import { Actor } from '../auth/decorators/actor.decorator';
+import { WarehouseActor } from '../auth/actor';
+import { PREFLIGHT_OK } from '../common/preflight/preflight';
 
 @ApiTags('Maintenance')
 @Controller('maintenance')
@@ -28,45 +32,74 @@ export class MaintenanceController {
   @Permissions('manage_maintenance')
   @Post()
   @ApiOperation({ summary: 'Create maintenance record' })
-  createRecord(@Body() dto: CreateMaintenanceRecordDto) {
-    return this.maintenanceService.createRecord(dto);
+  createRecord(@Body() dto: CreateMaintenanceRecordDto, @Actor() actor: WarehouseActor) {
+    return this.maintenanceService.createRecord(dto, actor);
+  }
+
+  /** Writes nothing; see src/common/preflight/preflight.ts. */
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_maintenance')
+  @Post('preflight/create')
+  @ApiOperation({ summary: 'Preflight: may this person raise maintenance on this asset?' })
+  async preflightCreate(
+    @Body() dto: CreateMaintenanceRecordDto,
+    @Actor() actor: WarehouseActor,
+  ) {
+    await this.maintenanceService.assertMayMaintain(actor, dto.assetId);
+    return PREFLIGHT_OK;
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_maintenance')
+  @Post('preflight/update/:id')
+  @ApiOperation({ summary: 'Preflight: may this person change this record?' })
+  async preflightUpdate(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    await this.maintenanceService.assertMayEdit(actor, id);
+    return PREFLIGHT_OK;
   }
 
   @UseGuards(PermissionGuard)
   @Permissions('view_maintenance', 'manage_maintenance')
   @Get('upcoming')
   @ApiOperation({ summary: 'Get upcoming maintenance' })
-  getUpcomingMaintenance() {
-    return this.maintenanceService.getUpcomingMaintenance();
+  getUpcomingMaintenance(@Actor() actor: WarehouseActor) {
+    return this.maintenanceService.getUpcomingMaintenance(actor);
   }
 
   @UseGuards(PermissionGuard)
   @Permissions('view_maintenance', 'manage_maintenance', 'view_assets', 'manage_assets')
   @Get('asset/:assetId')
   @ApiOperation({ summary: 'Get asset maintenance history' })
-  getAssetMaintenanceHistory(@Param('assetId', ParseIntPipe) assetId: number) {
-    return this.maintenanceService.getAssetMaintenanceHistory(assetId);
+  getAssetMaintenanceHistory(
+    @Param('assetId', ParseIntPipe) assetId: number,
+    @Actor() actor: WarehouseActor,
+  ) {
+    return this.maintenanceService.getAssetMaintenanceHistory(assetId, actor);
   }
 
   @UseGuards(PermissionGuard)
   @Permissions('view_maintenance', 'manage_maintenance')
   @Get()
-  getAll(@Query() query: PaginationQueryDto) {
-    return this.maintenanceService.getAll(query);
+  getAll(@Query() query: PaginationQueryDto, @Actor() actor: WarehouseActor) {
+    return this.maintenanceService.getAll(query, actor);
   }
 
   @UseGuards(PermissionGuard)
   @Permissions('view_maintenance', 'manage_maintenance')
   @Get(':id')
-  getOne(@Param('id', ParseIntPipe) id: number) {
-    return this.maintenanceService.getOne(id);
+  getOne(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    return this.maintenanceService.getOne(id, actor);
   }
 
   @UseGuards(PermissionGuard)
   @Permissions('manage_maintenance')
   @Patch(':id')
-  update(@Param('id', ParseIntPipe) id: number, @Body() dto: any) {
-    return this.maintenanceService.update(id, dto);
+  update(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: UpdateMaintenanceRecordDto,
+    @Actor() actor: WarehouseActor,
+  ) {
+    return this.maintenanceService.update(id, dto, actor);
   }
 
   @UseGuards(PermissionGuard)
@@ -76,16 +109,17 @@ export class MaintenanceController {
   finalize(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: FinalizeMaintenanceDto,
+    @Actor() actor: WarehouseActor,
   ) {
-    return this.maintenanceService.finalize(id, body.amount, body.prepaymentAmount);
+    return this.maintenanceService.finalize(id, body.amount, body.prepaymentAmount, actor);
   }
 
   @UseGuards(PermissionGuard)
   @Permissions('manage_maintenance')
   @Post(':id/complete')
   @ApiOperation({ summary: 'Mark maintenance as completed — asset back in service' })
-  complete(@Param('id', ParseIntPipe) id: number) {
-    return this.maintenanceService.complete(id);
+  complete(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    return this.maintenanceService.complete(id, actor);
   }
 
   @Public()
@@ -110,7 +144,7 @@ export class MaintenanceController {
   @UseGuards(PermissionGuard)
   @Permissions('manage_maintenance')
   @Delete(':id')
-  remove(@Param('id', ParseIntPipe) id: number) {
-    return this.maintenanceService.remove(id);
+  remove(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    return this.maintenanceService.remove(id, actor);
   }
 }

@@ -38,7 +38,12 @@ export class CreateMaintenanceRecordDto {
   @IsString()
   notes?: string;
 
-  @ApiPropertyOptional()
+  /**
+   * Accepted for the clients that still send it, and ignored: the author
+   * recorded is whoever holds the token. Removing the field would answer 400 to
+   * a request that works today, so it stays and does nothing.
+   */
+  @ApiPropertyOptional({ deprecated: true, description: 'Ignored; the caller is the author.' })
   @IsOptional()
   @IsInt()
   createdBy?: number;

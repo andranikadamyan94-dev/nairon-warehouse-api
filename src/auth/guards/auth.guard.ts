@@ -10,6 +10,7 @@ import { JwtService } from '@nestjs/jwt';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { jwtConstants } from '../constants';
 import { UsersPrismaService } from '../../common/users-prisma.service';
+import { WarehouseActorService } from '../actor.service';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -17,6 +18,7 @@ export class AuthGuard implements CanActivate {
     private jwtService: JwtService,
     private reflector: Reflector,
     private usersPrisma: UsersPrismaService,
+    private actors: WarehouseActorService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -46,6 +48,13 @@ export class AuthGuard implements CanActivate {
     if (await this.usersPrisma.isDeactivated(request['user'].id)) {
       throw new UnauthorizedException('Այս հաշիվը ապաակտիվացված է');
     }
+
+    // Who they are and where they are acting, resolved once, from the users
+    // database rather than from anything the caller sent. Done here because
+    // this guard is global and runs first: PermissionGuard then reads the
+    // result instead of asking again, and handlers get it through @Actor().
+    // A workspace claim the caller has no role in is refused in here.
+    request['actor'] = await this.actors.resolve(request);
 
     return true;
   }

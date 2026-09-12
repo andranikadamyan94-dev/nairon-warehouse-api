@@ -1,10 +1,11 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from 'prisma/prisma.service';
 import { CreateReturnDto } from './dto/create-return.dto';
 import { ResourceReturnStatus } from '../common/enums/resource-return-status.enum';
 import { ResourceReservationStatus } from '../common/enums/resource-reservation-status.enum';
 import { ItemType } from '../common/enums/item-type.enum';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
+import { WarehouseActor } from '../auth/actor';
 
 @Injectable()
 export class ResourceReturnsService {
@@ -19,7 +20,24 @@ export class ResourceReturnsService {
     },
   };
 
-  async create(dto: CreateReturnDto) {
+  /**
+   * Who may see the whole return list.
+   *
+   * `GET /resource-returns` carries no permission guard at all, because the CRM
+   * task screen reads it and the people on a task hold no warehouse rights. With
+   * no filter it answered with every return in the installation, to anybody with
+   * a token. Warehouse staff may still have the whole list; everybody else has
+   * to name the task they are asking about, which is what the CRM client has
+   * always sent anyway.
+   */
+  private mayListEverything(actor: WarehouseActor): boolean {
+    if (actor.isSuperAdmin) return true;
+    return ['view_resource_returns', 'manage_resource_returns', 'view_warehouse', 'manage_warehouse'].some(
+      (p) => actor.permissionNames.includes(p),
+    );
+  }
+
+  async create(dto: CreateReturnDto, actor: WarehouseActor) {
     const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id: dto.reservationId },
       include: { item: true },
@@ -45,13 +63,18 @@ export class ResourceReturnsService {
         reservationId: dto.reservationId,
         quantity: dto.quantity,
         notes: dto.notes ?? null,
-        requestedBy: dto.requestedBy ?? null,
+        // Whoever holds the token, not whoever the body named.
+        requestedBy: actor.userId,
       },
       include: this.include,
     });
   }
 
-  findAll(filters: { status?: ResourceReturnStatus; taskId?: number }) {
+  findAll(filters: { status?: ResourceReturnStatus; taskId?: number }, actor: WarehouseActor) {
+    if (!filters.taskId && !this.mayListEverything(actor)) {
+      throw new ForbiddenException('Name the task whose returns you are asking about');
+    }
+
     return this.prisma.resourceReturn.findMany({
       where: {
         ...(filters.status ? { status: filters.status } : {}),

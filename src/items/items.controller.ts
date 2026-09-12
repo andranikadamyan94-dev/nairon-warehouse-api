@@ -19,6 +19,9 @@ import { UpdateItemDto } from './dto/update-item.dto';
 import { ItemsService } from './items.service';
 import { GetItemsQueryDto } from './dto/get-items-query.dto';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
+import { Actor } from '../auth/decorators/actor.decorator';
+import { WarehouseActor } from '../auth/actor';
+import { PREFLIGHT_OK } from '../common/preflight/preflight';
 
 @ApiTags('Items')
 @Controller('items')
@@ -37,8 +40,49 @@ export class ItemsController {
   create(
     @Body()
     dto: CreateItemDto,
+
+    @Actor()
+    actor: WarehouseActor,
   ) {
-    return this.itemsService.create(dto);
+    return this.itemsService.create(dto, actor);
+  }
+
+  /**
+   * Would this create be accepted? Same guard, same assert, writes nothing.
+   * See src/common/preflight/preflight.ts for what this is and is not.
+   */
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_items')
+  @Post('preflight/create')
+  @ApiOperation({ summary: 'Preflight: may this person create this item?' })
+  async preflightCreate(@Body() dto: CreateItemDto, @Actor() actor: WarehouseActor) {
+    await this.itemsService.assertMayFileUnder(actor, dto.categoryId);
+    return PREFLIGHT_OK;
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_items')
+  @Post('preflight/update/:id')
+  @ApiOperation({ summary: 'Preflight: may this person change this item?' })
+  async preflightUpdate(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: UpdateItemDto,
+    @Actor() actor: WarehouseActor,
+  ) {
+    await this.itemsService.findOne(id, actor);
+    await this.itemsService.assertMayEdit(actor, id);
+    if (dto.categoryId !== undefined) await this.itemsService.assertMayFileUnder(actor, dto.categoryId);
+    return PREFLIGHT_OK;
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_items')
+  @Post('preflight/delete/:id')
+  @ApiOperation({ summary: 'Preflight: may this person delete this item?' })
+  async preflightDelete(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    await this.itemsService.findOne(id, actor);
+    await this.itemsService.assertMayEdit(actor, id);
+    return PREFLIGHT_OK;
   }
 
   @Get()
@@ -48,8 +92,11 @@ export class ItemsController {
   findAll(
     @Query()
     query: GetItemsQueryDto,
+
+    @Actor()
+    actor: WarehouseActor,
   ) {
-    return this.itemsService.findAll(query);
+    return this.itemsService.findAll(query, actor);
   }
 
   @Get(':id')
@@ -59,8 +106,11 @@ export class ItemsController {
   findOne(
     @Param('id', ParseIntPipe)
     id: number,
+
+    @Actor()
+    actor: WarehouseActor,
   ) {
-    return this.itemsService.findOne(id);
+    return this.itemsService.findOne(id, actor);
   }
 
   @UseGuards(PermissionGuard)
@@ -75,8 +125,11 @@ export class ItemsController {
 
     @Body()
     dto: UpdateItemDto,
+
+    @Actor()
+    actor: WarehouseActor,
   ) {
-    return this.itemsService.update(id, dto);
+    return this.itemsService.update(id, dto, actor);
   }
 
   @UseGuards(PermissionGuard)
@@ -88,7 +141,10 @@ export class ItemsController {
   remove(
     @Param('id', ParseIntPipe)
     id: number,
+
+    @Actor()
+    actor: WarehouseActor,
   ) {
-    return this.itemsService.remove(id);
+    return this.itemsService.remove(id, actor);
   }
 }

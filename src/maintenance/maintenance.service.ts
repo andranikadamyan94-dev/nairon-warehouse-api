@@ -6,6 +6,9 @@ import {
 import { PrismaService } from 'prisma/prisma.service';
 import { AssetStatus } from '../common/enums/asset-status.enum';
 import { CreateMaintenanceRecordDto } from './dto/create-maintenance-record.dto';
+import { UpdateMaintenanceRecordDto } from './dto/update-maintenance-record.dto';
+import { WarehouseActor } from '../auth/actor';
+import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 
 const include = {
   asset: { include: { item: true } },
@@ -14,13 +17,31 @@ const include = {
 
 @Injectable()
 export class MaintenanceService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly workspaces: ResourceWorkspaceService,
+  ) {}
 
-  async createRecord(dto: CreateMaintenanceRecordDto) {
+  /**
+   * May this person raise maintenance on this asset? A record's company is the
+   * asset's, through the item and its category, so this is the asset's question
+   * asked before the record exists. Shared with the preflight beside it.
+   */
+  async assertMayMaintain(actor: WarehouseActor, assetId: number) {
+    await this.workspaces.assertMayTouch(actor, 'asset', assetId);
+  }
+
+  /** May this person change this record? */
+  async assertMayEdit(actor: WarehouseActor, id: number) {
+    await this.workspaces.assertMayTouch(actor, 'maintenance', id);
+  }
+
+  async createRecord(dto: CreateMaintenanceRecordDto, actor: WarehouseActor) {
     const asset = await this.prisma.asset.findUnique({
       where: { id: dto.assetId },
     });
     if (!asset) throw new NotFoundException('Asset not found');
+    await this.assertMayMaintain(actor, dto.assetId);
     if (asset.status === AssetStatus.RETIRED)
       throw new BadRequestException('Cannot maintain retired asset');
 
@@ -33,13 +54,21 @@ export class MaintenanceService {
         endDate: dto.endDate ? new Date(dto.endDate) : null,
         type: dto.type,
         notes: dto.notes,
-        createdBy: dto.createdBy,
+        // The author is whoever holds the token. It used to be dto.createdBy —
+        // a number in the request body, which anyone could set to anyone.
+        createdBy: actor.userId,
       },
       include,
     });
   }
 
-  async finalize(id: number, amount: number, prepaymentAmount?: number) {
+  async finalize(id: number, amount: number, prepaymentAmount?: number, actor?: WarehouseActor) {
+    // Money leaves the building on this one, so the workspace question is asked
+    // before finance is told anything. Finance is called with a shared secret
+    // and learns neither who asked nor from which company, so this is the last
+    // place it can be asked at all.
+    if (actor) await this.assertMayEdit(actor, id);
+
     const record = await this.prisma.maintenanceRecord.findUnique({
       where: { id },
       include,
@@ -165,7 +194,9 @@ export class MaintenanceService {
     });
   }
 
-  async complete(id: number) {
+  async complete(id: number, actor?: WarehouseActor) {
+    if (actor) await this.assertMayEdit(actor, id);
+
     const record = await this.prisma.maintenanceRecord.findUnique({
       where: { id },
     });
@@ -185,15 +216,18 @@ export class MaintenanceService {
     });
   }
 
-  async getUpcomingMaintenance() {
+  async getUpcomingMaintenance(actor?: WarehouseActor) {
+    const scope = actor ? this.workspaces.scopeFor(actor, ['asset', 'item', 'category']) : undefined;
+
     return this.prisma.maintenanceRecord.findMany({
-      where: { endDate: { gte: new Date() } },
+      where: { endDate: { gte: new Date() }, ...(scope ?? {}) },
       include,
       orderBy: { startDate: 'asc' },
     });
   }
 
-  async getAssetMaintenanceHistory(assetId: number) {
+  async getAssetMaintenanceHistory(assetId: number, actor?: WarehouseActor) {
+    if (actor) await this.workspaces.assertMayTouch(actor, 'asset', assetId);
     return this.prisma.maintenanceRecord.findMany({
       where: { assetId },
       include,
@@ -201,13 +235,17 @@ export class MaintenanceService {
     });
   }
 
-  async getAll(query: any) {
+  async getAll(query: any, actor?: WarehouseActor) {
     const page = Number(query.page ?? 1);
     const limit = Number(query.limit ?? 10);
     const search = query.search as string | undefined;
 
+    // Nothing at all for an unbounded actor, which is everyone here today.
+    const scope = actor ? this.workspaces.scopeFor(actor, ['asset', 'item', 'category']) : undefined;
+
     const where: any = search
       ? {
+          ...(scope ?? {}),
           OR: [
             {
               asset: {
@@ -221,7 +259,7 @@ export class MaintenanceService {
             },
           ],
         }
-      : {};
+      : { ...(scope ?? {}) };
 
     const order: 'asc' | 'desc' = query.sortOrder === 'asc' ? 'asc' : 'desc';
     // Every sort ends with id, because none of these columns is unique.
@@ -250,15 +288,32 @@ export class MaintenanceService {
     return { data, total, page, limit };
   }
 
-  async getOne(id: number) {
-    return this.prisma.maintenanceRecord.findUnique({ where: { id }, include });
+  async getOne(id: number, actor?: WarehouseActor) {
+    // Out of scope reads as missing. The internal route calls this with no
+    // actor and is unaffected: finance asking about a record it was told to
+    // settle is not a person browsing someone else's stock.
+    const scope = actor ? this.workspaces.scopeFor(actor, ['asset', 'item', 'category']) : undefined;
+    const record = await this.prisma.maintenanceRecord.findFirst({
+      where: { id, ...(scope ?? {}) },
+      include,
+    });
+    // Missing and out of scope answer identically, and both answer 404 the way
+    // every other point read in this service does.
+    if (!record) throw new NotFoundException('Maintenance record not found');
+    return record;
   }
 
-  async update(id: number, dto: Partial<CreateMaintenanceRecordDto>) {
+  async update(id: number, dto: UpdateMaintenanceRecordDto, actor: WarehouseActor) {
     const record = await this.prisma.maintenanceRecord.findUnique({
       where: { id },
     });
     if (!record) throw new NotFoundException('Maintenance record not found');
+    await this.assertMayEdit(actor, id);
+    if (dto.assetId !== undefined && Number(dto.assetId) !== record.assetId) {
+      throw new BadRequestException(
+        'Սարքավորումը փոխել հնարավոր չէ — ստեղծեք նոր սպասարկման գրառում',
+      );
+    }
 
     return this.prisma.maintenanceRecord.update({
       where: { id },
@@ -275,11 +330,12 @@ export class MaintenanceService {
     });
   }
 
-  async remove(id: number) {
+  async remove(id: number, actor: WarehouseActor) {
     const record = await this.prisma.maintenanceRecord.findUnique({
       where: { id },
     });
     if (!record) throw new NotFoundException('Maintenance record not found');
+    await this.assertMayEdit(actor, id);
     return this.prisma.maintenanceRecord.delete({ where: { id } });
   }
 }

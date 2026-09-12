@@ -13,6 +13,8 @@ import {
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { LoggedInUser } from '../auth/decorators/logged-in-user.decorator';
+import { Actor } from '../auth/decorators/actor.decorator';
+import { WarehouseActor } from '../auth/actor';
 
 import { ReservationsService } from './reservations.service';
 
@@ -39,8 +41,12 @@ export class ReservationsController {
   @Permissions('view_warehouse', 'manage_reservations')
   @ApiOperation({ summary: 'Create resource reservations' })
   @ApiResponse({ status: 201 })
-  create(@Body() dto: CreateReservationDto, @LoggedInUser('id') userId?: number) {
-    return this.reservationsService.create(dto, userId);
+  create(
+    @Body() dto: CreateReservationDto,
+    @Actor() actor: WarehouseActor,
+    @LoggedInUser('id') userId?: number,
+  ) {
+    return this.reservationsService.create(dto, userId, actor);
   }
 
   @Patch('task/:taskId')
@@ -49,10 +55,11 @@ export class ReservationsController {
   updateTaskReservations(
     @Param('taskId') taskId: string,
     @Body() dto: CreateReservationDto,
+    @Actor() actor: WarehouseActor,
     // Task-side edits were the only flow writing history with no author.
     @LoggedInUser('id') userId?: number,
   ) {
-    return this.reservationsService.updateTaskReservations(+taskId, dto, userId);
+    return this.reservationsService.updateTaskReservations(+taskId, dto, userId, actor);
   }
 
   @Get('task/:taskId')

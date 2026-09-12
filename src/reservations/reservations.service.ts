@@ -12,6 +12,7 @@ import { AvailabilityService } from '../availability/availability.service';
 
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
+import { WarehouseActor, boundedTo } from '../auth/actor';
 import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
 
 import { AssetStatus } from '../common/enums/asset-status.enum';
@@ -289,7 +290,31 @@ export class ReservationsService {
 
   // ─── create ─────────────────────────────────────────────────────────────────
 
-  async create(dto: CreateReservationDto, performedBy?: number) {
+  /**
+   * The company label on a reservation, checked — not enforced.
+   *
+   * `ResourceReservation.entityId` records which company ASKED. It is written
+   * from the request body, it is NULL on many rows, and on the rows that do
+   * carry it, it usually names a different company from the one whose catalogue
+   * the goods sit in: companies 3 and 7 reserving out of catalogues 1 and 4.
+   * That crossing is the point of a shared store, so this label cannot be an
+   * authorization key and nothing here treats it as one — a reservation is never
+   * refused for naming another company.
+   *
+   * What it can stop is somebody labelling their request with a company they
+   * have nothing to do with, which is bookkeeping hygiene rather than access
+   * control. A caller who is not bounded — everybody in this installation today
+   * — is unaffected.
+   */
+  private assertMayLabelWith(actor: WarehouseActor | undefined, entityId?: number | null) {
+    if (!actor || entityId == null) return;
+    const bounds = boundedTo(actor);
+    if (bounds === null || bounds.includes(Number(entityId))) return;
+    throw new ForbiddenException('You hold no role in the company this request names');
+  }
+
+  async create(dto: CreateReservationDto, performedBy?: number, actor?: WarehouseActor) {
+    this.assertMayLabelWith(actor, dto.entityId);
     this.logger.log(
       `CREATE reservation | taskId=${dto.taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
     );
@@ -1375,7 +1400,13 @@ export class ReservationsService {
 
   // ─── updateTaskReservations ──────────────────────────────────────────────────
 
-  async updateTaskReservations(taskId: number, dto: CreateReservationDto, performedBy?: number) {
+  async updateTaskReservations(
+    taskId: number,
+    dto: CreateReservationDto,
+    performedBy?: number,
+    actor?: WarehouseActor,
+  ) {
+    this.assertMayLabelWith(actor, dto.entityId);
     this.logger.log(
       `UPDATE reservation | taskId=${taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
     );

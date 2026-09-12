@@ -18,6 +18,9 @@ import { AssetsService } from './assets.service';
 import { CreateAssetDto } from './dto/create-asset.dto';
 import { UpdateAssetDto } from './dto/update-asset.dto';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
+import { Actor } from '../auth/decorators/actor.decorator';
+import { WarehouseActor } from '../auth/actor';
+import { PREFLIGHT_OK } from '../common/preflight/preflight';
 
 @ApiTags('Assets')
 @Controller('assets')
@@ -33,8 +36,43 @@ export class AssetsController {
   create(
     @Body()
     dto: CreateAssetDto,
+
+    @Actor()
+    actor: WarehouseActor,
   ) {
-    return this.assetsService.create(dto);
+    return this.assetsService.create(dto, actor);
+  }
+
+  /** Writes nothing; see src/common/preflight/preflight.ts. */
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_assets')
+  @Post('preflight/create')
+  async preflightCreate(@Body() dto: CreateAssetDto, @Actor() actor: WarehouseActor) {
+    await this.assetsService.assertMayCreateFor(actor, dto.itemId);
+    return PREFLIGHT_OK;
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_assets')
+  @Post('preflight/update/:id')
+  async preflightUpdate(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: UpdateAssetDto,
+    @Actor() actor: WarehouseActor,
+  ) {
+    await this.assetsService.findOne(id, actor);
+    await this.assetsService.assertMayEdit(actor, id);
+    if (dto.itemId !== undefined) await this.assetsService.assertMayCreateFor(actor, dto.itemId);
+    return PREFLIGHT_OK;
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_assets')
+  @Post('preflight/delete/:id')
+  async preflightDelete(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    await this.assetsService.findOne(id, actor);
+    await this.assetsService.assertMayEdit(actor, id);
+    return PREFLIGHT_OK;
   }
 
   @UseGuards(PermissionGuard)
@@ -43,8 +81,8 @@ export class AssetsController {
   @ApiOperation({
     summary: 'Get all assets',
   })
-  findAll(@Query() query: any) {
-    return this.assetsService.findAll(query);
+  findAll(@Query() query: any, @Actor() actor: WarehouseActor) {
+    return this.assetsService.findAll(query, actor);
   }
 
   @UseGuards(PermissionGuard)
@@ -80,8 +118,11 @@ export class AssetsController {
   findOne(
     @Param('id', ParseIntPipe)
     id: number,
+
+    @Actor()
+    actor: WarehouseActor,
   ) {
-    return this.assetsService.findOne(id);
+    return this.assetsService.findOne(id, actor);
   }
 
   @UseGuards(PermissionGuard)
@@ -96,8 +137,11 @@ export class AssetsController {
 
     @Body()
     dto: UpdateAssetDto,
+
+    @Actor()
+    actor: WarehouseActor,
   ) {
-    return this.assetsService.update(id, dto);
+    return this.assetsService.update(id, dto, actor);
   }
 
   @UseGuards(PermissionGuard)
@@ -109,8 +153,11 @@ export class AssetsController {
   remove(
     @Param('id', ParseIntPipe)
     id: number,
+
+    @Actor()
+    actor: WarehouseActor,
   ) {
-    return this.assetsService.remove(id);
+    return this.assetsService.remove(id, actor);
   }
 
   @UseGuards(PermissionGuard)

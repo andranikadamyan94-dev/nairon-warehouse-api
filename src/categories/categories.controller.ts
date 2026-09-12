@@ -17,6 +17,9 @@ import { CategoriesService } from './categories.service';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
+import { Actor } from '../auth/decorators/actor.decorator';
+import { WarehouseActor } from '../auth/actor';
+import { PREFLIGHT_OK } from '../common/preflight/preflight';
 
 @ApiTags('Categories')
 @Controller('categories')
@@ -29,18 +32,51 @@ export class CategoriesController {
   create(
     @Body()
     dto: CreateCategoryDto,
+
+    @Actor()
+    actor: WarehouseActor,
   ) {
-    return this.categoriesService.create(dto);
+    return this.categoriesService.create(dto, actor);
+  }
+
+  /** Writes nothing; see src/common/preflight/preflight.ts. */
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_categories')
+  @Post('preflight/create')
+  async preflightCreate(@Body() dto: CreateCategoryDto, @Actor() actor: WarehouseActor) {
+    await this.categoriesService.assertMayCreate(actor, dto);
+    return PREFLIGHT_OK;
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_categories')
+  @Post('preflight/update/:id')
+  async preflightUpdate(
+    @Param('id') id: string,
+    @Body() dto: UpdateCategoryDto,
+    @Actor() actor: WarehouseActor,
+  ) {
+    await this.categoriesService.assertMayEdit(actor, +id);
+    await this.categoriesService.assertMayCreate(actor, dto);
+    return PREFLIGHT_OK;
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_categories')
+  @Post('preflight/delete/:id')
+  async preflightDelete(@Param('id') id: string, @Actor() actor: WarehouseActor) {
+    await this.categoriesService.assertMayEdit(actor, +id);
+    return PREFLIGHT_OK;
   }
 
   @Get()
-  getAll(@Query('entityId') entityId?: string) {
-    return this.categoriesService.getAll(entityId ? Number(entityId) : undefined);
+  getAll(@Actor() actor: WarehouseActor, @Query('entityId') entityId?: string) {
+    return this.categoriesService.getAll(entityId ? Number(entityId) : undefined, actor);
   }
 
   @Get('tree')
-  getTree(@Query('entityId') entityId?: string) {
-    return this.categoriesService.getTree(entityId ? Number(entityId) : undefined);
+  getTree(@Actor() actor: WarehouseActor, @Query('entityId') entityId?: string) {
+    return this.categoriesService.getTree(entityId ? Number(entityId) : undefined, actor);
   }
 
   @UseGuards(PermissionGuard)
@@ -52,8 +88,11 @@ export class CategoriesController {
 
     @Body()
     dto: UpdateCategoryDto,
+
+    @Actor()
+    actor: WarehouseActor,
   ) {
-    return this.categoriesService.update(+id, dto);
+    return this.categoriesService.update(+id, dto, actor);
   }
 
   @UseGuards(PermissionGuard)
@@ -62,7 +101,10 @@ export class CategoriesController {
   remove(
     @Param('id')
     id: string,
+
+    @Actor()
+    actor: WarehouseActor,
   ) {
-    return this.categoriesService.remove(+id);
+    return this.categoriesService.remove(+id, actor);
   }
 }
