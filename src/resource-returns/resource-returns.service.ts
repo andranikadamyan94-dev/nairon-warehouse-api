@@ -9,6 +9,33 @@ import { WarehouseActor } from '../auth/actor';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import { decideOperation, isWarehouseViewer, mayRead } from '../reservations/two-party';
+import { quantitiesOf } from '../reservations/quantities';
+import { lockReservation } from '../common/operations/row-lock';
+
+/** What filing this return would mean, before it is filed. */
+export type ReturnPreview = {
+  reservationId: number;
+  itemId: number;
+  itemName: string;
+  unit: string | null;
+  reservationStatus: string;
+  requesterWorkspaceId: number | null;
+  stockOwnerWorkspaceId: number | null;
+  stockOwnerName: string | null;
+  /** What was asked for originally. History, never a counter. */
+  requested: number;
+  /** Everything that has ever left the shelf against this request. */
+  issued: number;
+  /** What has come back and been received. */
+  returned: number;
+  /** What is physically out right now. */
+  out: number;
+  /** What could still be handed back, counting returns already filed. */
+  returnable: number;
+  returningNow: number;
+  /** Always true: CONFIRM measures again inside the transaction that writes. */
+  outstandingIsInformational: true;
+};
 
 @Injectable()
 export class ResourceReturnsService {
@@ -50,32 +77,66 @@ export class ResourceReturnsService {
   }
 
   /**
-   * How much of this reservation could still honestly come back.
+   * Could this return be filed, right now — and what is actually out?
    *
-   * The old rule measured against the REQUESTED quantity and counted only
-   * PENDING returns. Both halves were wrong in the same direction. Ask for 5,
-   * be issued 2, and a return of 5 was accepted — and receiving it added 5 to
-   * the shelf, three of which had never left it. Stock could be invented by
-   * asking for more than you were given.
-   *
-   * What can come back is what went out and has not come back yet: the live
-   * allocations, less everything already returned or waiting to be.
+   * Same authority, same measurement, nothing written. The outstanding figure is
+   * read outside a transaction and is therefore informational; `create` measures
+   * it again inside the one that writes.
    */
-  private async returnableQuantity(reservationId: number, tx = this.prisma): Promise<number> {
-    const [issued, returned] = await Promise.all([
-      tx.reservationAllocation.aggregate({
-        where: { reservationId, releasedAt: null },
-        _sum: { quantity: true },
-      }),
-      tx.resourceReturn.aggregate({
-        where: {
-          reservationId,
-          status: { in: [ResourceReturnStatus.PENDING, ResourceReturnStatus.RECEIVED] },
-        },
-        _sum: { quantity: true },
-      }),
-    ]);
-    return (issued._sum.quantity ?? 0) - (returned._sum.quantity ?? 0);
+  async previewCreate(dto: CreateReturnDto, actor: WarehouseActor): Promise<ReturnPreview> {
+    const reservation = await this.prisma.resourceReservation.findUnique({
+      where: { id: dto.reservationId },
+      include: { item: { include: { category: { select: { entityId: true, name: true } } } } },
+    });
+    if (!reservation) throw new NotFoundException('Reservation not found');
+
+    const parties = await this.workspaces.partiesOfReservation(dto.reservationId);
+    const verdict = decideOperation(actor, parties, 'return.create');
+    if (!verdict.allowed) {
+      throw new ForbiddenException(
+        verdict.because === 'unknown-workspace'
+          ? 'This reservation cannot say which company asked for it, so nothing can be returned against it from inside one'
+          : 'This is another company’s to hand back',
+      );
+    }
+
+    /*
+     * Assets are allocated one physical unit at a time, and a return says only a
+     * number — so a return of "1" against three allocated drills cannot say WHICH
+     * drill came back, and receiving it releases all three. That is not something
+     * to let anything unattended file. Humans keep the route; see §I of the phase
+     * notes.
+     */
+    if (reservation.item.type === ItemType.ASSET) {
+      throw new BadRequestException(
+        'Սարքավորման վերադարձը պետք է նշի, թե որ միավորն է վերադարձվում — այս ձևով հնարավոր չէ',
+      );
+    }
+
+    const q = await quantitiesOf(this.prisma, dto.reservationId);
+    if (dto.quantity > q.returnable) {
+      throw new BadRequestException(
+        `Cannot return ${dto.quantity} units — only ${q.returnable} are out and not yet returned`,
+      );
+    }
+
+    return {
+      reservationId: reservation.id,
+      itemId: reservation.itemId,
+      itemName: reservation.item.name,
+      unit: reservation.item.unit,
+      reservationStatus: reservation.status,
+      requesterWorkspaceId: parties.requester,
+      stockOwnerWorkspaceId: parties.stockOwner,
+      stockOwnerName: reservation.item.category?.name ?? null,
+      requested: q.requested,
+      issued: q.issued,
+      returned: q.returned,
+      out: q.out,
+      returnable: q.returnable,
+      returningNow: dto.quantity,
+      outstandingIsInformational: true,
+    };
   }
 
   async create(dto: CreateReturnDto, actor: WarehouseActor) {
@@ -103,7 +164,15 @@ export class ResourceReturnsService {
      * wrote with nothing in between.
      */
     return this.prisma.$transaction(async (tx) => {
-      const returnable = await this.returnableQuantity(dto.reservationId, tx as never);
+      /*
+       * Before measuring. Two people handing back the same six both read "six
+       * returnable" under READ COMMITTED and both filed — the live run caught
+       * it. The second waits here and measures again with the first return in
+       * view. See common/operations/row-lock.ts.
+       */
+      await lockReservation(tx as never, dto.reservationId);
+
+      const { returnable } = await quantitiesOf(tx as never, dto.reservationId);
       if (returnable <= 0) {
         throw new BadRequestException(
           'Այս ամրագրման դիմաց վերադարձնելու բան չկա — ոչինչ տրամադրված չէ կամ ամեն ինչ արդեն վերադարձվել է',
@@ -190,6 +259,8 @@ export class ResourceReturnsService {
     const isAsset = ret.reservation.item.type === ItemType.ASSET;
 
     const result = await this.prisma.$transaction(async (tx) => {
+      await lockReservation(tx as never, ret.reservationId);
+
       if (isAsset) {
         // Assets are tracked individually — release all active allocations for this reservation
         await tx.reservationAllocation.updateMany({
@@ -207,15 +278,13 @@ export class ResourceReturnsService {
           data: { quantity: { increment: ret.quantity } },
         });
 
-        const newQty = ret.reservation.quantity - ret.quantity;
-        await tx.resourceReservation.update({
-          where: { id: ret.reservationId },
-          data: {
-            quantity: newQty <= 0 ? 0 : newQty,
-            status: newQty <= 0 ? ResourceReservationStatus.COMPLETED : undefined,
-          },
-        });
-
+        /*
+         * What came back reduces what is OUT — the allocation — and nothing
+         * else. It used to subtract from ResourceReservation.quantity as well,
+         * which is what somebody asked for: a request for 10 kg silently became
+         * a request for 6 kg once 4 came back, and the original ask was gone.
+         * The request is history now; see quantities.ts.
+         */
         const allocation = await tx.reservationAllocation.findFirst({
           where: { reservationId: ret.reservationId, releasedAt: null },
         });
@@ -223,9 +292,23 @@ export class ResourceReturnsService {
           const remainingAlloc = allocation.quantity - ret.quantity;
           await tx.reservationAllocation.update({
             where: { id: allocation.id },
-            data: remainingAlloc <= 0
-              ? { releasedAt: new Date() }
-              : { quantity: remainingAlloc },
+            data: remainingAlloc <= 0 ? { releasedAt: new Date() } : { quantity: remainingAlloc },
+          });
+        }
+
+        /*
+         * Everything issued has come back, so the arrangement is over. Measured
+         * from the allocations rather than from a counter, and measured after
+         * the write above so it sees it.
+         */
+        const stillOut = await tx.reservationAllocation.aggregate({
+          where: { reservationId: ret.reservationId, releasedAt: null },
+          _sum: { quantity: true },
+        });
+        if ((stillOut._sum.quantity ?? 0) <= 0) {
+          await tx.resourceReservation.update({
+            where: { id: ret.reservationId },
+            data: { status: ResourceReservationStatus.COMPLETED },
           });
         }
       }

@@ -9,6 +9,7 @@ import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { Actor } from '../auth/decorators/actor.decorator';
 import { OperationsService } from '../common/operations/operations.service';
 import { OperationKey } from '../common/operations/operation-key.decorator';
+import { PREFLIGHT_OK } from '../common/preflight/preflight';
 import { WarehouseActor } from '../auth/actor';
 
 @ApiTags('resource-returns')
@@ -34,6 +35,20 @@ export class ResourceReturnsController {
       () => this.service.create(dto, actor),
     );
     return result;
+  }
+
+  /**
+   * Would this return be accepted, and what is actually out?
+   *
+   * Same authority and the same measurement `create` makes, with nothing
+   * written. The outstanding figure is informational — the mutation measures it
+   * again inside the transaction that writes it.
+   */
+  @Post('preflight/create')
+  @UseGuards(PermissionGuard)
+  @Permissions('view_warehouse', 'manage_resource_returns')
+  async preflightCreate(@Body() dto: CreateReturnDto, @Actor() actor: WarehouseActor) {
+    return { ...PREFLIGHT_OK, request: await this.service.previewCreate(dto, actor) };
   }
 
   @Get()

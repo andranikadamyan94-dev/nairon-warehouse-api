@@ -16,6 +16,7 @@ import { LoggedInUser } from '../auth/decorators/logged-in-user.decorator';
 import { Actor } from '../auth/decorators/actor.decorator';
 import { OperationsService } from '../common/operations/operations.service';
 import { OperationKey } from '../common/operations/operation-key.decorator';
+import { PREFLIGHT_OK } from '../common/preflight/preflight';
 import { WarehouseActor } from '../auth/actor';
 
 import { ReservationsService } from './reservations.service';
@@ -58,6 +59,37 @@ export class ReservationsController {
       () => this.reservationsService.create(dto, userId, actor),
     );
     return result;
+  }
+
+  /**
+   * Would this reservation request be accepted, and what would it do?
+   *
+   * Same guards, same authority, same measurements, nothing written. Unlike the
+   * other preflights in the estate this answers more than `{ok:true}`: one
+   * request becomes several rows, and a person cannot agree to "a reservation"
+   * without being told which resources, from whose shelves, and how many rows
+   * an hourly item turns into. See src/common/preflight/preflight.ts for what a
+   * preflight is and is not — it is still UX validation, never permission, and
+   * the availability in it is explicitly informational.
+   */
+  @Post('preflight/create')
+  @UseGuards(PermissionGuard)
+  @Permissions('view_warehouse', 'manage_reservations')
+  @ApiOperation({ summary: 'Preflight: may this be reserved, and what would it create?' })
+  async preflightCreate(@Body() dto: CreateReservationDto, @Actor() actor: WarehouseActor) {
+    return { ...PREFLIGHT_OK, request: await this.reservationsService.previewCreate(dto, actor) };
+  }
+
+  @Post('preflight/task/:taskId')
+  @UseGuards(PermissionGuard)
+  @Permissions('view_warehouse', 'manage_reservations')
+  @ApiOperation({ summary: 'Preflight: what would changing this task’s resources do?' })
+  async preflightUpdate(
+    @Param('taskId') taskId: string,
+    @Body() dto: CreateReservationDto,
+    @Actor() actor: WarehouseActor,
+  ) {
+    return { ...PREFLIGHT_OK, request: await this.reservationsService.previewUpdate(+taskId, dto, actor) };
   }
 
   @Patch('task/:taskId')

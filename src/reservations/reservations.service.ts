@@ -16,6 +16,8 @@ import { WarehouseActor, boundedTo } from '../auth/actor';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 import { RequesterWorkspaceService } from '../common/workspace/requester-workspace.service';
 import { ReservationParties, decideOperation, isWarehouseViewer, mayRead } from './two-party';
+import { quantitiesOf } from './quantities';
+import { lockItem, lockReservation } from '../common/operations/row-lock';
 import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
 
 import { AssetStatus } from '../common/enums/asset-status.enum';
@@ -45,6 +47,85 @@ const ALLOCATABLE_STATUSES = [
 ];
 
 const YEREVAN_UTC_OFFSET = 4;
+
+/**
+ * One reservation row, as the caller that asked for it needs to see it.
+ *
+ * A reservation REQUEST is one business act that produces several of these —
+ * one per resource, and for hourly items one per working day. The act is what a
+ * person agrees to; these are what it made.
+ */
+/**
+ * What one reservation REQUEST would do, before it does it.
+ *
+ * Shaped around the business act rather than the rows: a person agrees to "these
+ * resources, for this work, from these shelves", and the rows are how the
+ * warehouse writes that down.
+ */
+export type ReservationRequestPreview = {
+  taskId: number | null;
+  projectId: number | null;
+  projectName: string | null;
+  requesterWorkspaceId: number;
+  startDate: string;
+  endDate: string | null;
+  lines: {
+    itemId: number;
+    itemName: string;
+    unit: string | null;
+    type: string;
+    quantity: number;
+    /** How many reservation rows this line becomes — more than one for hourly items. */
+    rows: number;
+    stockOwnerWorkspaceId: number | null;
+    stockOwnerName: string | null;
+    /** Free at the moment of asking. Not a promise; see availabilityIsInformational. */
+    freeNow: boolean;
+  }[];
+  rowsToCreate: number;
+  /** Some line is not free now, so somebody on the stock side has to act. */
+  needsFulfilment: boolean;
+  /** Always true, and said out loud: CONFIRM re-measures inside its transaction. */
+  availabilityIsInformational: true;
+};
+
+/** What changing a task's resources would do, resource by resource. */
+export type ReservationUpdatePreview = {
+  taskId: number;
+  requesterWorkspaceId: number;
+  lines: {
+    itemId: number;
+    itemName: string;
+    unit: string | null;
+    stockOwnerWorkspaceId: number | null;
+    /** What the task asks for now; null when this resource is new to it. */
+    before: number | null;
+    /** What it would ask for. */
+    after: number;
+    /** How much of it is already in the requester's hands. */
+    alreadyOut: number;
+    change: 'added' | 'removed' | 'changed' | 'unchanged';
+    /** The ask was raised to what has already been handed over. */
+    cannotGoBelowIssued: boolean;
+  }[];
+  noChange: boolean;
+  availabilityIsInformational: true;
+};
+
+export type CreatedReservation = {
+  id: number;
+  itemId: number;
+  itemName: string | null;
+  unit: string | null;
+  quantity: number;
+  startDate: string;
+  endDate: string | null;
+  status: string;
+  /** Who asked — pinned, derived from the CRM project. */
+  requesterWorkspaceId: number;
+  /** Whose stock — derived from the item's catalogue. Null when it has none. */
+  stockOwnerWorkspaceId: number | null;
+};
 
 function parseCustomTime(resource: { startTime?: string; endTime?: string }) {
   if (!resource.startTime || !resource.endTime) return undefined;
@@ -431,6 +512,14 @@ export class ReservationsService {
 
     const availability = await this.availabilityService.checkAvailability(dto);
 
+    /*
+     * One request, many rows — and the caller has to be told which rows. It used
+     * to answer {available, unavailableResources} and nothing else, so nobody
+     * could say afterwards what had been made: not a confirmation card, not a
+     * replay of a retried request, not somebody reconciling by hand.
+     */
+    const created: CreatedReservation[] = [];
+
     await this.prisma.$transaction(async (tx) => {
       for (const resource of dto.resources) {
         const slots = hourlySlots.get(resource.itemId);
@@ -444,7 +533,7 @@ export class ReservationsService {
               ? ResourceReservationStatus.PENDING
               : ResourceReservationStatus.APPROVED;
 
-            const created = await tx.resourceReservation.create({
+            const row = await tx.resourceReservation.create({
               data: {
                 itemId: resource.itemId,
                 quantity: resource.quantity,
@@ -459,7 +548,8 @@ export class ReservationsService {
                 status,
               },
             });
-            await this.writeStatusHistory(tx, created.id, null, status, { performedBy });
+            await this.writeStatusHistory(tx, row.id, null, status, { performedBy });
+            created.push(await this.describeCreated(tx, row, requesterWorkspaceId));
           }
         } else {
           // For open-ended reservations, re-check inside the transaction to prevent race conditions
@@ -478,6 +568,14 @@ export class ReservationsService {
             }
           }
 
+          /*
+           * Availability was measured before this transaction opened, which is
+           * a fine thing to SHOW somebody and not a thing to commit on. Two
+           * requests for the last three of something both read "three free".
+           * Re-measured here, against rows this transaction can see.
+           */
+          await this.assertStillReservable(tx, resource.itemId, resource.quantity, startDate, endDate);
+
           const isUnavailable = availability.unavailableResources.some(
             (r) => r.itemId === resource.itemId && !r.date,
           );
@@ -485,7 +583,7 @@ export class ReservationsService {
             ? ResourceReservationStatus.PENDING
             : ResourceReservationStatus.APPROVED;
 
-          const created = await tx.resourceReservation.create({
+          const row = await tx.resourceReservation.create({
             data: {
               itemId: resource.itemId,
               quantity: resource.quantity,
@@ -500,7 +598,8 @@ export class ReservationsService {
               status,
             },
           });
-          await this.writeStatusHistory(tx, created.id, null, status, { performedBy });
+          await this.writeStatusHistory(tx, row.id, null, status, { performedBy });
+          created.push(await this.describeCreated(tx, row, requesterWorkspaceId));
         }
       }
     });
@@ -530,6 +629,336 @@ export class ReservationsService {
     return {
       available: availability.unavailableResources.length === 0,
       unavailableResources: availability.unavailableResources,
+      /*
+       * Bounded on purpose: identifiers, the two companies, what was asked for
+       * and where it stands. Not the item's whole row, not the project, not the
+       * history — a caller that wants those can ask for them by id, which is
+       * what having the id is for.
+       */
+      created,
+    };
+  }
+
+  /** One created row, as a caller needs to see it. */
+  private async describeCreated(
+    tx: { item: any },
+    row: {
+      id: number;
+      itemId: number;
+      quantity: number;
+      startDate: Date;
+      endDate: Date | null;
+      status: string;
+    },
+    requesterWorkspaceId: number,
+  ): Promise<CreatedReservation> {
+    const item = await tx.item.findUnique({
+      where: { id: row.itemId },
+      select: { name: true, unit: true, category: { select: { entityId: true } } },
+    });
+    return {
+      id: row.id,
+      itemId: row.itemId,
+      itemName: item?.name ?? null,
+      unit: item?.unit ?? null,
+      quantity: row.quantity,
+      startDate: row.startDate.toISOString(),
+      endDate: row.endDate ? row.endDate.toISOString() : null,
+      status: row.status,
+      requesterWorkspaceId,
+      stockOwnerWorkspaceId: item?.category?.entityId ?? null,
+    };
+  }
+
+  /**
+   * Can this much of this item still be promised, right now, in here?
+   *
+   * A consumable is promised against the shelf less everything already promised
+   * and not yet handed out — a reservation is a claim on stock, not just a note.
+   * An asset is promised against the individual assets that exist and are not
+   * already claimed for overlapping dates.
+   *
+   * Deliberately inside the caller's transaction: measuring outside it and
+   * writing inside it is the race this exists to close.
+   */
+  private async assertStillReservable(
+    tx: { item: any; resourceReservation: any; asset: any; $queryRawUnsafe: any },
+    itemId: number,
+    wanted: number,
+    startDate: Date,
+    endDate: Date | null,
+  ): Promise<void> {
+    /*
+     * Before counting anything. Two transactions asking "how much is free?" at
+     * the same moment both get the same answer under READ COMMITTED, because
+     * neither can see the other's uncommitted reservation — and both then say
+     * yes. Locking the item makes the second one wait and then count again with
+     * the first one's row in view. See common/operations/row-lock.ts.
+     */
+    if (!(await lockItem(tx, itemId))) throw new NotFoundException(`Item ${itemId} not found`);
+
+    const item = await tx.item.findUnique({
+      where: { id: itemId },
+      select: { id: true, name: true, type: true, quantity: true },
+    });
+    if (!item) throw new NotFoundException(`Item ${itemId} not found`);
+
+    const overlapping = endDate
+      ? {
+          OR: [
+            { endDate: null, startDate: { lte: endDate } },
+            { startDate: { lte: endDate }, endDate: { gte: startDate } },
+          ],
+        }
+      : {};
+
+    if (item.type === ItemType.CONSUMABLE) {
+      const claimed = await tx.resourceReservation.aggregate({
+        where: {
+          itemId,
+          status: { in: [ResourceReservationStatus.PENDING, ResourceReservationStatus.APPROVED] },
+          ...overlapping,
+        },
+        _sum: { quantity: true },
+      });
+      // APPROVED and PENDING rows are promises not yet handed out; anything
+      // already allocated has left the shelf and is gone from item.quantity.
+      const free = item.quantity - (claimed._sum.quantity ?? 0);
+      if (wanted > free) {
+        throw new BadRequestException(
+          `«${item.name}» — հասանելի է ${Math.max(0, free)}, պահանջվում է ${wanted}`,
+        );
+      }
+      return;
+    }
+
+    const units = await tx.asset.count({ where: { itemId } });
+    const claimed = await tx.resourceReservation.aggregate({
+      where: {
+        itemId,
+        status: {
+          in: [
+            ResourceReservationStatus.PENDING,
+            ResourceReservationStatus.APPROVED,
+            ResourceReservationStatus.PARTIALLY_ALLOCATED,
+            ResourceReservationStatus.ALLOCATED,
+          ],
+        },
+        ...overlapping,
+      },
+      _sum: { quantity: true },
+    });
+    const free = units - (claimed._sum.quantity ?? 0);
+    if (wanted > free) {
+      throw new BadRequestException(
+        `«${item.name}» — այդ ժամկետում ազատ է ${Math.max(0, free)}, պահանջվում է ${wanted}`,
+      );
+    }
+  }
+
+  /**
+   * Could this reservation request be made, right now — and what would it look
+   * like?
+   *
+   * The same authority and the same measurements the mutation makes, with
+   * nothing written. It answers enough to draw a confirmation card for ONE
+   * business request: who is asking, for whose work, and line by line what is
+   * wanted, from whose shelf, and whether it is free at the moment of asking.
+   *
+   * What it does NOT promise is that it will still be free when somebody says
+   * yes. Availability here is informational and the card says so; the mutation
+   * re-measures it inside the transaction that writes, which is the only place
+   * the answer can be binding.
+   */
+  async previewCreate(dto: CreateReservationDto, actor?: WarehouseActor): Promise<ReservationRequestPreview> {
+    this.assertMayLabelWith(actor, dto.entityId);
+
+    const requesterWorkspaceId = await this.requesters.forRequest({
+      projectId: dto.projectId,
+      taskId: dto.taskId,
+    });
+    if (requesterWorkspaceId === null) {
+      throw new BadRequestException(
+        'Ամրագրումը պետք է կապված լինի նախագծի կամ առաջադրանքի հետ, որպեսզի պարզ լինի, թե որ ընկերությունն է պահանջում',
+      );
+    }
+    if (actor) {
+      const verdict = decideOperation(
+        actor,
+        { requester: requesterWorkspaceId, stockOwner: null },
+        'reservation.create',
+      );
+      if (!verdict.allowed) throw new ForbiddenException('This is another company’s work to ask for');
+    }
+
+    if (!dto.resources?.length) {
+      throw new BadRequestException('Ամրագրման հայտը պետք է պարունակի գոնե մեկ ռեսուրս');
+    }
+
+    const availability = await this.availabilityService.checkAvailability(dto);
+    const unavailableItemIds = new Set(availability.unavailableResources.map((r: any) => r.itemId));
+
+    const lines: ReservationRequestPreview['lines'] = [];
+    for (const resource of dto.resources) {
+      if (!Number.isFinite(resource.quantity) || resource.quantity <= 0) {
+        throw new BadRequestException('Քանակը պետք է լինի դրական թիվ');
+      }
+      const item = await this.prisma.item.findUnique({
+        where: { id: resource.itemId },
+        select: {
+          id: true,
+          name: true,
+          unit: true,
+          type: true,
+          category: { select: { entityId: true, name: true } },
+        },
+      });
+      if (!item) throw new NotFoundException(`Item ${resource.itemId} not found`);
+
+      /*
+       * An hourly item becomes one row per working day, and a person agreeing to
+       * "three slots" should be told it is three. Counted here rather than
+       * described vaguely, because the count is what the mutation will make.
+       */
+      const slots =
+        dto.endDate && item.unit === ItemUnit.HOUR
+          ? splitIntoWorkingDaySlots(dto.startDate, dto.endDate, parseCustomTime(resource)).length
+          : 1;
+
+      lines.push({
+        itemId: item.id,
+        itemName: item.name,
+        unit: item.unit,
+        type: item.type,
+        quantity: resource.quantity,
+        rows: slots,
+        stockOwnerWorkspaceId: item.category?.entityId ?? null,
+        stockOwnerName: item.category?.name ?? null,
+        freeNow: !unavailableItemIds.has(item.id),
+      });
+    }
+
+    return {
+      taskId: dto.taskId ?? null,
+      projectId: dto.projectId ?? null,
+      projectName: dto.projectName ?? null,
+      requesterWorkspaceId,
+      startDate: new Date(dto.startDate).toISOString(),
+      endDate: dto.endDate ? new Date(dto.endDate).toISOString() : null,
+      lines,
+      rowsToCreate: lines.reduce((n, l) => n + l.rows, 0),
+      /* Some of it may need a person on the other side to hand it over. */
+      needsFulfilment: lines.some((l) => !l.freeNow),
+      availabilityIsInformational: true,
+    };
+  }
+
+  /**
+   * What changing a task's resources would do, before it does it.
+   *
+   * `updateTaskReservations` is already a desired-state operation: the caller
+   * sends the whole set of resources a task should have, and the service works
+   * out what that means for the rows. So the preview is the same shape — before
+   * and after, per resource, at the level somebody actually decides at. Not a
+   * list of row patches.
+   */
+  async previewUpdate(
+    taskId: number,
+    dto: CreateReservationDto,
+    actor?: WarehouseActor,
+  ): Promise<ReservationUpdatePreview> {
+    this.assertMayLabelWith(actor, dto.entityId);
+
+    const requesterWorkspaceId = await this.requesters.forRequest({ projectId: dto.projectId, taskId });
+    if (requesterWorkspaceId === null) {
+      throw new BadRequestException(
+        'Ամրագրումը պետք է կապված լինի նախագծի կամ առաջադրանքի հետ, որպեսզի պարզ լինի, թե որ ընկերությունն է պահանջում',
+      );
+    }
+    if (actor) {
+      const verdict = decideOperation(
+        actor,
+        { requester: requesterWorkspaceId, stockOwner: null },
+        'reservation.update',
+      );
+      if (!verdict.allowed) throw new ForbiddenException('This is another company’s work to change');
+    }
+
+    const existing = await this.prisma.resourceReservation.findMany({
+      where: {
+        taskId,
+        status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.COMPLETED] },
+      },
+      include: { item: { select: { id: true, name: true, unit: true, type: true } } },
+    });
+
+    const beforeByItem = new Map<number, { name: string; quantity: number; out: number }>();
+    for (const row of existing) {
+      const q = await quantitiesOf(this.prisma, row.id);
+      const seen = beforeByItem.get(row.itemId);
+      beforeByItem.set(row.itemId, {
+        name: row.item.name,
+        quantity: (seen?.quantity ?? 0) + row.quantity,
+        out: (seen?.out ?? 0) + q.out,
+      });
+    }
+
+    const lines: ReservationUpdatePreview['lines'] = [];
+    const seenItems = new Set<number>();
+
+    for (const resource of dto.resources ?? []) {
+      seenItems.add(resource.itemId);
+      const item = await this.prisma.item.findUnique({
+        where: { id: resource.itemId },
+        select: { id: true, name: true, unit: true, type: true, category: { select: { entityId: true } } },
+      });
+      if (!item) throw new NotFoundException(`Item ${resource.itemId} not found`);
+      const before = beforeByItem.get(resource.itemId);
+
+      /*
+       * A consumable already in the requester's hands cannot be asked down: the
+       * goods are with them and stock has already moved. The service enforces
+       * this; the preview says it, so nobody agrees to a reduction that will not
+       * happen.
+       */
+      const flooredBy =
+        item.type !== ItemType.ASSET && before && resource.quantity < before.out ? before.out : null;
+
+      lines.push({
+        itemId: item.id,
+        itemName: item.name,
+        unit: item.unit,
+        stockOwnerWorkspaceId: item.category?.entityId ?? null,
+        before: before?.quantity ?? null,
+        after: flooredBy ?? resource.quantity,
+        alreadyOut: before?.out ?? 0,
+        change: before ? (flooredBy ?? resource.quantity) === before.quantity ? 'unchanged' : 'changed' : 'added',
+        cannotGoBelowIssued: flooredBy !== null,
+      });
+    }
+
+    for (const [itemId, before] of beforeByItem) {
+      if (seenItems.has(itemId)) continue;
+      lines.push({
+        itemId,
+        itemName: before.name,
+        unit: null,
+        stockOwnerWorkspaceId: null,
+        before: before.quantity,
+        after: 0,
+        alreadyOut: before.out,
+        change: 'removed',
+        cannotGoBelowIssued: false,
+      });
+    }
+
+    return {
+      taskId,
+      requesterWorkspaceId,
+      lines,
+      /* Nothing about this request differs from what the task already has. */
+      noChange: lines.every((l) => l.change === 'unchanged'),
+      availabilityIsInformational: true,
     };
   }
 
@@ -671,12 +1100,10 @@ export class ReservationsService {
     // Approve only what has not been handed out yet. A reservation knocked
     // back to PENDING (or bumped to a higher quantity) may already carry
     // allocations — approving the full amount again would deduct stock twice
-    // for goods that already left the shelf.
-    const alreadyAllocated = await this.prisma.reservationAllocation.aggregate({
-      where: { reservationId, releasedAt: null },
-      _sum: { quantity: true },
-    });
-    const outstanding = reservation.quantity - (alreadyAllocated._sum.quantity ?? 0);
+    // for goods that already left the shelf. Goods that went out and came back
+    // count as issued too, or a return would quietly restore the right to issue
+    // the same units again.
+    const { outstandingToIssue: outstanding } = await quantitiesOf(this.prisma, reservationId);
     if (outstanding <= 0) {
       throw new BadRequestException(
         `Reservation ${reservationId} is already fully allocated`,
@@ -698,6 +1125,9 @@ export class ReservationsService {
       );
     }
 
+    // Read here only so the refusal can name a number a person recognises. The
+    // invariant itself is enforced inside the transaction below, because this
+    // read and that write are not the same moment.
     if (reservation.item.quantity < toAllocate) {
       throw new BadRequestException(
         `Insufficient stock: ${reservation.item.quantity} available, ${toAllocate} requested`,
@@ -705,17 +1135,48 @@ export class ReservationsService {
     }
 
     const result = await this.prisma.$transaction(async (tx) => {
+      await lockItem(tx as never, reservation.item.id);
+      await lockReservation(tx as never, reservationId);
+
+      /*
+       * The shelf, decremented only if it still has enough. Two callers issuing
+       * the last of something both passed the check above; exactly one of them
+       * changes a row here, and the other is told the stock went while it was
+       * deciding. Written before the allocation so nothing is recorded as
+       * handed out unless the stock actually moved.
+       */
+      const took = await tx.item.updateMany({
+        where: { id: reservation.item.id, quantity: { gte: toAllocate } },
+        data: { quantity: { decrement: toAllocate } },
+      });
+      if (took.count !== 1) {
+        const now = await tx.item.findUnique({
+          where: { id: reservation.item.id },
+          select: { quantity: true },
+        });
+        throw new BadRequestException(
+          `Insufficient stock: ${now?.quantity ?? 0} available, ${toAllocate} requested`,
+        );
+      }
+
+      /*
+       * And the request must not be over-issued either, for the same reason:
+       * two partial approvals racing could together hand out more than was
+       * asked for. Measured inside the transaction, after the stock moved.
+       */
+      const afterIssue = await quantitiesOf(tx as never, reservationId);
+      if (afterIssue.issued + toAllocate > afterIssue.requested) {
+        throw new BadRequestException(
+          `Տրամադրվող քանակը գերազանցում է չտրամադրված մնացորդը`,
+        );
+      }
+
       await tx.reservationAllocation.create({
         data: { reservationId, quantity: toAllocate },
       });
 
       await tx.reservationAllocationHistory.create({
         data: { reservationId, action: 'ALLOCATED', performedBy, notes: 'Consumable approved' },
-      });
-
-      await tx.item.update({
-        where: { id: reservation.item.id },
-        data: { quantity: { decrement: toAllocate } },
       });
 
       await tx.inventoryMovement.create({
@@ -1371,15 +1832,30 @@ export class ReservationsService {
       if (!row) throw new NotFoundException('Reservation not found');
       await this.assertMayRead(actor, id, await this.isOnTask(row.taskId, actor.userId));
     }
-    return this.prisma.resourceReservation.findUnique({
+    const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id },
       include: {
-        item: true,
+        item: { include: { category: { select: { id: true, name: true, entityId: true } } } },
         allocations: { include: { asset: true } },
         statusHistory: { orderBy: { performedAt: 'asc' } },
         allocationHistory: { include: { asset: true }, orderBy: { performedAt: 'asc' } },
+        returns: { select: { id: true, quantity: true, status: true, requestedAt: true, receivedAt: true } },
       },
     });
+    if (!reservation) return null;
+
+    const q = await quantitiesOf(this.prisma, id);
+    return {
+      ...reservation,
+      /*
+       * The two companies, named rather than left to be derived by whoever is
+       * reading, and the four quantities that are otherwise arithmetic over
+       * allocation rows. `quantity` above is still what was requested, and now
+       * there is something to compare it against.
+       */
+      stockOwnerWorkspaceId: reservation.item.category?.entityId ?? null,
+      quantities: q,
+    };
   }
 
   // ─── getTaskReservations ─────────────────────────────────────────────────────
@@ -1542,8 +2018,32 @@ export class ReservationsService {
     actor?: WarehouseActor,
   ) {
     this.assertMayLabelWith(actor, dto.entityId);
+
+    /*
+     * Who asked, decided the same way create decides it. Rows this call creates
+     * carry it; rows it keeps already have it. The requester of an existing
+     * reservation is never rewritten — it is what was true when it was made.
+     */
+    const requesterWorkspaceId = await this.requesters.forRequest({
+      projectId: dto.projectId,
+      taskId,
+    });
+    if (requesterWorkspaceId === null) {
+      throw new BadRequestException(
+        'Ամրագրումը պետք է կապված լինի նախագծի կամ առաջադրանքի հետ, որպեսզի պարզ լինի, թե որ ընկերությունն է պահանջում',
+      );
+    }
+    if (actor) {
+      const verdict = decideOperation(
+        actor,
+        { requester: requesterWorkspaceId, stockOwner: null },
+        'reservation.update',
+      );
+      if (!verdict.allowed) throw new ForbiddenException('This is another company’s work to change');
+    }
+
     this.logger.log(
-      `UPDATE reservation | taskId=${taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
+      `UPDATE reservation | taskId=${taskId} requester=${requesterWorkspaceId} resources=${JSON.stringify(dto.resources)}`,
     );
 
     const itemIds = dto.resources.map((r) => r.itemId);
@@ -1782,6 +2282,7 @@ export class ReservationsService {
                   quantity: resource.quantity,
                   entityId: dto.entityId ?? null,
                   entityName: dto.entityName ?? null,
+                  requesterWorkspaceId,
                   startDate: slot.startDate,
                   endDate: slot.endDate,
                   status,
@@ -1891,6 +2392,7 @@ export class ReservationsService {
                 quantity: resource.quantity,
                 entityId: dto.entityId ?? null,
                 entityName: dto.entityName ?? null,
+                requesterWorkspaceId,
                 startDate,
                 endDate,
                 status,
