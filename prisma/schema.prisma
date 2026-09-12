@@ -208,8 +208,36 @@ model ResourceReservation {
   projectId   Int?
   projectName String?
 
+  /// WHO ASKED — as the caller said at the time, and not to be trusted.
+  ///
+  /// Kept, and kept meaning exactly what it has always meant: a label the
+  /// request body carried. Of the 83 rows here it is empty on 28. Of the 55
+  /// that carry one and whose project can still be found: 46 agree with the
+  /// project's company, 3 name the company that OWNS the stock, and 6 name
+  /// neither. A field saying three different things depending on the row cannot
+  /// be a scoping key, so nothing authorizes anything with it.
+  /// requesterWorkspaceId below is the answer; this is the history.
   entityId   Int?
   entityName String?
+
+  /// WHO ASKED — derived, and pinned when the reservation was made.
+  ///
+  /// The company whose work requested the resource, read from the CRM project
+  /// this reservation was raised against rather than from the request body.
+  ///
+  /// Stored rather than derived on every read, for two reasons. It lives in
+  /// another service's database, so no query here can join to it. And it is a
+  /// fact about a moment: a project that later moves to another company does
+  /// not retroactively change who asked for a drill last March.
+  ///
+  /// NULL means UNKNOWN, never "everybody's" — 12 rows here point at projects
+  /// that have since been deleted, and those keep saying so rather than being
+  /// guessed into a company.
+  ///
+  /// The other half of the pair — who OWNS the stock — is deliberately NOT
+  /// stored: it is the item's category's entityId, one enforced relation away,
+  /// and a copy of it could drift the first time a category moves company.
+  requesterWorkspaceId Int?
 
   quantity Int
 
@@ -254,6 +282,7 @@ model ResourceReservation {
   @@index([taskId])
   @@index([projectId])
   @@index([entityId])
+  @@index([requesterWorkspaceId])
   @@index([status])
   @@index([startDate, endDate])
 }

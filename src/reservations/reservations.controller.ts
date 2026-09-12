@@ -14,6 +14,8 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { LoggedInUser } from '../auth/decorators/logged-in-user.decorator';
 import { Actor } from '../auth/decorators/actor.decorator';
+import { OperationsService } from '../common/operations/operations.service';
+import { OperationKey } from '../common/operations/operation-key.decorator';
 import { WarehouseActor } from '../auth/actor';
 
 import { ReservationsService } from './reservations.service';
@@ -34,19 +36,28 @@ class ReasonDto {
 @ApiTags('Reservations')
 @Controller('reservations')
 export class ReservationsController {
-  constructor(private readonly reservationsService: ReservationsService) {}
+  constructor(
+    private readonly reservationsService: ReservationsService,
+    private readonly operations: OperationsService,
+  ) {}
 
   @Post()
   @UseGuards(PermissionGuard)
   @Permissions('view_warehouse', 'manage_reservations')
   @ApiOperation({ summary: 'Create resource reservations' })
   @ApiResponse({ status: 201 })
-  create(
+  async create(
     @Body() dto: CreateReservationDto,
     @Actor() actor: WarehouseActor,
     @LoggedInUser('id') userId?: number,
+    /* One request can make many rows; asking twice makes them twice. */
+    @OperationKey() operationKey?: string,
   ) {
-    return this.reservationsService.create(dto, userId, actor);
+    const { result } = await this.operations.runOnce(
+      { key: operationKey, actor, route: 'POST /reservations', body: dto },
+      () => this.reservationsService.create(dto, userId, actor),
+    );
+    return result;
   }
 
   @Patch('task/:taskId')
@@ -63,8 +74,8 @@ export class ReservationsController {
   }
 
   @Get('task/:taskId')
-  getTaskReservations(@Param('taskId') taskId: string) {
-    return this.reservationsService.getTaskReservations(+taskId);
+  getTaskReservations(@Param('taskId') taskId: string, @Actor() actor: WarehouseActor) {
+    return this.reservationsService.getTaskReservations(+taskId, actor);
   }
 
   @Post('allocate')
@@ -104,9 +115,10 @@ export class ReservationsController {
   approveConsumable(
     @Param('id') id: string,
     @LoggedInUser('id') userId: number,
+    @Actor() actor: WarehouseActor,
     @Body() body?: { quantity?: number },
   ) {
-    return this.reservationsService.approveConsumable(+id, userId, body?.quantity);
+    return this.reservationsService.approveConsumable(+id, userId, body?.quantity, actor);
   }
 
   // The task side confirms physical receipt of issued goods (#1882/#1883).
@@ -127,16 +139,16 @@ export class ReservationsController {
   @UseGuards(PermissionGuard)
   @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Cancel a reservation' })
-  cancel(@Param('id') id: string, @Body() dto: ReasonDto) {
-    return this.reservationsService.cancel(+id, undefined, dto.reason);
+  cancel(@Param('id') id: string, @Body() dto: ReasonDto, @Actor() actor: WarehouseActor) {
+    return this.reservationsService.cancel(+id, actor?.userId, dto.reason, actor);
   }
 
   @Patch(':id/uncancel')
   @UseGuards(PermissionGuard)
   @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Reactivate a cancelled reservation' })
-  uncancel(@Param('id') id: string) {
-    return this.reservationsService.uncancel(+id);
+  uncancel(@Param('id') id: string, @Actor() actor: WarehouseActor) {
+    return this.reservationsService.uncancel(+id, actor?.userId, actor);
   }
 
   // Reject a PENDING reservation
@@ -144,8 +156,8 @@ export class ReservationsController {
   @UseGuards(PermissionGuard)
   @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Reject a pending reservation' })
-  reject(@Param('id') id: string, @Body() dto: ReasonDto) {
-    return this.reservationsService.reject(+id, undefined, dto.reason);
+  reject(@Param('id') id: string, @Body() dto: ReasonDto, @Actor() actor: WarehouseActor) {
+    return this.reservationsService.reject(+id, actor?.userId, dto.reason, actor);
   }
 
   @Get('mine')
@@ -164,8 +176,8 @@ export class ReservationsController {
   @Get(':id')
   @UseGuards(PermissionGuard)
   @Permissions('view_reservations', 'manage_reservations')
-  getOne(@Param('id') id: string) {
-    return this.reservationsService.getOne(+id);
+  getOne(@Param('id') id: string, @Actor() actor: WarehouseActor) {
+    return this.reservationsService.getOne(+id, actor);
   }
 
 }

@@ -5,6 +5,7 @@ import { UsersPrismaService } from './common/users-prisma.service';
 import { WarehouseActorService } from './auth/actor.service';
 import { ResourceWorkspaceService } from './common/workspace/resource-workspace.service';
 import { OperationsService } from './common/operations/operations.service';
+import { RequesterWorkspaceService } from './common/workspace/requester-workspace.service';
 import { WarehouseNotificationsService } from './common/notifications/notifications.service';
 import { StockAlertService } from './common/notifications/stock-alert.service';
 import { SourceController } from './common/source.controller';
@@ -59,6 +60,7 @@ import { ResourceReturnsModule } from './resource-returns/resource-returns.modul
     UsersPrismaService,
     WarehouseActorService,
     ResourceWorkspaceService,
+    RequesterWorkspaceService,
     OperationsService,
     WarehouseNotificationsService,
     StockAlertService,
@@ -67,6 +69,7 @@ import { ResourceReturnsModule } from './resource-returns/resource-returns.modul
     UsersPrismaService,
     WarehouseActorService,
     ResourceWorkspaceService,
+    RequesterWorkspaceService,
     OperationsService,
     WarehouseNotificationsService,
     StockAlertService,

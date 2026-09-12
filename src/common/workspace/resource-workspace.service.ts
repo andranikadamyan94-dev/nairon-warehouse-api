@@ -22,11 +22,16 @@ import {
  *
  * The deliberate exclusion is ResourceReservation.entityId. It looks like a
  * workspace and is not one: it is written straight from the request body, it is
- * NULL on 18 of the 80 rows here, and on the rows that do have it it usually
- * disagrees with the item's own catalogue — companies 3 and 7 reserving from
- * catalogues 1 and 4, which is not a bug but the point of a shared store. It
- * records who ASKED. Reading it as "who may" would both trust the caller and
+ * empty on 28 of the 83 rows here, and where it is present and checkable it
+ * names the project's company 46 times, the STOCK OWNER's 3 times and neither
+ * 6 times — three different meanings in one column. It is a label. Reading it as "who may" would both trust the caller and
  * quietly break a working cross-company flow.
+ *
+ * A reservation is not a single-workspace resource at all, which is why it has
+ * no entry in WarehouseResource below. It has two companies — who asked, and
+ * whose stock — and they differ on every row here that can name both. See
+ * src/reservations/two-party.ts for what follows from that, and partiesOf()
+ * below for where the two answers come from.
  */
 export type WorkspaceOrigin =
   /** The row carries the workspace itself. */
@@ -100,6 +105,66 @@ export class ResourceWorkspaceService {
     return row.asset.item.category
       ? { workspace: row.asset.item.category.entityId, origin: 'asset.item.category' }
       : UNKNOWN('none');
+  }
+
+  /**
+   * Whose stock a reservation draws on: the item's catalogue, two enforced
+   * relations away. Never the reservation's own entityId.
+   */
+  async stockOwnerOfReservation(reservationId: number): Promise<ResourceWorkspace> {
+    const row = await this.prisma.resourceReservation.findUnique({
+      where: { id: reservationId },
+      select: { item: { select: { category: { select: { entityId: true } } } } },
+    });
+    if (!row) throw new NotFoundException('Reservation not found');
+    return row.item.category
+      ? { workspace: row.item.category.entityId, origin: 'item.category' }
+      : UNKNOWN('none');
+  }
+
+  /**
+   * Both companies of one reservation.
+   *
+   * The requester is read from the column where it was pinned when the
+   * reservation was made; the stock owner is derived now, because the item's
+   * catalogue is the live answer to where the goods are filed. Either may be
+   * null, and null means unknown — which is never a match for anybody.
+   */
+  async partiesOfReservation(
+    reservationId: number,
+  ): Promise<{ requester: Workspace; stockOwner: Workspace }> {
+    const row = await this.prisma.resourceReservation.findUnique({
+      where: { id: reservationId },
+      select: {
+        requesterWorkspaceId: true,
+        item: { select: { category: { select: { entityId: true } } } },
+      },
+    });
+    if (!row) throw new NotFoundException('Reservation not found');
+    return {
+      requester: row.requesterWorkspaceId ?? null,
+      stockOwner: row.item.category ? row.item.category.entityId : null,
+    };
+  }
+
+  /** The same pair for a return, which is an event on one reservation. */
+  async partiesOfReturn(returnId: number): Promise<{ requester: Workspace; stockOwner: Workspace }> {
+    const row = await this.prisma.resourceReturn.findUnique({
+      where: { id: returnId },
+      select: {
+        reservation: {
+          select: {
+            requesterWorkspaceId: true,
+            item: { select: { category: { select: { entityId: true } } } },
+          },
+        },
+      },
+    });
+    if (!row) throw new NotFoundException('Return not found');
+    return {
+      requester: row.reservation.requesterWorkspaceId ?? null,
+      stockOwner: row.reservation.item.category ? row.reservation.item.category.entityId : null,
+    };
   }
 
   async of(kind: WarehouseResource, id: number): Promise<ResourceWorkspace> {

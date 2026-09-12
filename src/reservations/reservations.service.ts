@@ -13,6 +13,9 @@ import { AvailabilityService } from '../availability/availability.service';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
 import { WarehouseActor, boundedTo } from '../auth/actor';
+import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
+import { RequesterWorkspaceService } from '../common/workspace/requester-workspace.service';
+import { ReservationParties, decideOperation, isWarehouseViewer, mayRead } from './two-party';
 import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
 
 import { AssetStatus } from '../common/enums/asset-status.enum';
@@ -66,6 +69,8 @@ export class ReservationsService {
     private readonly stockAlerts: StockAlertService,
     private readonly notifications: WarehouseNotificationsService,
     private readonly usersPrisma: UsersPrismaService,
+    private readonly workspaces: ResourceWorkspaceService,
+    private readonly requesters: RequesterWorkspaceService,
   ) {}
 
   /**
@@ -293,18 +298,16 @@ export class ReservationsService {
   /**
    * The company label on a reservation, checked — not enforced.
    *
-   * `ResourceReservation.entityId` records which company ASKED. It is written
-   * from the request body, it is NULL on many rows, and on the rows that do
-   * carry it, it usually names a different company from the one whose catalogue
-   * the goods sit in: companies 3 and 7 reserving out of catalogues 1 and 4.
-   * That crossing is the point of a shared store, so this label cannot be an
-   * authorization key and nothing here treats it as one — a reservation is never
-   * refused for naming another company.
+   * `ResourceReservation.entityId` is the old field, kept meaning what it always
+   * meant: a label the request body carried. Of the 55 rows here that carry one
+   * and whose project can still be found, 46 agree with the project's company,
+   * 3 name the STOCK OWNER and 6 name neither — three meanings in one column,
+   * which is why nothing authorizes anything with it. `requesterWorkspaceId` is
+   * the answer now, and it is derived rather than sent.
    *
-   * What it can stop is somebody labelling their request with a company they
-   * have nothing to do with, which is bookkeeping hygiene rather than access
-   * control. A caller who is not bounded — everybody in this installation today
-   * — is unaffected.
+   * This check survives as bookkeeping hygiene: somebody should not label their
+   * request with a company they have nothing to do with. It refuses nothing that
+   * the two-party rules would allow.
    */
   private assertMayLabelWith(actor: WarehouseActor | undefined, entityId?: number | null) {
     if (!actor || entityId == null) return;
@@ -313,10 +316,94 @@ export class ReservationsService {
     throw new ForbiddenException('You hold no role in the company this request names');
   }
 
+  /**
+   * Both companies of a reservation, and the rule that uses them.
+   *
+   * Every mutation below that names a reservation asks this, with the operation
+   * it is about to perform, so that requester-side authority and stock-owner
+   * authority stay separate. See two-party.ts for which operation belongs to
+   * which side and why.
+   */
+  async assertMay(
+    actor: WarehouseActor | undefined,
+    reservationId: number,
+    operation: string,
+  ): Promise<ReservationParties> {
+    const parties = await this.workspaces.partiesOfReservation(reservationId);
+    if (!actor) return parties;
+    const verdict = decideOperation(actor, parties, operation);
+    if (!verdict.allowed) {
+      throw new ForbiddenException(
+        verdict.because === 'unknown-workspace'
+          ? `This reservation cannot say which company is its ${verdict.side}, so it cannot be acted on from inside one`
+          : `This is another company's to ${verdict.side === 'requester' ? 'ask for' : 'fulfil'}`,
+      );
+    }
+    return parties;
+  }
+
+  /** May this person see this reservation at all? Wider than changing it. */
+  async assertMayRead(
+    actor: WarehouseActor | undefined,
+    reservationId: number,
+    onTheTask = false,
+  ): Promise<void> {
+    if (!actor) return;
+    const parties = await this.workspaces.partiesOfReservation(reservationId);
+    if (mayRead(actor, parties, { onTheTask, warehouseViewer: isWarehouseViewer(actor) })) return;
+    // Not found rather than forbidden: somebody with no standing learns nothing
+    // about which ids are taken.
+    throw new NotFoundException('Reservation not found');
+  }
+
+  /** Whether this person holds one of the task's three role slots, per CRM. */
+  async isOnTask(taskId: number | null | undefined, userId: number): Promise<boolean> {
+    if (!taskId) return false;
+    try {
+      await this.assertTaskRole(Number(taskId), userId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async create(dto: CreateReservationDto, performedBy?: number, actor?: WarehouseActor) {
     this.assertMayLabelWith(actor, dto.entityId);
+
+    /*
+     * Who asked, decided here rather than taken from the body. The project is
+     * the authority — it is what says whose work this is — and the answer is
+     * pinned to every row this call creates, because a project that moves
+     * company later did not change who asked today.
+     *
+     * A request that names neither a project nor a task has no authoritative
+     * requester and is refused. Nothing in the product sends one: the CRM task
+     * screen is the only thing that creates reservations, and it always carries
+     * both. Guessing "the company you are currently acting as" would be exactly
+     * the caller-supplied answer this phase exists to stop trusting.
+     */
+    const requesterWorkspaceId = await this.requesters.forRequest({
+      projectId: dto.projectId,
+      taskId: dto.taskId,
+    });
+    if (requesterWorkspaceId === null) {
+      throw new BadRequestException(
+        'Ամրագրումը պետք է կապված լինի նախագծի կամ առաջադրանքի հետ, որպեսզի պարզ լինի, թե որ ընկերությունն է պահանջում',
+      );
+    }
+    if (actor) {
+      const verdict = decideOperation(
+        actor,
+        { requester: requesterWorkspaceId, stockOwner: null },
+        'reservation.create',
+      );
+      if (!verdict.allowed) {
+        throw new ForbiddenException('This is another company’s work to ask for');
+      }
+    }
+
     this.logger.log(
-      `CREATE reservation | taskId=${dto.taskId} entityId=${dto.entityId} resources=${JSON.stringify(dto.resources)}`,
+      `CREATE reservation | taskId=${dto.taskId} requester=${requesterWorkspaceId} resources=${JSON.stringify(dto.resources)}`,
     );
 
     const itemIds = dto.resources.map((r) => r.itemId);
@@ -366,6 +453,7 @@ export class ReservationsService {
                 projectName: dto.projectName ?? null,
                 entityId: dto.entityId ?? null,
                 entityName: dto.entityName ?? null,
+                requesterWorkspaceId,
                 startDate: slot.startDate,
                 endDate: slot.endDate,
                 status,
@@ -406,6 +494,7 @@ export class ReservationsService {
               projectName: dto.projectName ?? null,
               entityId: dto.entityId ?? null,
               entityName: dto.entityName ?? null,
+              requesterWorkspaceId,
               startDate,
               endDate,
               status,
@@ -551,7 +640,14 @@ export class ReservationsService {
 
   // ─── approve consumable ──────────────────────────────────────────────────────
 
-  async approveConsumable(reservationId: number, performedBy?: number, quantity?: number) {
+  async approveConsumable(
+    reservationId: number,
+    performedBy?: number,
+    quantity?: number,
+    actor?: WarehouseActor,
+  ) {
+    // Handing stock out is the shelf owner's decision, not the asker's.
+    await this.assertMay(actor, reservationId, 'reservation.approve');
     const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id: reservationId },
       include: { item: true },
@@ -813,7 +909,9 @@ export class ReservationsService {
 
   // ─── cancel ──────────────────────────────────────────────────────────────────
 
-  async cancel(reservationId: number, performedBy?: number, reason?: string) {
+  async cancel(reservationId: number, performedBy?: number, reason?: string, actor?: WarehouseActor) {
+    // Either party may walk away from an arrangement they are part of.
+    await this.assertMay(actor, reservationId, 'reservation.cancel');
     const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id: reservationId },
     });
@@ -862,7 +960,8 @@ export class ReservationsService {
 
   // ─── uncancel ────────────────────────────────────────────────────────────────
 
-  async uncancel(reservationId: number, performedBy?: number) {
+  async uncancel(reservationId: number, performedBy?: number, actor?: WarehouseActor) {
+    await this.assertMay(actor, reservationId, 'reservation.uncancel');
     const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id: reservationId },
     });
@@ -890,7 +989,9 @@ export class ReservationsService {
 
   // ─── reject ──────────────────────────────────────────────────────────────────
 
-  async reject(reservationId: number, performedBy?: number, reason?: string) {
+  async reject(reservationId: number, performedBy?: number, reason?: string, actor?: WarehouseActor) {
+    // Turning a request down is the shelf owner's answer to it.
+    await this.assertMay(actor, reservationId, 'reservation.reject');
     const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id: reservationId },
     });
@@ -1261,7 +1362,15 @@ export class ReservationsService {
 
   // ─── getOne ──────────────────────────────────────────────────────────────────
 
-  async getOne(id: number) {
+  async getOne(id: number, actor?: WarehouseActor) {
+    if (actor) {
+      const row = await this.prisma.resourceReservation.findUnique({
+        where: { id },
+        select: { taskId: true },
+      });
+      if (!row) throw new NotFoundException('Reservation not found');
+      await this.assertMayRead(actor, id, await this.isOnTask(row.taskId, actor.userId));
+    }
     return this.prisma.resourceReservation.findUnique({
       where: { id },
       include: {
@@ -1275,8 +1384,9 @@ export class ReservationsService {
 
   // ─── getTaskReservations ─────────────────────────────────────────────────────
 
-  async getTaskReservations(taskId: number) {
-    const reservations = await this.prisma.resourceReservation.findMany({
+  async getTaskReservations(taskId: number, actor?: WarehouseActor) {
+    const onTheTask = actor ? await this.isOnTask(taskId, actor.userId) : false;
+    const reservations0 = await this.prisma.resourceReservation.findMany({
       where: {
         taskId,
         // COMPLETED stays visible: a fully accepted reservation must keep its
@@ -1286,12 +1396,37 @@ export class ReservationsService {
         replacedByReservationId: null,
       },
       include: {
-        item: true,
+        // The category comes along because it is what says whose stock this is;
+        // the CRM card ignores it and the read rule above does not.
+        item: { include: { category: { select: { id: true, entityId: true, name: true } } } },
         allocations: { where: { releasedAt: null } },
         statusHistory: { orderBy: { performedAt: 'asc' } },
       },
       orderBy: { id: 'asc' },
     });
+
+    /*
+     * Who may see which of them. Being on the task is enough for all of them —
+     * those are the people holding the goods. Otherwise each row is judged on
+     * its own two companies, because one task can draw on several catalogues.
+     * A caller left with nothing, and not on the task, is told the task is not
+     * there: a stranger learns nothing by guessing task numbers.
+     */
+    const reservations = actor
+      ? reservations0.filter((r) =>
+          mayRead(
+            actor,
+            {
+              requester: r.requesterWorkspaceId ?? null,
+              stockOwner: (r as { item?: { category?: { entityId?: number } } }).item?.category?.entityId ?? null,
+            },
+            { onTheTask, warehouseViewer: isWarehouseViewer(actor) },
+          ),
+        )
+      : reservations0;
+    if (actor && !onTheTask && reservations0.length > 0 && reservations.length === 0) {
+      throw new NotFoundException('Task not found');
+    }
 
     // Group by itemId — HOUR items have one DB row per working day. COMPLETED
     // reservations each stand alone: folding one into an active group for the
