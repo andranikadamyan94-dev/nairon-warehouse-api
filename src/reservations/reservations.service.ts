@@ -78,7 +78,12 @@ export type ReservationRequestPreview = {
     /** How many reservation rows this line becomes — more than one for hourly items. */
     rows: number;
     stockOwnerWorkspaceId: number | null;
-    stockOwnerName: string | null;
+    /**
+     * The catalogue the item is filed under. NOT the company's name — this
+     * service holds catalogues and HR holds companies, so whoever draws a card
+     * resolves the company from stockOwnerWorkspaceId.
+     */
+    catalogueName: string | null;
     /** Free at the moment of asking. Not a promise; see availabilityIsInformational. */
     freeNow: boolean;
   }[];
@@ -833,7 +838,7 @@ export class ReservationsService {
         quantity: resource.quantity,
         rows: slots,
         stockOwnerWorkspaceId: item.category?.entityId ?? null,
-        stockOwnerName: item.category?.name ?? null,
+        catalogueName: item.category?.name ?? null,
         freeNow: !unavailableItemIds.has(item.id),
       });
     }

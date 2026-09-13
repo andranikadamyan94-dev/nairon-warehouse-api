@@ -21,7 +21,8 @@ export type ReturnPreview = {
   reservationStatus: string;
   requesterWorkspaceId: number | null;
   stockOwnerWorkspaceId: number | null;
-  stockOwnerName: string | null;
+  /** The catalogue, not the company — see ReservationRequestPreview. */
+  catalogueName: string | null;
   /** What was asked for originally. History, never a counter. */
   requested: number;
   /** Everything that has ever left the shelf against this request. */
@@ -128,7 +129,7 @@ export class ResourceReturnsService {
       reservationStatus: reservation.status,
       requesterWorkspaceId: parties.requester,
       stockOwnerWorkspaceId: parties.stockOwner,
-      stockOwnerName: reservation.item.category?.name ?? null,
+      catalogueName: reservation.item.category?.name ?? null,
       requested: q.requested,
       issued: q.issued,
       returned: q.returned,
