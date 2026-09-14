@@ -21,6 +21,12 @@ export class CreateItemDto {
   @IsString()
   name: string;
 
+  @ApiPropertyOptional({ description: 'A second name shown on hover and searched like the first; null clears it' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  secondaryName?: string | null;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
