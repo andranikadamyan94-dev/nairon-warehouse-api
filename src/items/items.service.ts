@@ -46,8 +46,15 @@ export class ItemsService {
       ...(categoryFilter ? { categoryId: { in: categoryFilter } } : {}),
       ...(query?.uncategorized === '1' ? { categoryId: null } : {}),
       ...(query?.type ? { type: query.type } : {}),
+      // Either name, or the code — people search by whichever they know.
       ...(query?.search
-        ? { name: { contains: query.search, mode: 'insensitive' } }
+        ? {
+            OR: [
+              { name: { contains: query.search, mode: 'insensitive' } },
+              { secondaryName: { contains: query.search, mode: 'insensitive' } },
+              { code: { contains: query.search, mode: 'insensitive' } },
+            ],
+          }
         : {}),
     };
 

@@ -91,6 +91,9 @@ model Item {
   uuid String @unique @default(uuid())
 
   name String
+  /// A second name for the same thing — the supplier's wording, a brand, the
+  /// Russian/English term people also search by. Shown on hover in the list.
+  secondaryName String?
   code String? @unique
 
   type ItemType
