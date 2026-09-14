@@ -47,8 +47,30 @@ export class ProcurementController {
   @Permissions('manage_procurement')
   @Post()
   @ApiOperation({ summary: 'Create procurement order' })
-  create(@Body() dto: CreateProcurementDto, @LoggedInUser('id') userId?: number) {
-    return this.procurementService.create(dto, userId);
+  create(@Body() dto: CreateProcurementDto, @LoggedInUser('id') userId?: number, @Req() req?: any) {
+    const active = Number(req?.headers?.['x-entity-id'] ?? 0);
+    return this.procurementService.create(dto, userId, active > 0 ? active : null);
+  }
+
+  /**
+   * Change which organization an order was bought for. Super-admins only —
+   * this is the correction tool for orders placed before orders carried an
+   * organization at all. The order's finance transfers follow, unless they
+   * are already booked.
+   */
+  // The guard only resolves who the caller is when a route names permissions,
+  // so this one asks for the procurement permission and the service then
+  // insists on a super-admin.
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_procurement')
+  @Patch(':id/entity')
+  @ApiOperation({ summary: "Re-file an order under another organization (super-admin)" })
+  setEntity(
+    @Param('id', ParseIntPipe) id: number,
+    @Body('entityId') entityId: number | null,
+    @Req() req: any,
+  ) {
+    return this.procurementService.setEntity(id, entityId ?? null, !!req.isSuperAdmin);
   }
 
   @UseGuards(PermissionGuard)

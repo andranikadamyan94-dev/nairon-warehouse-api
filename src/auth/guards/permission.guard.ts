@@ -17,7 +17,14 @@ export const Permissions = (...permissions: string[]) =>
  * warehouse super-permission deliberately does NOT satisfy routes that only
  * procurement rights may open. Everything else it still covers.
  */
-const PROCUREMENT_ONLY = new Set(['view_procurement', 'manage_procurement']);
+const PROCUREMENT_ONLY = new Set([
+  'view_procurement',
+  'manage_procurement',
+  // Filing and approving purchase requisitions are organization decisions,
+  // not warehouse ones.
+  'create_purchase_requisition',
+  'approve_purchase_requisition',
+]);
 
 /**
  * Route-level permission check. Relies on the global AuthGuard having set
