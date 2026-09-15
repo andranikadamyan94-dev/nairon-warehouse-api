@@ -13,6 +13,8 @@ import { FileService } from '../common/file.service';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
 import { ReceiveDeliveryDto } from './dto/receive-delivery.dto';
+import { requireInternalSecret } from '../common/internal-headers';
+import { requireFinanceUrl } from '../common/finance-url';
 
 const include = {
   supplier: true,
@@ -457,13 +459,13 @@ export class ProcurementService {
     if (!transferId) return;
     if (Math.abs(balanceAuthorized - balanceDue) < 0.005) return; // nothing to correct
 
-    const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
+    const financeUrl = requireFinanceUrl();
     try {
       const res = await fetch(`${financeUrl}/api/transfer/external/${transferId}/amount`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          'x-internal-secret': process.env.INTERNAL_SECRET || '',
+          'x-internal-secret': requireInternalSecret(),
         },
         body: JSON.stringify({ amount: balanceDue, reason }),
       });
@@ -565,12 +567,12 @@ export class ProcurementService {
         ProcurementOrderStatus.ORDERED,
       ].includes(status)
     ) {
-      const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
+      const financeUrl = requireFinanceUrl();
       const res = await fetch(`${financeUrl}/api/transfer/external/cancel-by-ref`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          'x-internal-secret': process.env.INTERNAL_SECRET || '',
+          'x-internal-secret': requireInternalSecret(),
         },
         body: JSON.stringify({
           externalRef: `warehouse_procurement:${id}`,
@@ -713,7 +715,7 @@ export class ProcurementService {
       );
     }
 
-    const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
+    const financeUrl = requireFinanceUrl();
     const internalKey = process.env.INTERNAL_SECRET || '';
     console.log(
       `[procurement:finalize] calling finance-api: POST ${financeUrl}/api/transfer/external | key_set=${!!internalKey} | key_len=${internalKey.length}`,

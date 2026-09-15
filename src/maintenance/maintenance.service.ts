@@ -11,6 +11,8 @@ import { UpdateMaintenanceRecordDto } from './dto/update-maintenance-record.dto'
 import { WarehouseActor } from '../auth/actor';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 import { TxClient } from '../common/operations/operations.service';
+import { requireInternalSecret } from '../common/internal-headers';
+import { requireFinanceUrl } from '../common/finance-url';
 
 const include = {
   asset: { include: { item: true } },
@@ -118,7 +120,7 @@ export class MaintenanceService {
       );
     }
 
-    const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
+    const financeUrl = requireFinanceUrl();
     const maintainer = record.maintainer ? ` — ${record.maintainer.name}` : '';
 
     /**
@@ -135,7 +137,7 @@ export class MaintenanceService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-internal-secret': process.env.INTERNAL_SECRET || '',
+          'x-internal-secret': requireInternalSecret(),
         },
         body: JSON.stringify({
           amount: value,

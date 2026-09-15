@@ -33,6 +33,7 @@ import {
 import { CreateReservationDto } from './dto/create-reservation.dto';
 import { AllocateReservationDto } from './dto/allocate-reservation.dto';
 import { ReallocateResourceDto } from './dto/reallocate-resource.dto';
+import { requireInternalSecret } from '../common/internal-headers';
 
 const INACTIVE_STATUSES = [
   ResourceReservationStatus.CANCELLED,
@@ -320,7 +321,7 @@ export class ReservationsService {
     const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
     try {
       const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
-        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+        headers: { 'x-internal-secret': requireInternalSecret() },
       });
       if (!res.ok) {
         this.logger.warn(`CRM task lookup failed for task ${taskId}: ${res.status}`);
@@ -1356,7 +1357,7 @@ export class ReservationsService {
     let task: any;
     try {
       const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
-        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+        headers: { 'x-internal-secret': requireInternalSecret() },
       });
       if (!res.ok) throw new Error(String(res.status));
       task = await res.json();
@@ -1469,7 +1470,7 @@ export class ReservationsService {
     if (!crmUrl) return null;
     try {
       const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
-        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET ?? '' },
+        headers: { 'x-internal-secret': requireInternalSecret() },
       });
       if (!res.ok) return null;
       const body = (await res.json()) as { title?: string };
@@ -1767,7 +1768,7 @@ export class ReservationsService {
     let taskIds: number[] = [];
     try {
       const res = await fetch(`${crmUrl}/api/project-tasks/internal/assigned/${userId}`, {
-        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+        headers: { 'x-internal-secret': requireInternalSecret() },
       });
       if (res.ok) {
         const body = (await res.json()) as { taskIds?: number[] };

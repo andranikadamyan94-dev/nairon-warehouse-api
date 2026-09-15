@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { requireInternalSecret } from '../common/internal-headers';
 
 @Injectable()
 export class UsersService {
@@ -18,7 +19,7 @@ export class UsersService {
     // Auth's user routes are service-to-service and authenticate with the
     // shared internal secret the rest of the platform already uses.
     const res = await fetch(`${this.authApiUrl}/api/users?limit=10000`, {
-      headers: { 'x-internal-secret': process.env.INTERNAL_SECRET ?? '' },
+      headers: { 'x-internal-secret': requireInternalSecret() },
     });
     return res.json();
   }
