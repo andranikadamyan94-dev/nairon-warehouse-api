@@ -409,6 +409,15 @@ model MaintenanceRecord {
   financeTransferId    Int?
   prepaymentTransferId Int?
 
+  /// Which submission attempt the finance operation keys belong to.
+  ///
+  /// Constant at 1 today, on purpose: `finalize` accepts only a DRAFT record
+  /// and nothing moves a FINANCE_REJECTED one back to DRAFT, so a maintenance
+  /// job cannot be resubmitted after finance refuses it. The column exists so
+  /// that if such a path is ever added, bumping this is the whole change — the
+  /// alternative is a reopened job silently reusing a spent key.
+  financeAttempt       Int      @default(1)
+
   /// Why finance turned the job down. See ProcurementOrder for the same field —
   /// finance sends this on the rejection callback and it was being discarded.
   financeRejectionReason String?
@@ -512,6 +521,15 @@ model ProcurementOrder {
   prepaymentAmount  Float?
   createdBy         Int?
   financeTransferId Int?
+
+  /// Which submission attempt the finance operation keys belong to.
+  ///
+  /// `resubmit` is a deliberate business decision to raise the money again
+  /// after finance refused it, so it increments this and the next finalize
+  /// carries fresh keys. A `finalize` that failed halfway does NOT — the order
+  /// is still on the same attempt, and retrying it must land on the transfers
+  /// that were already created rather than beside them.
+  financeAttempt    Int       @default(1)
 
   /// Why finance turned the order down. Finance has always sent this on the
   /// rejection callback; there was nowhere to put it, so the warehouse showed a

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { Workspace } from '../../auth/actor';
+import { requireInternalSecret } from '../internal-headers';
 
 /**
  * Who asked, according to the service that knows.
@@ -31,7 +32,7 @@ export class RequesterWorkspaceService {
   }
 
   private get secret(): string {
-    return process.env.INTERNAL_SECRET || '';
+    return requireInternalSecret();
   }
 
   /**

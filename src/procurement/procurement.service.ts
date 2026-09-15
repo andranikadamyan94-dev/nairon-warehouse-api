@@ -15,6 +15,7 @@ import { WarehouseNotificationsService } from '../common/notifications/notificat
 import { ReceiveDeliveryDto } from './dto/receive-delivery.dto';
 import { requireInternalSecret } from '../common/internal-headers';
 import { requireFinanceUrl } from '../common/finance-url';
+import { transferOperationKey } from '../common/operation-key';
 
 const include = {
   supplier: true,
@@ -681,6 +682,17 @@ export class ProcurementService {
     return closed;
   }
 
+  /**
+   * Raise the money again after finance refused it.
+   *
+   * This is the ONE place a procurement order becomes a new financial attempt,
+   * which is why the counter lives here and not in `finalize`. Finance's
+   * refusal is history: the rejected transfers stay exactly as they are, and
+   * the next finalize writes new rows under the same `externalRef` with new
+   * operation keys. Bumping the counter is what makes those rows possible —
+   * without it the resubmission would collide with the attempt finance already
+   * turned down.
+   */
   async resubmit(id: number) {
     const order = await this.findOne(id);
     if (order.status !== ProcurementOrderStatus.FINANCE_REJECTED) {
@@ -692,7 +704,11 @@ export class ProcurementService {
       where: { id },
       // Back to a draft, so the previous rejection reason no longer describes
       // it — leaving it would attach finance's old objection to a fresh order.
-      data: { status: ProcurementOrderStatus.DRAFT, financeRejectionReason: null },
+      data: {
+        status: ProcurementOrderStatus.DRAFT,
+        financeRejectionReason: null,
+        financeAttempt: { increment: 1 },
+      },
       include,
     });
   }
@@ -716,10 +732,11 @@ export class ProcurementService {
     }
 
     const financeUrl = requireFinanceUrl();
-    const internalKey = process.env.INTERNAL_SECRET || '';
-    console.log(
-      `[procurement:finalize] calling finance-api: POST ${financeUrl}/api/transfer/external | key_set=${!!internalKey} | key_len=${internalKey.length}`,
-    );
+    // Was `process.env.INTERNAL_SECRET || ''`, which sent a blank credential
+    // from an unconfigured service — and logged the secret's length next to it.
+    // Neither belongs on a route that creates money.
+    const internalKey = requireInternalSecret();
+    console.log(`[procurement:finalize] calling finance-api: POST ${financeUrl}/api/transfer/external`);
 
     const supplierSuffix = order.supplier ? ` — ${order.supplier.name}` : '';
 
@@ -728,6 +745,13 @@ export class ProcurementService {
      * suffix on the ref so finance can tell the two apart without a lookup —
      * everything that parses the ref reads the id from `split(':')[1]`, which
      * is unchanged.
+     *
+     * The ref says which order; the operation key says which send. That is
+     * what makes the retry described below safe: the comment under it used to
+     * admit that retrying a half-failed finalize "would duplicate it" and
+     * offer, as consolation, that somebody would probably spot the duplicate
+     * in the approval queue. Now the deposit that already exists comes back
+     * instead of being raised twice.
      */
     const raise = async (
       amount: number,
@@ -747,8 +771,15 @@ export class ProcurementService {
             kind === 'PREPAYMENT'
               ? `warehouse_procurement:${id}:prepayment`
               : `warehouse_procurement:${id}`,
+          operationKey: transferOperationKey(
+            'warehouse_procurement',
+            id,
+            kind,
+            order.financeAttempt,
+          ),
           paymentKind: kind,
-          date: new Date().toISOString(),
+          // Deliberately no date — see maintenance.finalize for why the send
+          // time must not become part of the operation's identity.
         }),
       });
       const body = await res.text();
@@ -766,9 +797,10 @@ export class ProcurementService {
     try {
       if (prepayment > 0) {
         // The deposit first: if the balance call then fails the order stays in
-        // DRAFT and finalize can be retried, which would duplicate it. The
-        // duplicate is visible in the finance queue and rejectable, whereas an
-        // order that can never be finalized is not.
+        // DRAFT and finalize can be retried. That retry used to duplicate the
+        // deposit, and the defence was that somebody would notice it in the
+        // approval queue. It now carries the same operation key and finance
+        // hands back the row it already created.
         prepaymentTransferId = await raise(prepayment, 'PREPAYMENT', 'Կանխավճար — գնման պատվեր');
         // A fully prepaid order has nothing left to bill. Raising a zero
         // transfer would put a meaningless row in the approval queue for

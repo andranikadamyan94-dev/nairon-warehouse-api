@@ -13,6 +13,7 @@ import { ResourceWorkspaceService } from '../common/workspace/resource-workspace
 import { TxClient } from '../common/operations/operations.service';
 import { requireInternalSecret } from '../common/internal-headers';
 import { requireFinanceUrl } from '../common/finance-url';
+import { transferOperationKey } from '../common/operation-key';
 
 const include = {
   asset: { include: { item: true } },
@@ -127,6 +128,13 @@ export class MaintenanceService {
      * Raise one transfer in finance. The deposit carries a ":prepayment" suffix
      * on the ref so finance can tell the two apart; everything that parses the
      * ref reads the id from split(':')[1], which is unchanged.
+     *
+     * The ref says which job. The operation key says which send — so the
+     * retry that follows "deposit created, balance failed" lands on the
+     * deposit that already exists instead of raising a second one. That
+     * duplicate was not hypothetical: it is the failure the old code shipped
+     * with, and the only thing standing between it and the approval queue was
+     * somebody noticing.
      */
     const raise = async (
       value: number,
@@ -146,8 +154,18 @@ export class MaintenanceService {
             kind === 'PREPAYMENT'
               ? `warehouse_maintenance:${id}:prepayment`
               : `warehouse_maintenance:${id}`,
+          operationKey: transferOperationKey(
+            'warehouse_maintenance',
+            id,
+            kind,
+            record.financeAttempt,
+          ),
           paymentKind: kind,
-          date: new Date().toISOString(),
+          // No date on purpose. It was `new Date()` here, which is what finance
+          // uses anyway when none is given — but sending it made the send time
+          // part of the operation's identity, so a retry that crossed midnight
+          // would have looked like different money. Warehouse has no opinion
+          // about the date, and now says so.
         }),
       });
       const body = await res.text();
