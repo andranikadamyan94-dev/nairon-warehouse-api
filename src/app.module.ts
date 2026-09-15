@@ -28,6 +28,7 @@ import { SuppliersModule } from './suppliers/suppliers.module';
 import { MaintainersModule } from './maintainers/maintainers.module';
 import { ProcurementModule } from './procurement/procurement.module';
 import { ResourceReturnsModule } from './resource-returns/resource-returns.module';
+import { FilesModule } from './files/files.module';
 
 @Global()
 @Module({
@@ -54,6 +55,7 @@ import { ResourceReturnsModule } from './resource-returns/resource-returns.modul
     MaintainersModule,
     ProcurementModule,
     ResourceReturnsModule,
+    FilesModule,
   ],
   controllers: [SourceController],
   providers: [

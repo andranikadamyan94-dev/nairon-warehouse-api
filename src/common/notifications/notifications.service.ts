@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as nodemailer from 'nodemailer';
 import { UsersPrismaService } from '../users-prisma.service';
+import { requireInternalSecret } from '../internal-headers';
 
 export interface WarehouseNotification {
   /** Who to reach: everyone holding any of these permissions (super-admins always included). */
@@ -95,7 +96,9 @@ export class WarehouseNotificationsService {
 
   private async sendInApp(userIds: number[], n: WarehouseNotification, url: string): Promise<void> {
     const hrUrl = process.env.HR_SERVICE_URL || 'http://localhost:3001';
-    const secret = process.env.INTERNAL_SECRET || 'nairon-internal';
+    // Was a fallback to the literal 'nairon-internal' — a string from this
+    // repository, sent as a credential whenever the variable was unset.
+    const secret = requireInternalSecret();
 
     const results = await Promise.allSettled(
       userIds.map((userId) =>

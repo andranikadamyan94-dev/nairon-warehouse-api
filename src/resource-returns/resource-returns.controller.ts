@@ -21,9 +21,17 @@ export class ResourceReturnsController {
     private readonly operations: OperationsService,
   ) {}
 
+  /**
+   * `view_warehouse` dropped here for the same reason as on reservation
+   * create: `@Permissions` is ANY-OF, so pairing it with a manage right let a
+   * viewing permission file returns and call them off — and the two-party rule
+   * behind it is a no-op while every account is unbounded by role. See
+   * reservations.controller.ts for the full reasoning and the policy question
+   * it leaves open.
+   */
   @Post()
   @UseGuards(PermissionGuard)
-  @Permissions('view_warehouse', 'manage_resource_returns')
+  @Permissions('manage_resource_returns')
   async create(
     @Body() dto: CreateReturnDto,
     @Actor() actor: WarehouseActor,
@@ -46,7 +54,7 @@ export class ResourceReturnsController {
    */
   @Post('preflight/create')
   @UseGuards(PermissionGuard)
-  @Permissions('view_warehouse', 'manage_resource_returns')
+  @Permissions('manage_resource_returns')
   async preflightCreate(@Body() dto: CreateReturnDto, @Actor() actor: WarehouseActor) {
     return { ...PREFLIGHT_OK, request: await this.service.previewCreate(dto, actor) };
   }
@@ -76,7 +84,7 @@ export class ResourceReturnsController {
 
   @Patch(':id/cancel')
   @UseGuards(PermissionGuard)
-  @Permissions('view_warehouse', 'manage_resource_returns')
+  @Permissions('manage_resource_returns')
   cancel(@Param('id') id: string, @Actor() actor: WarehouseActor) {
     return this.service.cancel(+id, actor);
   }

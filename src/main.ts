@@ -1,3 +1,4 @@
+import { assertJwtConfigured } from './auth/constants';
 import * as path from 'path';
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
@@ -9,15 +10,29 @@ import { PrismaExceptionFilter } from './common/filters/prisma-exception.filter'
 import { armenianValidationPipe } from './common/validation-messages';
 
 async function bootstrap() {
+  // A signing key has no safe default; refuse to start rather than fall back
+  // to one published in this repository. See auth/constants.ts.
+  assertJwtConfigured();
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   (app.getHttpServer() as any).maxHeaderSize = 65536;
-  // Served under both prefixes. The gateway strips its /warehouse segment and
-  // prepends /api before proxying, so a client resolving a stored "/uploads/x"
-  // against its API base arrives here as /api/uploads/x. The bare /uploads
-  // mount is kept so absolute URLs stored before this change still resolve.
-  const uploadsDir = path.join(process.cwd(), 'uploads');
-  app.useStaticAssets(uploadsDir, { prefix: '/uploads' });
-  app.useStaticAssets(uploadsDir, { prefix: '/api/uploads' });
+  /*
+   * Receipts are no longer served straight off the directory.
+   *
+   * There were two static mounts here, `/uploads` and `/api/uploads`, and both
+   * are express middleware rather than routes — so neither AuthGuard nor
+   * PermissionGuard ever ran on them. Every procurement and delivery receipt,
+   * with its supplier, quantities and prices, was readable by anyone who could
+   * reach the service with the URL, signed in or not.
+   *
+   * Both forms still resolve: the gateway strips its /warehouse segment and
+   * prepends /api, and a stored "/uploads/x" resolved against a client's API
+   * base arrives as one or the other. They now reach the authorized route in
+   * files/files.controller.ts instead of the filesystem.
+   */
+  app.use((req: any, _res: any, next: () => void) => {
+    if (typeof req.url === 'string' && req.url.startsWith('/uploads/')) req.url = `/api${req.url}`;
+    next();
+  });
 
   app.enableCors({
     origin: [
