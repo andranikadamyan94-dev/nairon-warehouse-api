@@ -1,3 +1,4 @@
+import { roundQty } from '../common/quantity';
 import {
   BadRequestException,
   ForbiddenException,
@@ -417,7 +418,7 @@ export class PurchaseRequisitionsService {
     }
     // One order line per item — merge duplicates.
     const byItem = new Map<number, number>();
-    for (const l of req.lines) byItem.set(l.itemId!, (byItem.get(l.itemId!) ?? 0) + l.quantity);
+    for (const l of req.lines) byItem.set(l.itemId!, roundQty((byItem.get(l.itemId!) ?? 0) + l.quantity));
 
     const result = await this.prisma.$transaction(async (tx) => {
       const order = await tx.procurementOrder.create({

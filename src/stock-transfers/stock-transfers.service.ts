@@ -1,3 +1,5 @@
+import { settleStoredQty } from '../common/stored-quantity';
+import { roundQty } from '../common/quantity';
 import {
   BadRequestException,
   Injectable,
@@ -35,13 +37,15 @@ export class StockTransfersService {
     createdBy?: number,
   ) {
     const direction = dto.direction === 'TO_MAIN' ? 'TO_MAIN' : 'TO_SUB';
-    const lines = (dto.items ?? []).map((l) => ({ itemId: Number(l.itemId), quantity: Number(l.quantity) }));
+    // Fractional since 2026-09-15 (three decimals); asset lines are checked
+    // for whole units where the item type is known, in confirm().
+    const lines = (dto.items ?? []).map((l) => ({ itemId: Number(l.itemId), quantity: roundQty(Number(l.quantity)) }));
     if (!lines.length) {
       throw new BadRequestException('Ավելացրեք գոնե մեկ ապրանք');
     }
     for (const l of lines) {
-      if (!Number.isInteger(l.quantity) || l.quantity < 1) {
-        throw new BadRequestException('Քանակը պետք է լինի ամբողջ դրական թիվ');
+      if (!(l.quantity > 0)) {
+        throw new BadRequestException('Քանակը պետք է լինի դրական թիվ');
       }
     }
     if (new Set(lines.map((l) => l.itemId)).size !== lines.length) {
@@ -84,6 +88,9 @@ export class StockTransfersService {
         const destWh = direction === 'TO_SUB' ? wh.id : null;
 
         if (item.type === ItemType.ASSET) {
+          if (!Number.isInteger(l.quantity)) {
+            throw new BadRequestException(`«${item.name}»՝ ակտիվների քանակը պետք է լինի ամբողջ թիվ`);
+          }
           // Move N transferable rows (AVAILABLE, no active allocation).
           const candidates = await tx.asset.findMany({
             where: {
@@ -123,6 +130,8 @@ export class StockTransfersService {
               update: { quantity: { increment: l.quantity } },
               create: { warehouseId: wh.id, itemId: l.itemId, quantity: l.quantity },
             });
+            await settleStoredQty(tx, { itemId: l.itemId });
+            await settleStoredQty(tx, { itemId: l.itemId, warehouseId: wh.id });
           } else {
             const dec = await tx.warehouseStock.updateMany({
               where: { warehouseId: wh.id, itemId: l.itemId, quantity: { gte: l.quantity } },
@@ -135,6 +144,8 @@ export class StockTransfersService {
               where: { id: l.itemId },
               data: { quantity: { increment: l.quantity } },
             });
+            await settleStoredQty(tx, { itemId: l.itemId });
+            await settleStoredQty(tx, { itemId: l.itemId, warehouseId: wh.id });
           }
         }
 

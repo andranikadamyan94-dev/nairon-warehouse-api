@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsInt, IsOptional, IsString, Min } from 'class-validator';
+import { IsInt, IsNumber, IsOptional, IsPositive, IsString } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class CreateReturnDto {
@@ -9,8 +9,9 @@ export class CreateReturnDto {
   reservationId: number;
 
   @ApiProperty()
-  @IsInt()
-  @Min(1)
+  // Fractional since 2026-09-15 (0.3 kg comes back too).
+  @IsNumber()
+  @IsPositive()
   @Type(() => Number)
   quantity: number;
 

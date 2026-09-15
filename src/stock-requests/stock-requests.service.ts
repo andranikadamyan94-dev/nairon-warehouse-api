@@ -1,3 +1,4 @@
+import { roundQty } from '../common/quantity';
 import {
   BadRequestException,
   ForbiddenException,
@@ -62,18 +63,26 @@ export class StockRequestsService {
   }
 
   private async validateLines(items: { itemId: number; quantity: number }[]) {
-    const lines = (items ?? []).map((l) => ({ itemId: Number(l.itemId), quantity: Number(l.quantity) }));
+    // Fractional since 2026-09-15 (three decimals); assets stay whole units.
+    const lines = (items ?? []).map((l) => ({ itemId: Number(l.itemId), quantity: roundQty(Number(l.quantity)) }));
     if (!lines.length) throw new BadRequestException('Ավելացրեք գոնե մեկ ապրանք');
     for (const l of lines) {
-      if (!Number.isInteger(l.quantity) || l.quantity < 1) {
-        throw new BadRequestException('Քանակը պետք է լինի ամբողջ դրական թիվ');
+      if (!(l.quantity > 0)) {
+        throw new BadRequestException('Քանակը պետք է լինի դրական թիվ');
       }
     }
     if (new Set(lines.map((l) => l.itemId)).size !== lines.length) {
       throw new BadRequestException('Նույն ապրանքը կրկնվում է');
     }
-    const found = await this.prisma.item.count({ where: { id: { in: lines.map((l) => l.itemId) } } });
-    if (found !== lines.length) throw new NotFoundException('Ապրանքը չի գտնվել');
+    const found = await this.prisma.item.findMany({
+      where: { id: { in: lines.map((l) => l.itemId) } },
+      select: { id: true, type: true },
+    });
+    if (found.length !== lines.length) throw new NotFoundException('Ապրանքը չի գտնվել');
+    const assetIds = new Set(found.filter((i) => i.type === 'ASSET').map((i) => i.id));
+    if (lines.some((l) => assetIds.has(l.itemId) && !Number.isInteger(l.quantity))) {
+      throw new BadRequestException('Ակտիվների քանակը պետք է լինի ամբողջ թիվ');
+    }
     return lines;
   }
 

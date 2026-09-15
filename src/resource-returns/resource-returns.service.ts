@@ -1,3 +1,5 @@
+import { settleStoredQty } from '../common/stored-quantity';
+import { roundQty } from '../common/quantity';
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from 'prisma/prisma.service';
 import { CreateReturnDto } from './dto/create-return.dto';
@@ -79,7 +81,7 @@ export class ResourceReturnsService {
       _sum: { quantity: true },
     });
     const alreadyPending = pendingQty._sum.quantity ?? 0;
-    const returnable = issued - alreadyPending;
+    const returnable = roundQty(issued - alreadyPending);
     if (dto.quantity > returnable) {
       throw new BadRequestException(
         `Վերադարձվող քանակը (${dto.quantity}) գերազանցում է տրամադրված մնացորդը (${Math.max(0, returnable)})`,
@@ -160,13 +162,13 @@ export class ResourceReturnsService {
         } else {
           await tx.reservationAllocation.update({
             where: { id: alloc.id },
-            data: { quantity: rowQty - take },
+            data: { quantity: roundQty(rowQty - take) },
           });
           await tx.reservationAllocation.create({
             data: { reservationId: ret.reservationId, quantity: take, releasedAt: new Date() },
           });
         }
-        remaining -= take;
+        remaining = roundQty(remaining - take);
       }
       await tx.reservationAllocationHistory.create({
         data: {
@@ -177,7 +179,7 @@ export class ResourceReturnsService {
         },
       });
 
-      const newIssued = issued - ret.quantity;
+      const newIssued = roundQty(issued - ret.quantity);
       const prevStatus = ret.reservation.status as ResourceReservationStatus;
       let newStatus: ResourceReservationStatus;
       let dataPatch: any;
@@ -205,14 +207,15 @@ export class ResourceReturnsService {
             data: { quantity: { increment: ret.quantity } },
           });
         }
+        await settleStoredQty(tx, { itemId: ret.reservation.itemId, warehouseId: whId });
 
         // The request shrinks by what came back; acceptance can never exceed
         // either the new request or what is still out.
-        const newQuantity = Math.max(0, ret.reservation.quantity - ret.quantity);
+        const newQuantity = roundQty(Math.max(0, ret.reservation.quantity - ret.quantity));
         const accepted = (ret.reservation as any).acceptedQuantity ?? 0;
         // Returned goods are no longer kept: acceptance can exceed neither the
         // shrunken request nor what is still physically out.
-        const newAccepted = Math.min(accepted, newQuantity, newIssued);
+        const newAccepted = roundQty(Math.min(accepted, newQuantity, newIssued));
 
         if (newQuantity === 0 || newAccepted >= newQuantity) {
           newStatus = ResourceReservationStatus.COMPLETED;

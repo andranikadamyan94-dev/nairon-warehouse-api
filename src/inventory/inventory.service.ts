@@ -1,3 +1,4 @@
+import { roundQty } from '../common/quantity';
 import {
   BadRequestException,
   Injectable,
@@ -64,6 +65,7 @@ export class InventoryService {
         break;
     }
 
+    newQuantity = roundQty(newQuantity);
     if (newQuantity < 0) {
       throw new BadRequestException('Insufficient inventory quantity');
     }

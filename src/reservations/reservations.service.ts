@@ -1,3 +1,4 @@
+import { settleStoredQty } from '../common/stored-quantity';
 import {
   BadRequestException,
   ForbiddenException,
@@ -434,9 +435,10 @@ export class ReservationsService {
     const itemIds = dto.resources.map((r) => r.itemId);
     const items = await this.prisma.item.findMany({
       where: { id: { in: itemIds } },
-      select: { id: true, unit: true },
+      select: { id: true, unit: true, type: true },
     });
     const itemUnitMap = new Map(items.map((i) => [i.id, i.unit]));
+    this.normalizeQuantities(dto.resources, new Map(items.map((i) => [i.id, i.type])));
 
     const startDate = new Date(dto.startDate);
     const endDate = dto.endDate ? new Date(dto.endDate) : null;
@@ -670,6 +672,24 @@ export class ReservationsService {
 
   // ─── approve consumable ──────────────────────────────────────────────────────
 
+  /**
+   * Fractional quantities (2026-09-15): requests are rounded to the three
+   * decimals the warehouse measures and must be positive; assets are
+   * discrete units and stay whole.
+   */
+  private normalizeQuantities(
+    resources: { itemId: number; quantity: number }[],
+    itemTypeMap: Map<number, string | null | undefined>,
+  ) {
+    for (const r of resources) {
+      r.quantity = roundQty(r.quantity);
+      if (!(r.quantity > 0)) throw new BadRequestException('Քանակը պետք է լինի դրական թիվ');
+      if (itemTypeMap.get(r.itemId) === ItemType.ASSET && !Number.isInteger(r.quantity)) {
+        throw new BadRequestException('Ակտիվների քանակը պետք է լինի ամբողջ թիվ');
+      }
+    }
+  }
+
   async approveConsumable(reservationId: number, performedBy?: number, quantity?: number) {
     const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id: reservationId },
@@ -699,7 +719,7 @@ export class ReservationsService {
       where: { reservationId, releasedAt: null },
       _sum: { quantity: true },
     });
-    const outstanding = reservation.quantity - (alreadyAllocated._sum.quantity ?? 0);
+    const outstanding = roundQty(reservation.quantity - (alreadyAllocated._sum.quantity ?? 0));
     if (outstanding <= 0) {
       throw new BadRequestException(
         `Reservation ${reservationId} is already fully allocated`,
@@ -709,11 +729,10 @@ export class ReservationsService {
     // Deliberate partial issuance (#1880): staff may hand out part of the
     // request now — even with full stock on the shelf — and the remainder
     // stays open. No quantity means the old behavior: everything outstanding.
-    const toAllocate = quantity ?? outstanding;
-    // Integer only: quantities are Int columns — a fractional value would die
-    // in Prisma as a 500 instead of an honest 400.
-    if (!Number.isInteger(toAllocate) || toAllocate <= 0) {
-      throw new BadRequestException('Տրամադրվող քանակը պետք է լինի դրական ամբողջ թիվ');
+    // Fractional since 2026-09-15 (0.3 kg is a valid issue); three decimals.
+    const toAllocate = roundQty(quantity ?? outstanding);
+    if (!(toAllocate > 0)) {
+      throw new BadRequestException('Տրամադրվող քանակը պետք է լինի դրական թիվ');
     }
     if (toAllocate > outstanding) {
       throw new BadRequestException(
@@ -772,6 +791,7 @@ export class ReservationsService {
           data: { quantity: { decrement: toAllocate } },
         });
       }
+      await settleStoredQty(tx, { itemId: reservation.item.id, warehouseId: reservation.warehouseId });
 
       // #2042: freeze the cost at issuance — later price changes must not
       // rewrite this object's spend. The object was re-resolved above so a
@@ -870,8 +890,9 @@ export class ReservationsService {
     if (reservation.item.type !== ItemType.CONSUMABLE) {
       throw new BadRequestException('Միայն ապրանքային (ծախսվող) ամրագրումները կարող են ընդունվել');
     }
-    if (!Number.isInteger(quantity) || quantity <= 0) {
-      throw new BadRequestException('Ընդունվող քանակը պետք է լինի դրական ամբողջ թիվ');
+    quantity = roundQty(quantity);
+    if (!(quantity > 0)) {
+      throw new BadRequestException('Ընդունվող քանակը պետք է լինի դրական թիվ');
     }
 
     const { isSuperAdmin } = await this.usersPrisma.getUserAccessInfo(userId);
@@ -893,8 +914,8 @@ export class ReservationsService {
         where: { reservationId, releasedAt: null },
         _sum: { quantity: true },
       });
-      const issued = issuedAgg._sum.quantity ?? 0;
-      const acceptable = issued - (current.acceptedQuantity ?? 0);
+      const issued = roundQty(issuedAgg._sum.quantity ?? 0);
+      const acceptable = roundQty(issued - (current.acceptedQuantity ?? 0));
       if (acceptable <= 0) {
         throw new BadRequestException('Ընդունելու ենթակա տրամադրված քանակ չկա');
       }
@@ -909,8 +930,8 @@ export class ReservationsService {
         );
       }
 
-      const newAccepted = (current.acceptedQuantity ?? 0) + quantity;
-      const completes = newAccepted >= current.quantity;
+      const newAccepted = roundQty((current.acceptedQuantity ?? 0) + quantity);
+      const completes = newAccepted >= roundQty(current.quantity);
       const stamp = `[${new Date().toISOString().slice(0, 10)}] ${comment?.trim() ?? ''}`.trim();
 
       const landed = await this.prisma.$transaction(async (tx) => {
@@ -975,8 +996,9 @@ export class ReservationsService {
     if (reservation.item.type !== ItemType.CONSUMABLE) {
       throw new BadRequestException('Հետ վերցնելը կիրառելի է միայն ապրանքային ամրագրումների համար');
     }
-    if (!Number.isInteger(quantity) || quantity <= 0) {
-      throw new BadRequestException('Քանակը պետք է լինի դրական ամբողջ թիվ');
+    quantity = roundQty(quantity);
+    if (!(quantity > 0)) {
+      throw new BadRequestException('Քանակը պետք է լինի դրական թիվ');
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -984,9 +1006,9 @@ export class ReservationsService {
         where: { reservationId, releasedAt: null },
         orderBy: { id: 'desc' },
       });
-      const issued = active.reduce((s, a) => s + (a.quantity ?? 1), 0);
+      const issued = roundQty(active.reduce((s, a) => s + (a.quantity ?? 1), 0));
       const accepted = (reservation as any).acceptedQuantity ?? 0;
-      const reclaimable = issued - accepted;
+      const reclaimable = roundQty(issued - accepted);
       if (quantity > reclaimable) {
         throw new BadRequestException(
           `Հետ վերցվող քանակը (${quantity}) գերազանցում է տրամադրված չընդունված մնացորդը (${reclaimable})`,
@@ -1007,7 +1029,7 @@ export class ReservationsService {
         } else {
           await tx.reservationAllocation.update({
             where: { id: alloc.id },
-            data: { quantity: (alloc.quantity ?? 1) - take },
+            data: { quantity: roundQty((alloc.quantity ?? 1) - take) },
           });
           await tx.reservationAllocation.create({
             data: { reservationId, quantity: take, releasedAt: new Date() },
@@ -1039,6 +1061,7 @@ export class ReservationsService {
             data: { quantity: { increment: quantity } },
           });
         }
+        await settleStoredQty(tx, { itemId: reservation.itemId, warehouseId: reservation.warehouseId });
         const rc = await this.reverseCostInfo(tx, {
           taskId: reservation.taskId,
           itemId: reservation.itemId,
@@ -1063,7 +1086,7 @@ export class ReservationsService {
 
       // Acceptance-aware status: the reservation goes back to waiting for the
       // replacement issue (or plain APPROVED when nothing is out at all).
-      const newIssued = issued - quantity;
+      const newIssued = roundQty(issued - quantity);
       const newStatus =
         newIssued === 0 && accepted === 0
           ? ResourceReservationStatus.APPROVED
@@ -1298,6 +1321,7 @@ export class ReservationsService {
             data: { quantity: { increment: allocation.quantity } },
           });
         }
+        await settleStoredQty(tx, { itemId: allocation.reservation.itemId, warehouseId: whId });
         const rel = await this.reverseCostInfo(tx, {
           taskId: allocation.reservation.taskId,
           itemId: allocation.reservation.itemId,
@@ -1755,7 +1779,7 @@ export class ReservationsService {
           itemName: r.item.name,
           unit: r.item.unit ?? undefined,
           requestedQuantity: r.quantity,
-          allocatedQuantity: r.allocations.reduce((s, a) => s + (a.quantity ?? 1), 0),
+          allocatedQuantity: roundQty(r.allocations.reduce((s, a) => s + (a.quantity ?? 1), 0)),
           status: r.status,
           startTime: formatUTCasYerevan(r.startDate),
           endTime: formatUTCasYerevan(r.endDate),
@@ -1767,17 +1791,17 @@ export class ReservationsService {
 
       const startDate = group.reduce((min, r) => r.startDate < min ? r.startDate : min, first.startDate);
       const endDate = group.reduce((max, r) => r.endDate > max ? r.endDate : max, first.endDate);
-      const allocatedQuantity = group.reduce(
+      const allocatedQuantity = roundQty(group.reduce(
         (sum, r) => sum + r.allocations.reduce((s, a) => s + (a.quantity ?? 1), 0),
         0,
-      );
+      ));
       // The acceptance handshake (#1882): what is currently in the task's
       // hands (issued = unreleased allocations) vs what they've confirmed.
-      const issuedQuantity = group.reduce(
+      const issuedQuantity = roundQty(group.reduce(
         (sum, r) => sum + r.allocations.filter((a) => !a.releasedAt).reduce((s, a) => s + (a.quantity ?? 1), 0),
         0,
-      );
-      const acceptedQuantity = group.reduce((s, r) => s + ((r as any).acceptedQuantity ?? 0), 0);
+      ));
+      const acceptedQuantity = roundQty(group.reduce((s, r) => s + ((r as any).acceptedQuantity ?? 0), 0));
       return [{
         reservationId: first.id,
         itemId: first.itemId,
@@ -1820,6 +1844,7 @@ export class ReservationsService {
     });
     const itemUnitMap = new Map(items.map((i) => [i.id, i.unit]));
     const itemTypeMap = new Map(items.map((i) => [i.id, i.type]));
+    this.normalizeQuantities(dto.resources, itemTypeMap);
 
     const hourlySlots = new Map<number, DaySlot[]>();
     for (const resource of dto.resources) {
@@ -2006,7 +2031,7 @@ export class ReservationsService {
               else if (effectiveAllocCount >= targetQuantity) newStatus = ResourceReservationStatus.ALLOCATED;
               else newStatus = ResourceReservationStatus.PARTIALLY_ALLOCATED;
 
-              const quantityChanged = existing.quantity !== targetQuantity;
+              const quantityChanged = roundQty(existing.quantity) !== roundQty(targetQuantity);
               const statusChanged = existing.status !== newStatus;
 
               await tx.resourceReservation.update({
@@ -2119,7 +2144,7 @@ export class ReservationsService {
             else if (effectiveAllocCount >= targetQuantity) newStatus = ResourceReservationStatus.ALLOCATED;
             else newStatus = ResourceReservationStatus.PARTIALLY_ALLOCATED;
 
-            const quantityChanged = existing.quantity !== targetQuantity;
+            const quantityChanged = roundQty(existing.quantity) !== roundQty(targetQuantity);
             const statusChanged = existing.status !== newStatus;
 
             await tx.resourceReservation.update({
