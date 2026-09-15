@@ -420,7 +420,7 @@ export class ReservationsService {
     let task: any;
     try {
       const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
-        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+        headers: { 'x-internal-secret': requireInternalSecret() },
       });
       if (!res.ok) throw new Error(`CRM ${res.status}`);
       task = await res.json();
@@ -508,7 +508,7 @@ export class ReservationsService {
     const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
     try {
       const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
-        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || '' },
+        headers: { 'x-internal-secret': requireInternalSecret() },
       });
       if (!res.ok) return undefined;
       const task = (await res.json()) as any;
