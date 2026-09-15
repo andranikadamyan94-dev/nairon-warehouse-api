@@ -1,3 +1,4 @@
+import { settleStoredQty } from '../common/stored-quantity';
 import {
   BadRequestException,
   ForbiddenException,
@@ -403,6 +404,7 @@ export class ProcurementService {
               where: { id: line.itemId },
               data: { quantity: { increment: quantity } },
             });
+            await settleStoredQty(tx, { itemId: line.itemId });
           }
 
           await tx.procurementOrderItem.update({
