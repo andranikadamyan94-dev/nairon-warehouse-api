@@ -1375,9 +1375,15 @@ export class ReservationsService {
 
   // ─── cancel ──────────────────────────────────────────────────────────────────
 
-  async cancel(reservationId: number, performedBy?: number, reason?: string, actor?: WarehouseActor) {
-    // Either party may walk away from an arrangement they are part of.
-    await this.assertMay(actor, reservationId, 'reservation.cancel');
+  /**
+   * "Could this person walk away from this arrangement, right now?"
+   *
+   * The two checks `cancel` makes, in the same order, and nothing written.
+   * Both parties come from `assertMay`, which decides requester-side and
+   * stock-owner-side authority separately — see two-party.ts.
+   */
+  async assertCanCancel(reservationId: number, actor?: WarehouseActor) {
+    const parties = await this.assertMay(actor, reservationId, 'reservation.cancel');
     const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id: reservationId },
     });
@@ -1386,6 +1392,96 @@ export class ReservationsService {
     if (INACTIVE_STATUSES.includes(reservation.status as ResourceReservationStatus)) {
       throw new BadRequestException(`Reservation is already ${reservation.status}`);
     }
+    return { reservation, parties };
+  }
+
+  /**
+   * The ONE authoritative read a Strong PREPARE gets.
+   *
+   * WHY THE ALLOCATIONS CARRY THEIR QUANTITY AND NOT JUST THEIR ID
+   *
+   * An allocation row's `quantity` is rewritten in place when part of a
+   * consumable comes back — `allocations.service.ts` and
+   * `resource-returns.service.ts` both do
+   * `update({ where: { id }, data: { quantity: remaining } })`. So a set of ids
+   * is not a fingerprint of what cancelling would release: the same ids can
+   * mean six units one minute and two the next. `assetId` IS stable for a
+   * given id — every assetId in a `data:` block in this service tree is on a
+   * `create`, never on an update — and is carried anyway, so the material says
+   * WHICH physical things and not only how many.
+   *
+   * The item's name and the task's title are labels over ids that cannot move
+   * for this row. They are in `display` and deliberately not in `material`, so
+   * renaming a projector does not supersede somebody's agreement to release it.
+   */
+  async cancelSnapshot(reservationId: number, actor?: WarehouseActor) {
+    const { reservation, parties } = await this.assertCanCancel(reservationId, actor);
+
+    const item = await this.prisma.item.findUnique({
+      where: { id: reservation.itemId },
+      select: { id: true, name: true, unit: true, type: true },
+    });
+    const allocations = await this.prisma.reservationAllocation.findMany({
+      where: { reservationId, releasedAt: null },
+      select: { id: true, assetId: true, quantity: true },
+      orderBy: { id: 'asc' },
+    });
+    const task = reservation.taskId
+      ? { id: reservation.taskId, title: await this.taskTitle(reservation.taskId) }
+      : { id: null, title: null };
+
+    return {
+      auth: {
+        reservationId: reservation.id,
+        requesterWorkspaceId: parties.requester,
+        stockOwnerWorkspaceId: parties.stockOwner,
+      },
+      display: {
+        status: reservation.status,
+        item: item ?? { id: reservation.itemId, name: '—', unit: '', type: 'CONSUMABLE' },
+        quantity: reservation.quantity,
+        acceptedQuantity: reservation.acceptedQuantity,
+        startDate: reservation.startDate,
+        endDate: reservation.endDate,
+        task,
+        activeAllocations: allocations,
+      },
+      material: {
+        reservationId: reservation.id,
+        status: reservation.status,
+        itemId: reservation.itemId,
+        taskId: reservation.taskId ?? null,
+        quantity: reservation.quantity,
+        acceptedQuantity: reservation.acceptedQuantity,
+        startDate: reservation.startDate,
+        endDate: reservation.endDate,
+        requesterWorkspaceId: parties.requester,
+        stockOwnerWorkspaceId: parties.stockOwner,
+        /* Ascending by id, so the fingerprint never depends on read order. */
+        allocations: allocations.map((a) => ({ id: a.id, assetId: a.assetId ?? null, quantity: a.quantity })),
+      },
+    };
+  }
+
+  /** The task's name, for the card only. Never authority, and never material. */
+  private async taskTitle(taskId: number): Promise<string | null> {
+    const crmUrl = process.env.CRM_API_URL;
+    if (!crmUrl) return null;
+    try {
+      const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
+        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET ?? '' },
+      });
+      if (!res.ok) return null;
+      const body = (await res.json()) as { title?: string };
+      return body?.title ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async cancel(reservationId: number, performedBy?: number, reason?: string, actor?: WarehouseActor) {
+    // Either party may walk away from an arrangement they are part of.
+    const { reservation } = await this.assertCanCancel(reservationId, actor);
 
     return this.prisma.$transaction(async (tx) => {
       const activeAllocations = await tx.reservationAllocation.findMany({

@@ -166,6 +166,23 @@ export class ReservationsController {
     return this.reservationsService.accept(+id, userId, Number(body?.quantity), body?.comment);
   }
 
+  /**
+   * "Could this be cancelled, right now?" — behind the same guard as the
+   * mutation, calling the same assert, writing nothing and releasing nothing.
+   *
+   * It answers with the whole snapshot a confirmation card needs, because what
+   * cancelling actually does is release a specific set of allocations, and a
+   * caller that worked that out separately would be reading the world twice.
+   */
+  @Post(':id/preflight/cancel')
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
+  @ApiOperation({ summary: 'Could this reservation be cancelled right now — writes nothing' })
+  async preflightCancel(@Param('id') id: string, @Actor() actor: WarehouseActor) {
+    const snapshot = await this.reservationsService.cancelSnapshot(+id, actor);
+    return { ok: true as const, ...snapshot };
+  }
+
   // Cancel any active reservation, releasing any allocations
   @Patch(':id/cancel')
   @UseGuards(PermissionGuard)
