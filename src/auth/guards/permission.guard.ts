@@ -18,7 +18,14 @@ export const Permissions = (...permissions: string[]) =>
  * warehouse super-permission deliberately does NOT satisfy routes that only
  * procurement rights may open. Everything else it still covers.
  */
-const PROCUREMENT_ONLY = new Set(['view_procurement', 'manage_procurement']);
+const PROCUREMENT_ONLY = new Set([
+  'view_procurement',
+  'manage_procurement',
+  // Filing and approving purchase requisitions are organization decisions,
+  // not warehouse ones.
+  'create_purchase_requisition',
+  'approve_purchase_requisition',
+]);
 
 /**
  * Route-level permission check. Relies on the global AuthGuard having set
@@ -50,13 +57,32 @@ export class PermissionGuard implements CanActivate {
 
     const request = context.switchToHttp().getRequest();
     if (!request.user) throw new ForbiddenException('Access denied');
-    // Normally already resolved by AuthGuard; resolved here too so that this
-    // guard is still correct if it is ever mounted somewhere AuthGuard is not.
+    /*
+     * BOTH SIDES, because neither was complete on its own.
+     *
+     * FROM LOCAL — the actor is resolved through WarehouseActorService, which
+     * holds the caller to the workspace they declared. Remote still called
+     * `getUserAccessInfo(user.id)` with no entity at all, which in this
+     * service's query counts every assignment in every company: a person made
+     * warehouse manager of one company passed this guard for all of them.
+     * That is the defect Warehouse Domain Hardening closed, and taking
+     * remote's line whole would have reopened it.
+     *
+     * FROM REMOTE — `request.permissionNames`, which the new
+     * warehouse-membership scoping reads, and the two purchase-requisition
+     * names in PROCUREMENT_ONLY above. Taking local's line whole would have
+     * left the new features reading `undefined`.
+     *
+     * The names come from the actor rather than from a second database read,
+     * so the two can never disagree about who is asking.
+     */
     const actor: WarehouseActor = request.actor ?? (await this.actors.resolve(request));
     request.actor = actor;
     const { isSuperAdmin, permissionNames } = actor;
-    // Handlers with creator-or-admin rules (e.g. procurement cancel) read this.
+    // Handlers with creator-or-admin rules (e.g. procurement cancel) read the
+    // flag; warehouse-membership scoping reads the names.
     request.isSuperAdmin = isSuperAdmin;
+    request.permissionNames = permissionNames;
     if (isSuperAdmin) return true;
     const procurementOnly = required.every((p) => PROCUREMENT_ONLY.has(p));
     if (!procurementOnly && permissionNames.includes('manage_warehouse')) return true;

@@ -64,9 +64,12 @@ export class ResourceReturnsController {
     @Actor() actor: WarehouseActor,
     @Query('status') status?: ResourceReturnStatus,
     @Query('taskId') taskId?: string,
+    @Query('warehouseId') warehouseId?: string,
   ) {
+    // Remote filters by sub-warehouse; local scopes by who is asking. Both
+    // narrow, so both are passed.
     return this.service.findAll(
-      { status, taskId: taskId ? Number(taskId) : undefined },
+      { status, taskId: taskId ? Number(taskId) : undefined, warehouseId },
       actor,
     );
   }

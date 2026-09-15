@@ -4,4 +4,6 @@ export enum ItemUnit {
   METER = 'METER',
   PIECE = 'PIECE',
   HOUR = 'HOUR',
+  BOX = 'BOX',
+  LITER = 'LITER',
 }

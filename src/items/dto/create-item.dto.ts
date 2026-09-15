@@ -20,6 +20,12 @@ export class CreateItemDto {
   @IsString()
   name: string;
 
+  @ApiPropertyOptional({ description: 'A second name shown on hover and searched like the first; null clears it' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  secondaryName?: string | null;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -57,6 +63,16 @@ export class CreateItemDto {
   @IsNumber()
   @Min(0)
   minQuantity?: number | null;
+
+  /** #2042: current unit cost (AMD), frozen onto movements at write time.
+   *  Manually maintained until the cost-update policy is decided. */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Transform(({ value }) => (value === null || value === '' ? null : Number(value)))
+  @ValidateIf((_, value) => value !== null)
+  @IsNumber()
+  @Min(0)
+  unitCost?: number | null;
 
   @ApiPropertyOptional()
   @IsOptional()

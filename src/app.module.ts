@@ -29,6 +29,11 @@ import { MaintainersModule } from './maintainers/maintainers.module';
 import { ProcurementModule } from './procurement/procurement.module';
 import { ResourceReturnsModule } from './resource-returns/resource-returns.module';
 import { FilesModule } from './files/files.module';
+import { WarehousesModule } from './warehouses/warehouses.module';
+import { StockTransfersModule } from './stock-transfers/stock-transfers.module';
+import { StockRequestsModule } from './stock-requests/stock-requests.module';
+import { PurchaseRequisitionsModule } from './purchase-requisitions/purchase-requisitions.module';
+import { ObjectsModule } from './objects/objects.module';
 
 @Global()
 @Module({
@@ -56,6 +61,11 @@ import { FilesModule } from './files/files.module';
     ProcurementModule,
     ResourceReturnsModule,
     FilesModule,
+    WarehousesModule,
+    StockTransfersModule,
+    StockRequestsModule,
+    PurchaseRequisitionsModule,
+    ObjectsModule,
   ],
   controllers: [SourceController],
   providers: [

@@ -7,6 +7,33 @@ import { ResourceReservationStatus } from '../common/enums/resource-reservation-
 
 @Injectable()
 export class AllocationsService {
+  /** #2042: reverse flows mirror the ISSUANCE — frozen cost AND object.
+   *  taskId null matches only task-less rows (undefined would drop the filter). */
+  private async reverseCostInfo(
+    tx: any,
+    args: { taskId?: number | null; itemId: number; warehouseId?: number | null; fallbackObjectId?: number | null },
+  ): Promise<{ unitCost: number | null; objectId: number | null }> {
+    const lastOut = await tx.inventoryMovement.findFirst({
+      where: {
+        type: 'OUT',
+        itemId: args.itemId,
+        taskId: args.taskId ?? null,
+        warehouseId: args.warehouseId ?? null,
+      },
+      orderBy: { id: 'desc' },
+      select: { unitCost: true, objectId: true },
+    });
+    let unitCost = lastOut?.unitCost ?? null;
+    if (unitCost == null) {
+      const item = await tx.item.findUnique({ where: { id: args.itemId }, select: { unitCost: true } });
+      unitCost = item?.unitCost ?? null;
+    }
+    return {
+      unitCost,
+      objectId: lastOut ? (lastOut.objectId ?? null) : (args.fallbackObjectId ?? null),
+    };
+  }
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly stockAlerts: StockAlertService,
@@ -82,19 +109,39 @@ export class AllocationsService {
             });
           }
 
-          await tx.item.update({
-            where: { id: allocation.reservation.itemId },
-            data: { quantity: { increment: returnQty } },
-          });
+          // #1989: credit the pool the goods were issued from.
+          const whId = (allocation.reservation as any).warehouseId as number | null;
+          if (whId) {
+            await tx.warehouseStock.upsert({
+              where: { warehouseId_itemId: { warehouseId: whId, itemId: allocation.reservation.itemId } },
+              update: { quantity: { increment: returnQty } },
+              create: { warehouseId: whId, itemId: allocation.reservation.itemId, quantity: returnQty },
+            });
+          } else {
+            await tx.item.update({
+              where: { id: allocation.reservation.itemId },
+              data: { quantity: { increment: returnQty } },
+            });
+          }
           touchedItemIds.push(allocation.reservation.itemId);
 
+          const rc = await this.reverseCostInfo(tx, {
+            taskId: allocation.reservation.taskId,
+            itemId: allocation.reservation.itemId,
+            warehouseId: whId,
+            fallbackObjectId: (allocation.reservation as any).objectId ?? null,
+          });
           await tx.inventoryMovement.create({
             data: {
               itemId: allocation.reservation.itemId,
               quantity: returnQty,
               type: 'IN',
               taskId: allocation.reservation.taskId,
-              notes: `Returned from reservation #${allocation.reservationId}`,
+              warehouseId: whId,
+              objectId: rc.objectId,
+              unitCost: rc.unitCost,
+              totalCost: rc.unitCost != null ? returnQty * rc.unitCost : null,
+              notes: `Վերադարձ ամրագրում #${allocation.reservationId}-ից`,
             },
           });
         } else {
@@ -110,7 +157,7 @@ export class AllocationsService {
             reservationId: allocation.reservationId,
             assetId: allocation.assetId,
             action: 'RETURNED',
-            notes: `Returned ${returnQty} unit(s) to warehouse`,
+            notes: `${returnQty} հատ վերադարձվել է պահեստ`,
           },
         });
 
@@ -156,18 +203,38 @@ export class AllocationsService {
       });
 
       if (isConsumable) {
-        await tx.item.update({
-          where: { id: allocation.reservation.itemId },
-          data: { quantity: { increment: allocation.quantity } },
-        });
+        // #1989: credit the pool the goods were issued from.
+        const whId = (allocation.reservation as any).warehouseId as number | null;
+        if (whId) {
+          await tx.warehouseStock.upsert({
+            where: { warehouseId_itemId: { warehouseId: whId, itemId: allocation.reservation.itemId } },
+            update: { quantity: { increment: allocation.quantity } },
+            create: { warehouseId: whId, itemId: allocation.reservation.itemId, quantity: allocation.quantity },
+          });
+        } else {
+          await tx.item.update({
+            where: { id: allocation.reservation.itemId },
+            data: { quantity: { increment: allocation.quantity } },
+          });
+        }
 
+        const rel = await this.reverseCostInfo(tx, {
+          taskId: allocation.reservation.taskId,
+          itemId: allocation.reservation.itemId,
+          warehouseId: whId,
+          fallbackObjectId: (allocation.reservation as any).objectId ?? null,
+        });
         await tx.inventoryMovement.create({
           data: {
             itemId: allocation.reservation.itemId,
             quantity: allocation.quantity,
             type: 'IN',
             taskId: allocation.reservation.taskId,
-            notes: `Reservation #${allocation.reservationId} allocation cancelled`,
+            warehouseId: whId,
+            objectId: rel.objectId,
+            unitCost: rel.unitCost,
+            totalCost: rel.unitCost != null ? allocation.quantity * rel.unitCost : null,
+            notes: `Ամրագրում #${allocation.reservationId} — հատկացումը չեղարկված`,
           },
         });
 

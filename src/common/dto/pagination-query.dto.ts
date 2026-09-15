@@ -40,4 +40,17 @@ export class PaginationQueryDto {
   @IsOptional()
   @IsIn(['asc', 'desc'])
   sortOrder?: string;
+
+  // Reservations list only: paginate by task-group instead of by row, so a
+  // task's reservations always arrive complete (never split across pages).
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsIn(['1'])
+  groupByTask?: string;
+
+  /** #1989 workspaces: 'main' or a sub-warehouse id — scopes the list. */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  warehouseId?: string;
 }

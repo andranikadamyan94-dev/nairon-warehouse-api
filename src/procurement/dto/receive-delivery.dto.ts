@@ -37,4 +37,13 @@ export class ReceiveDeliveryDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  // Required in practice — the service rejects a blank one. Kept optional at
+  // the DTO level because multipart bodies bypass this class anyway (the
+  // controller assembles the DTO from strings) and the service owns the
+  // Armenian error message.
+  @ApiPropertyOptional({ description: 'Invoice/waybill № of the accompanying document. Required.' })
+  @IsOptional()
+  @IsString()
+  documentNumber?: string;
 }

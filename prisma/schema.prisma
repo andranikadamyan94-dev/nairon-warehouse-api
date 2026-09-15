@@ -81,6 +81,9 @@ enum ItemUnit {
   METER
   PIECE
   HOUR
+  /// 2026-09-13: տուփ / լիտր
+  BOX
+  LITER
 }
 
 model Item {
@@ -88,6 +91,9 @@ model Item {
   uuid String @unique @default(uuid())
 
   name String
+  /// A second name for the same thing — the supplier's wording, a brand, the
+  /// Russian/English term people also search by. Shown on hover in the list.
+  secondaryName String?
   code String? @unique
 
   type ItemType
@@ -102,6 +108,12 @@ model Item {
   /// ASSET's availability derives from its individual Asset rows, not this
   /// counter, so a threshold here would be meaningless.
   minQuantity Float?
+
+  /// #2042 cost layer: the CURRENT unit cost (AMD), snapshotted onto every
+  /// movement at write time. Manually maintained for now — the update policy
+  /// (weighted average at receive, last price, …) is a pending decision, and
+  /// changing it later only changes who writes this field.
+  unitCost Float?
 
   /// Set when a low-stock alert has been sent, cleared when stock recovers
   /// above the threshold. This is what makes the alert fire once per breach
@@ -121,11 +133,17 @@ model Item {
 
   inventoryMovements InventoryMovement[]
 
+  warehouseStock     WarehouseStock[]
+  stockTransferItems StockTransferItem[]
+  stockRequestItems  StockRequestItem[]
+  estimateLines      ObjectEstimateLine[]
+
   resourceReservations ResourceReservation[]
 
   procurementOrderItems ProcurementOrderItem[]
 
   supplierItems SupplierItem[]
+  requisitionLines PurchaseRequisitionLine[]
 
   categoryId Int?
 
@@ -146,6 +164,10 @@ model Asset {
 
   status AssetStatus @default(AVAILABLE)
 
+  /// #1989 wave 2: which warehouse holds this asset. NULL = main — every
+  /// pre-existing row; assets move between pools via stock transfers.
+  warehouseId Int?
+
   responsibleUserId Int?
 
   notes String?
@@ -157,6 +179,8 @@ model Asset {
 
   item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
+  warehouse Warehouse? @relation(fields: [warehouseId], references: [id])
+
   maintenanceRecords MaintenanceRecord[]
 
   allocations ReservationAllocation[]
@@ -167,6 +191,7 @@ model Asset {
 
   @@index([itemId])
   @@index([status])
+  @@index([warehouseId])
 }
 
 model InventoryMovement {
@@ -187,15 +212,243 @@ model InventoryMovement {
 
   notes String?
 
+  /// Sub-warehouse ledger dimension (#1989). NULL = the main warehouse — every
+  /// pre-existing row and every main-pool operation keeps writing null, so
+  /// history needed no repair.
+  warehouseId Int?
+
+  /// #2042: the construction object this movement attributes to (via the
+  /// task's object link, stamped at reservation create). One ledger row feeds
+  /// both the task view and the object view — no double booking.
+  objectId Int?
+
+  /// #2042 cost freeze: the item's unit cost AT WRITE TIME (AMD) and the
+  /// positive line value (|quantity| × unitCost). Never recomputed.
+  unitCost  Float?
+  totalCost Float?
+
   createdAt DateTime @default(now())
 
   // RELATIONS
 
-  item     Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
-  supplier Supplier? @relation(fields: [supplierId], references: [id])
+  item      Item       @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  supplier  Supplier?  @relation(fields: [supplierId], references: [id])
+  warehouse Warehouse? @relation(fields: [warehouseId], references: [id])
 
   @@index([itemId])
   @@index([type])
+  @@index([warehouseId])
+  @@index([objectId])
+}
+
+/// #1989 sub-warehouses. The MAIN row is identity only — its stock is and
+/// stays Item.quantity (no WarehouseStock rows); PROJECT warehouses hold
+/// stock in WarehouseStock and are replenished ONLY by transfer from main.
+model Warehouse {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  name String
+  code String @unique
+
+  type WarehouseType @default(PROJECT)
+
+  /// Responsible person (users-DB id).
+  responsibleId Int?
+
+  location String?
+
+  status WarehouseStatus @default(ACTIVE)
+
+  createdBy Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  backlogs      WarehouseBacklog[]
+  stock         WarehouseStock[]
+  transfersIn   StockTransfer[]      @relation("TransferTo")
+  movements     InventoryMovement[]
+  reservations  ResourceReservation[]
+  employees     WarehouseEmployee[]
+  assets        Asset[]
+  stockRequests StockRequest[]
+
+  @@index([type])
+  @@index([status])
+}
+
+enum WarehouseType {
+  MAIN
+  PROJECT
+}
+
+enum WarehouseStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// A CRM backlog («նախագիծ» in the team's language) is served by exactly one
+/// warehouse; a warehouse may serve many. Tasks resolve task→backlog→warehouse
+/// and are BLOCKED when their backlog is unlinked (user's call, 2026-09-03).
+model WarehouseBacklog {
+  id Int @id @default(autoincrement())
+
+  warehouseId Int
+  /// CRM Backlog id — cross-service reference, validated at link time.
+  backlogId   Int    @unique
+  /// Name snapshot so lists don't need a CRM round-trip.
+  backlogName String
+
+  createdAt DateTime @default(now())
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@index([warehouseId])
+}
+
+/// Consumable stock held by a PROJECT warehouse (main = Item.quantity).
+model WarehouseStock {
+  id Int @id @default(autoincrement())
+
+  warehouseId Int
+  itemId      Int
+
+  quantity Int @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  item      Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([warehouseId, itemId])
+  @@index([itemId])
+}
+
+/// Main ↔ project-warehouse stock transfer (#1989): one DOCUMENT with many
+/// item lines, mirroring the printed transfer-waybill form. Confirmed
+/// atomically per line: source pool down, destination up, paired movements.
+/// direction TO_SUB = main→sub (replenishment); TO_MAIN = sub→main (the
+/// correction/return path). toWarehouseId is ALWAYS the sub involved.
+model StockTransfer {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  toWarehouseId Int
+
+  direction String @default("TO_SUB")
+
+  transferDate DateTime @default(now())
+
+  comment String?
+
+  createdBy Int?
+  createdAt DateTime @default(now())
+
+  toWarehouse Warehouse           @relation("TransferTo", fields: [toWarehouseId], references: [id])
+  items       StockTransferItem[]
+
+  @@index([toWarehouseId])
+}
+
+model StockTransferItem {
+  id Int @id @default(autoincrement())
+
+  transferId Int
+  itemId     Int
+  quantity   Int
+
+  transfer StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  item     Item          @relation(fields: [itemId], references: [id])
+
+  @@index([transferId])
+  @@index([itemId])
+}
+
+/// Warehouse staff membership (#1989 wave 2): membership decides WHICH
+/// warehouses a user sees and operates; permissions still decide WHAT they
+/// can do inside. manage_warehouses / manage_warehouse / superadmin see all.
+model WarehouseEmployee {
+  id Int @id @default(autoincrement())
+
+  warehouseId Int
+  /// users-DB id
+  userId      Int
+
+  createdAt DateTime @default(now())
+
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@unique([warehouseId, userId])
+  @@index([userId])
+}
+
+/// A sub's resource request to main (#1989 wave 2): sub members file it,
+/// main (manage_stock_transfers) approves — which executes a TO_SUB transfer
+/// atomically — or rejects with a reason. Requester may cancel while pending.
+model StockRequest {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  /// the requesting sub
+  warehouseId Int
+
+  status String @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELLED
+
+  comment         String?
+  rejectionReason String?
+
+  createdBy Int?
+  decidedBy Int?
+  decidedAt DateTime?
+
+  /// the transfer executed on approval
+  transferId Int?
+
+  createdAt DateTime @default(now())
+
+  warehouse Warehouse          @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  items     StockRequestItem[]
+
+  @@index([warehouseId])
+  @@index([status])
+}
+
+model StockRequestItem {
+  id Int @id @default(autoincrement())
+
+  requestId Int
+  itemId    Int
+  quantity  Int
+
+  request StockRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  item    Item         @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
+}
+
+/// #2042 estimate (նախահաշիվ): planned material lines per construction object
+/// (object ids live in CRM). Actuals come from the movement ledger; deviations
+/// are pure computation over the two.
+model ObjectEstimateLine {
+  id Int @id @default(autoincrement())
+
+  /// CRM ConstructionObject id (cross-service reference).
+  objectId Int
+  itemId   Int
+
+  plannedQuantity Float
+  /// Planned unit cost (AMD); planned value = quantity × this.
+  plannedUnitCost Float?
+
+  note String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([objectId, itemId])
+  @@index([objectId])
 }
 
 model ResourceReservation {
@@ -253,6 +506,16 @@ model ResourceReservation {
 
   status ResourceReservationStatus @default(PENDING)
 
+  /// Which warehouse serves this reservation (#1989). NULL = main pool
+  /// (Item.quantity) — every pre-1989 reservation and every non-task flow.
+  /// Set from the task's backlog link at create; issuance, reclaims and
+  /// returns then debit/credit THIS warehouse's stock.
+  warehouseId Int?
+
+  /// #2042: the task's construction object at create time — movements this
+  /// reservation produces inherit it.
+  objectId Int?
+
   startDate DateTime
   endDate   DateTime?
 
@@ -266,6 +529,8 @@ model ResourceReservation {
   // RELATIONS
 
   item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  warehouse Warehouse? @relation(fields: [warehouseId], references: [id])
 
   replacedBy ResourceReservation?  @relation("ReservationReplacement", fields: [replacedByReservationId], references: [id])
   replaces   ResourceReservation[] @relation("ReservationReplacement")
@@ -516,6 +781,11 @@ model ProcurementOrder {
   supplier   Supplier? @relation(fields: [supplierId], references: [id])
 
   notes             String?
+  /// Which organization the purchase is for. Stamped from the buyer's active
+  /// organization at create; a super-admin may correct it later, including on
+  /// orders placed before this existed (hence nullable). Travels to finance so
+  /// the spend is reported against the right organization.
+  entityId          Int?
   /// Deposit the supplier requires before shipping. Raised as its own finance
   /// transfer at finalize; the balance transfer is what remains after it.
   prepaymentAmount  Float?
@@ -554,9 +824,131 @@ model ProcurementOrder {
   items      ProcurementOrderItem[]
   deliveries ProcurementDelivery[]
   payments   ProcurementPayment[]
+  /// Requisitions this order was raised for (#1885 sprint).
+  requisitions PurchaseRequisition[]
 
   @@index([supplierId])
+  @@index([entityId])
   @@index([status])
+}
+
+/// #1885/#1888-#1894 — the demand side of procurement: any department files
+/// a requisition (what to buy, how much, for when); procurement reviews it
+/// and converts it into a ProcurementOrder (which carries supplier/prices —
+/// the requisition deliberately does not). Lines may name items not yet in
+/// the catalog; procurement resolves them before approval.
+enum PurchaseRequisitionStatus {
+  DRAFT
+  /// Sent by the requester, waiting for the organization's approver
+  /// (approve_purchase_requisition) — procurement does not see it yet.
+  PENDING_APPROVAL
+  SUBMITTED
+  IN_REVIEW
+  APPROVED
+  REJECTED
+  CANCELLED
+  FULFILLED
+}
+
+model PurchaseRequisition {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  status PurchaseRequisitionStatus @default(DRAFT)
+
+  title       String?
+  comment     String?
+  /// #1888: the period the goods are needed for.
+  periodStart DateTime? @db.Date
+  periodEnd   DateTime? @db.Date
+
+  /// Requester's active entity (x-entity-id) — informational.
+  entityId  Int?
+  createdBy Int
+
+  /// #1893/#1894: the CRM task this requisition serves — either the task
+  /// created FROM it or an existing task it was attached to.
+  taskId     Int?
+  taskOrigin String? // CREATED | ATTACHED
+
+  /// The order procurement raised for it (approve = convert).
+  orderId Int?
+  order   ProcurementOrder? @relation(fields: [orderId], references: [id])
+
+  rejectionReason String?
+  reviewedBy      Int?
+  reviewedAt      DateTime?
+
+  /// The organization's approval decision (2026-09-11): who let it through
+  /// to procurement — or, when status is REJECTED with reviewedBy empty,
+  /// who turned it down before procurement ever saw it.
+  decidedBy Int?
+  decidedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lines       PurchaseRequisitionLine[]
+  comments    PurchaseRequisitionComment[]
+  attachments PurchaseRequisitionAttachment[]
+
+  @@index([createdBy])
+  @@index([status])
+  @@index([taskId])
+  @@index([orderId])
+}
+
+model PurchaseRequisitionLine {
+  id            Int @id @default(autoincrement())
+  requisitionId Int
+
+  /// Catalog item once known (picked at creation or resolved by procurement).
+  itemId   Int?
+  /// Free text is allowed — the item may not exist yet (#1888).
+  itemName String
+  /// Auto-filled from the catalog, editable (#1888).
+  code     String?
+  unit     ItemUnit?
+  quantity Float
+
+  /// Snapshots at creation, for the form's context (#1888): on hand, and
+  /// already-ordered-not-received. Not recomputed later.
+  stockQuantity    Float?
+  expectedQuantity Float?
+  note             String?
+
+  requisition PurchaseRequisition @relation(fields: [requisitionId], references: [id], onDelete: Cascade)
+  item        Item?               @relation(fields: [itemId], references: [id])
+
+  @@index([requisitionId])
+  @@index([itemId])
+}
+
+model PurchaseRequisitionComment {
+  id            Int      @id @default(autoincrement())
+  requisitionId Int
+  userId        Int
+  text          String
+  createdAt     DateTime @default(now())
+
+  requisition PurchaseRequisition @relation(fields: [requisitionId], references: [id], onDelete: Cascade)
+
+  @@index([requisitionId])
+}
+
+model PurchaseRequisitionAttachment {
+  id            Int      @id @default(autoincrement())
+  requisitionId Int
+  uploadedBy    Int?
+  name          String
+  url           String
+  size          Int
+  mimeType      String
+  createdAt     DateTime @default(now())
+
+  requisition PurchaseRequisition @relation(fields: [requisitionId], references: [id], onDelete: Cascade)
+
+  @@index([requisitionId])
 }
 
 model ProcurementOrderItem {
@@ -589,6 +981,9 @@ model ProcurementDelivery {
   orderId Int
 
   receiptUrl String?
+  /// Number of the accompanying paper (invoice/waybill). Required by the API
+  /// on every new delivery; nullable only for rows recorded before the field.
+  documentNumber String?
   notes      String?
   receivedBy Int?
   receivedAt DateTime @default(now())

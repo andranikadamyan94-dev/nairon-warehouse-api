@@ -94,12 +94,15 @@ export class ProcurementService {
     return order;
   }
 
-  async create(dto: CreateProcurementDto, createdBy?: number) {
+  async create(dto: CreateProcurementDto, createdBy?: number, activeEntityId?: number | null) {
     return this.prisma.procurementOrder.create({
       data: {
         // Stamped reliably: cancel is creator-only, and a null creator would
         // let ANY manage_procurement holder through that gate.
         createdBy: createdBy ?? null,
+        // The organization the purchase is for: what the form says, else the
+        // one the buyer is acting as.
+        entityId: dto.entityId ?? activeEntityId ?? null,
         supplierId: dto.supplierId ?? null,
         notes: dto.notes ?? null,
         prepaymentAmount: dto.prepaymentAmount ?? null,
@@ -113,6 +116,60 @@ export class ProcurementService {
       },
       include,
     });
+  }
+
+  /**
+   * Re-file an order under another organization (2026-09-10). Super-admins
+   * only: this is the correction tool for the orders placed before an order
+   * carried an organization at all, and for the occasional purchase booked
+   * against the wrong one.
+   *
+   * The money follows, including transfers finance has already booked: that
+   * expense is exactly what was filed under the wrong organization, so it
+   * moves too and finance writes an approval-log line on each. Their ids come
+   * back so the client can say how many booked transfers were re-filed.
+   */
+  async setEntity(id: number, entityId: number | null, isSuperAdmin: boolean) {
+    if (!isSuperAdmin) {
+      throw new ForbiddenException('Պատվերի կազմակերպությունը կարող է փոխել միայն ադմինիստրատորը');
+    }
+    const order = await this.findOne(id);
+    if (((order as any).entityId ?? null) === (entityId ?? null)) return order;
+
+    const updated = await this.prisma.procurementOrder.update({
+      where: { id },
+      data: { entityId: entityId ?? null },
+      include,
+    });
+
+    let financeMovedBooked: number[] = [];
+    const financeUrl = requireFinanceUrl();
+    try {
+      const res = await fetch(`${financeUrl}/api/transfer/external/entity-by-ref`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-internal-secret': requireInternalSecret(),
+        },
+        body: JSON.stringify({ externalRef: `warehouse_procurement:${id}`, entityId: entityId ?? null }),
+      });
+      if (res.ok) {
+        const body = await res.json();
+        financeMovedBooked = body?.movedBooked ?? [];
+        this.logger.log(
+          `Order #${id}: finance transfers re-filed under entity ${entityId ?? 'none'} ` +
+            `(${(body?.moved ?? []).length} moved, ${financeMovedBooked.length} of them already booked)`,
+        );
+      } else {
+        this.logger.warn(`Order #${id}: finance refused the organization change (${res.status})`);
+      }
+    } catch (e: any) {
+      // The order is the record of truth for what was bought for whom; a
+      // finance outage must not undo that. Reported, not thrown.
+      this.logger.warn(`Order #${id}: could not reach finance to re-file transfers — ${e?.message ?? e}`);
+    }
+
+    return { ...updated, financeMovedBooked };
   }
 
   async update(id: number, dto: UpdateProcurementDto) {
@@ -271,6 +328,12 @@ export class ProcurementService {
         'Մատակարարումը գրանցելու համար պարտադիր է կցել փաստաթուղթ',
       );
     }
+    // The paper's own number (invoice/waybill №) — without it the stored file
+    // can't be reconciled against the supplier's books.
+    const documentNumber = dto?.documentNumber?.trim();
+    if (!documentNumber) {
+      throw new BadRequestException('Փաստաթղթի համարը պարտադիր է');
+    }
 
     const remaining = (line: { quantity: number; receivedQuantity: number }) =>
       line.quantity - (line.receivedQuantity ?? 0);
@@ -317,6 +380,7 @@ export class ProcurementService {
           data: {
             orderId: id,
             receiptUrl,
+            documentNumber,
             notes: dto?.notes,
             receivedBy,
           },
@@ -355,7 +419,10 @@ export class ProcurementService {
               quantity,
               type: 'IN',
               supplierId: order.supplierId ?? undefined,
-              notes: `Procurement order #${id}, delivery #${delivery.id}`,
+              // #2042: the purchase price is this receipt's real cost — freeze it.
+              unitCost: line.unitPrice ?? null,
+              totalCost: line.unitPrice != null ? quantity * line.unitPrice : null,
+              notes: `Գնման պատվեր #${id}, առաքում #${delivery.id}, փաստ. № ${documentNumber}`,
             },
           });
         }
@@ -386,6 +453,12 @@ export class ProcurementService {
     );
 
     const complete = result.status === ProcurementOrderStatus.RECEIVED;
+    // #1885: requisitions this order was raised for are now satisfied.
+    if (complete) {
+      await this.prisma.purchaseRequisition
+        .updateMany({ where: { orderId: id, status: 'APPROVED' }, data: { status: 'FULFILLED' } })
+        .catch(() => {});
+    }
 
     // On completion, reconcile finance against what actually arrived. Normally
     // that equals the ordered value and settleWithFinance is a no-op; it only
@@ -766,6 +839,9 @@ export class ProcurementService {
         },
         body: JSON.stringify({
           amount,
+          // The organization the purchase was made for, so finance reports the
+          // spend against it rather than against nothing.
+          entityId: (order as any).entityId ?? undefined,
           description: `${label} #${id}${supplierSuffix}`,
           externalRef:
             kind === 'PREPAYMENT'
