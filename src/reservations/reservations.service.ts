@@ -1312,18 +1312,56 @@ export class ReservationsService {
        * changes a row here, and the other is told the stock went while it was
        * deciding. Written before the allocation so nothing is recorded as
        * handed out unless the stock actually moved.
+       *
+       * AND IT MUST BE THE RESERVATION'S OWN POOL.
+       *
+       * #1989: a sub-warehouse reservation draws from THAT warehouse's stock,
+       * never the main pool. The pre-check above already says so and refuses on
+       * the project shelf — but it is a read, and this is the write. Until now
+       * the write always took from `Item`, so a project issuance passed the
+       * project check and then helped itself to the main pool: the sub's stock
+       * never moved, and the main pool fell for goods it was not holding.
+       *
+       * Exactly one pool, chosen the same way the check chose it. Never both,
+       * never neither, and no falling back to main because main happens to
+       * have enough.
        */
-      const took = await tx.item.updateMany({
-        where: { id: reservation.item.id, quantity: { gte: toAllocate } },
-        data: { quantity: { decrement: toAllocate } },
-      });
+      const took = reservation.warehouseId
+        ? await tx.warehouseStock.updateMany({
+            where: {
+              warehouseId: reservation.warehouseId,
+              itemId: reservation.item.id,
+              quantity: { gte: toAllocate },
+            },
+            data: { quantity: { decrement: toAllocate } },
+          })
+        : await tx.item.updateMany({
+            where: { id: reservation.item.id, quantity: { gte: toAllocate } },
+            data: { quantity: { decrement: toAllocate } },
+          });
       if (took.count !== 1) {
-        const now = await tx.item.findUnique({
-          where: { id: reservation.item.id },
-          select: { quantity: true },
-        });
+        const available = reservation.warehouseId
+          ? (
+              await tx.warehouseStock.findUnique({
+                where: {
+                  warehouseId_itemId: {
+                    warehouseId: reservation.warehouseId,
+                    itemId: reservation.item.id,
+                  },
+                },
+                select: { quantity: true },
+              })
+            )?.quantity ?? 0
+          : (
+              await tx.item.findUnique({
+                where: { id: reservation.item.id },
+                select: { quantity: true },
+              })
+            )?.quantity ?? 0;
         throw new BadRequestException(
-          `Insufficient stock: ${now?.quantity ?? 0} available, ${toAllocate} requested`,
+          reservation.warehouseId
+            ? `Նախագծային պահեստում բավարար պաշար չկա (${available} առկա, ${toAllocate} պահանջվում է)`
+            : `Insufficient stock: ${available} available, ${toAllocate} requested`,
         );
       }
 
