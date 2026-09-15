@@ -1,3 +1,5 @@
+import { settleStoredQty } from '../common/stored-quantity';
+import { roundQty } from '../common/quantity';
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
@@ -86,7 +88,7 @@ export class AllocationsService {
         }
 
         const isConsumable = allocation.reservation.item.type === ItemType.CONSUMABLE;
-        const returnQty = entry.quantity ?? allocation.quantity;
+        const returnQty = roundQty(entry.quantity ?? allocation.quantity);
 
         if (entry.quantity !== undefined && entry.quantity > allocation.quantity) {
           throw new BadRequestException(
@@ -95,7 +97,7 @@ export class AllocationsService {
         }
 
         if (isConsumable) {
-          const remaining = allocation.quantity - returnQty;
+          const remaining = roundQty(allocation.quantity - returnQty);
 
           if (remaining <= 0) {
             await tx.reservationAllocation.update({
@@ -123,6 +125,7 @@ export class AllocationsService {
               data: { quantity: { increment: returnQty } },
             });
           }
+          await settleStoredQty(tx, { itemId: allocation.reservation.itemId, warehouseId: whId });
           touchedItemIds.push(allocation.reservation.itemId);
 
           const rc = await this.reverseCostInfo(tx, {
@@ -166,6 +169,7 @@ export class AllocationsService {
           where: { id: allocation.reservationId },
           data: { quantity: { decrement: returnQty } },
         });
+        await settleStoredQty(tx, { reservationId: allocation.reservationId });
       }
 
       return { success: true };
@@ -217,6 +221,7 @@ export class AllocationsService {
             data: { quantity: { increment: allocation.quantity } },
           });
         }
+        await settleStoredQty(tx, { itemId: allocation.reservation.itemId, warehouseId: whId });
 
         const rel = await this.reverseCostInfo(tx, {
           taskId: allocation.reservation.taskId,

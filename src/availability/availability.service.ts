@@ -160,7 +160,7 @@ export class AvailabilityService {
                 dto.warehouseId,
               );
 
-              if (available < requestedResource.quantity) {
+              if (available < roundQty(requestedResource.quantity)) {
                 unavailableResources.push({
                   itemId: requestedResource.itemId,
                   date: slot.yerevanDate,
@@ -180,7 +180,7 @@ export class AvailabilityService {
             dto.warehouseId,
           );
 
-          if (available < requestedResource.quantity) {
+          if (available < roundQty(requestedResource.quantity)) {
             unavailableResources.push({
               itemId: requestedResource.itemId,
               available,

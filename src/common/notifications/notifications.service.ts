@@ -1,8 +1,7 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import * as nodemailer from 'nodemailer';
 import { UsersPrismaService } from '../users-prisma.service';
-import { requireInternalSecret } from '../internal-headers';
-
+import { requireInternalSecret } from '../internal-headers';import { reportEmail } from '../email-log-reporter';
 export interface WarehouseNotification {
   /** Who to reach: everyone holding any of these permissions (super-admins always included). */
   permissions: string[];
@@ -28,8 +27,19 @@ export interface WarehouseNotification {
  * transaction.
  */
 @Injectable()
-export class WarehouseNotificationsService {
+export class WarehouseNotificationsService implements OnModuleInit {
   private readonly logger = new Logger(WarehouseNotificationsService.name);
+
+  /** The email audit's startup line: is this app's transport configured? */
+  onModuleInit() {
+    void reportEmail({
+      app: 'warehouse',
+      context: 'startup',
+      subject: 'mail transport',
+      status: this.transporter ? 'CONFIGURED' : 'DISABLED',
+      error: this.transporter ? null : 'EMAIL_USER/EMAIL_PASS not set',
+    });
+  }
   private transporter: nodemailer.Transporter | null = null;
 
   constructor(private usersPrisma: UsersPrismaService) {
@@ -121,16 +131,24 @@ export class WarehouseNotificationsService {
   }
 
   private async sendEmail(to: string[], n: WarehouseNotification, url: string): Promise<void> {
-    if (!this.transporter || !to.length) return;
+    if (!to.length) return;
+    if (!this.transporter) {
+      // Recorded as a failure with its reason, so an unconfigured server is
+      // visible in the audit rather than silently mailing nothing.
+      void reportEmail({ app: 'warehouse', context: n.title, recipients: to, subject: n.title, status: 'FAILED', error: 'mail transport not configured (EMAIL_USER/EMAIL_PASS not set)' });
+      return;
+    }
     try {
-      await this.transporter.sendMail({
+      const info = await this.transporter.sendMail({
         from: `"Nairon Պահեստ" <${process.env.EMAIL_USER}>`,
         to: to.join(', '),
         subject: n.title,
         html: this.render(n, url),
       });
+      void reportEmail({ app: 'warehouse', context: n.title, recipients: to, subject: n.title, status: 'SENT', messageId: info?.messageId ?? null });
     } catch (e: any) {
       this.logger.error(`Warehouse email failed: ${e?.message ?? e}`);
+      void reportEmail({ app: 'warehouse', context: n.title, recipients: to, subject: n.title, status: 'FAILED', error: e?.message ?? String(e) });
     }
   }
 

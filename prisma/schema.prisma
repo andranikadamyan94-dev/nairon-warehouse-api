@@ -313,7 +313,7 @@ model WarehouseStock {
   warehouseId Int
   itemId      Int
 
-  quantity Int @default(0)
+  quantity Float @default(0)
 
   updatedAt DateTime @updatedAt
 
@@ -355,7 +355,7 @@ model StockTransferItem {
 
   transferId Int
   itemId     Int
-  quantity   Int
+  quantity   Float
 
   transfer StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
   item     Item          @relation(fields: [itemId], references: [id])
@@ -418,7 +418,7 @@ model StockRequestItem {
 
   requestId Int
   itemId    Int
-  quantity  Int
+  quantity  Float
 
   request StockRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
   item    Item         @relation(fields: [itemId], references: [id], onDelete: Cascade)
@@ -492,13 +492,12 @@ model ResourceReservation {
   /// and a copy of it could drift the first time a category moves company.
   requesterWorkspaceId Int?
 
-  quantity Int
-
+  quantity Float
   /// Task-side acceptance (2026-09-01 handshake): how much of the ISSUED
   /// quantity the task has confirmed receiving. Invariant accepted ≤ issued ≤
   /// requested; full acceptance of the requested quantity flips the
   /// reservation to COMPLETED — the status's first and only setter.
-  acceptedQuantity  Int     @default(0)
+  acceptedQuantity  Float   @default(0)
   /// The task user's explanation when accepting less than what was issued
   /// (broken delivery, over-estimated request, …). Appended per acceptance and
   /// deliberately surfaced to warehouse staff.
@@ -560,8 +559,8 @@ model ReservationStatusHistory {
   fromStatus ResourceReservationStatus?
   toStatus   ResourceReservationStatus
 
-  previousQuantity Int?
-  newQuantity      Int?
+  previousQuantity Float?
+  newQuantity      Float?
 
   performedBy Int?
 
@@ -585,7 +584,7 @@ model ReservationAllocation {
 
   assetId Int?
 
-  quantity Int @default(1)
+  quantity Float @default(1)
 
   allocatedAt DateTime @default(now())
 
@@ -1064,7 +1063,7 @@ model ResourceReturn {
   reservationId Int
   reservation   ResourceReservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
 
-  quantity Int
+  quantity Float
 
   status ResourceReturnStatus @default(PENDING)
 

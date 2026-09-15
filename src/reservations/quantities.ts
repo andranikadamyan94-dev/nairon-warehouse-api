@@ -1,5 +1,6 @@
 import { PrismaService } from 'prisma/prisma.service';
 
+import { roundQty } from '../common/quantity';
 import { ResourceReturnStatus } from '../common/enums/resource-return-status.enum';
 
 /**
@@ -80,24 +81,34 @@ export async function quantitiesOf(db: Db, reservationId: number): Promise<Reser
     }),
   ]);
 
-  const requested = reservation?.quantity ?? 0;
-  const out = live._sum.quantity ?? 0;
-  const returned = received._sum.quantity ?? 0;
-  const awaiting = pending._sum.quantity ?? 0;
-  const issued = out + returned;
+  /*
+   * Every number passes through roundQty. Quantities are double precision, so
+   * 12.3 minus 12 lands as 0.3000000000000007, and that residue would reach
+   * the over-issue comparison — refusing a legitimate issue, or admitting one
+   * a hair over the entitlement. Three decimals is what the warehouse measures
+   * (common/quantity.ts); this file does not invent its own precision.
+   *
+   * The definitions are unchanged: issued is still out + returned, so goods
+   * that came back still count as having left.
+   */
+  const requested = roundQty(reservation?.quantity ?? 0);
+  const out = roundQty(live._sum.quantity ?? 0);
+  const returned = roundQty(received._sum.quantity ?? 0);
+  const awaiting = roundQty(pending._sum.quantity ?? 0);
+  const issued = roundQty(out + returned);
 
   return {
     requested,
     issued,
     returned,
     out,
-    outstandingToIssue: Math.max(0, requested - issued),
+    outstandingToIssue: Math.max(0, roundQty(requested - issued)),
     /*
      * What is out, less what is already waiting to come back. RECEIVED returns
      * are NOT subtracted again: receiving one already reduced the allocation it
      * came from, so counting it here too would subtract it twice and make a
      * reservation look less returnable after every partial return.
      */
-    returnable: Math.max(0, out - awaiting),
+    returnable: Math.max(0, roundQty(out - awaiting)),
   };
 }
