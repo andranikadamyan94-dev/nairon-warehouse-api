@@ -20,6 +20,8 @@ export type LineInput = {
   unit?: string | null;
   quantity: number;
   note?: string | null;
+  /** The short reservation this line covers, when filed from the reservations page. */
+  reservationId?: number | null;
 };
 
 // A requester may still change the lines while the organization is deciding;
@@ -117,6 +119,7 @@ export class PurchaseRequisitionsService {
   private async buildLines(input: LineInput[]) {
     const lines = (input ?? []).map((l) => ({
       itemId: l.itemId ? Number(l.itemId) : null,
+      reservationId: l.reservationId ? Number(l.reservationId) : null,
       itemName: (l.itemName ?? '').trim(),
       code: l.code?.trim() || null,
       unit: l.unit || null,
@@ -134,6 +137,11 @@ export class PurchaseRequisitionsService {
     const itemOf = new Map(items.map((i) => [i.id, i]));
     for (const l of lines) {
       if (l.itemId && !itemOf.has(l.itemId)) throw new NotFoundException('Ապրանքը չի գտնվել');
+    }
+    const reservationIds = [...new Set(lines.map((l) => l.reservationId).filter((x): x is number => x != null))];
+    if (reservationIds.length) {
+      const found = await this.prisma.resourceReservation.count({ where: { id: { in: reservationIds } } });
+      if (found !== reservationIds.length) throw new NotFoundException('Ամրագրումը չի գտնվել');
     }
     // Expected = ordered-not-received across open orders, per item (#1888).
     const expected = new Map<number, number>();

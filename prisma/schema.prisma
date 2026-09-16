@@ -915,12 +915,17 @@ model PurchaseRequisitionLine {
   stockQuantity    Float?
   expectedQuantity Float?
   note             String?
+  /// The reservation this line was raised for, when the request came from a
+  /// short reservation (2026-09-16). Cross-table pointer, no FK: a cancelled
+  /// reservation must not take the request's history with it.
+  reservationId    Int?
 
   requisition PurchaseRequisition @relation(fields: [requisitionId], references: [id], onDelete: Cascade)
   item        Item?               @relation(fields: [itemId], references: [id])
 
   @@index([requisitionId])
   @@index([itemId])
+  @@index([reservationId])
 }
 
 model PurchaseRequisitionComment {
