@@ -21,25 +21,23 @@ export class ItemsService {
   ) {}
 
   /**
-   * May this person put an item in this part of the catalogue?
+   * Can an item be filed under this category? The category has to exist; an
+   * item may also have none.
    *
-   * An item's workspace is its category's, so filing it is the moment its
-   * workspace is decided — and the only moment worth checking, since an item
-   * with no category has no workspace at all. A bounded actor cannot create
-   * one, because there would be nowhere for it to be.
+   * WAREHOUSE V1 CONTRACT: the catalogue is one shared pool. Who may file items
+   * into it is `manage_items` on the route — not the company the category is
+   * filed under, and not the companies the actor's roles live in.
    *
    * Called by create, by update when the category moves, and by the preflight
    * beside both, so the question is asked once and answered the same way.
    */
   async assertMayFileUnder(actor: WarehouseActor, categoryId?: number | null) {
-    const workspace =
-      categoryId == null ? null : (await this.workspaces.ofCategory(categoryId)).workspace;
-    this.workspaces.assertMayTouchWorkspace(actor, 'item', workspace);
+    if (categoryId != null) await this.workspaces.ofCategory(categoryId);
   }
 
-  /** May this person change this item? Its workspace is its category's. */
+  /** Can this item be changed? It has to exist; authority is the route's `manage_items`. */
   async assertMayEdit(actor: WarehouseActor, id: number) {
-    await this.workspaces.assertMayTouch(actor, 'item', id);
+    await this.workspaces.of('item', id);
   }
 
   /**
@@ -93,7 +91,7 @@ export class ItemsService {
     return item;
   }
 
-  async findAll(query?: GetItemsQueryDto, actor?: WarehouseActor) {
+  async findAll(query?: GetItemsQueryDto, _actor?: WarehouseActor) {
     let categoryFilter: number[] | undefined;
 
     if (query?.categoryId) {
@@ -102,19 +100,11 @@ export class ItemsService {
       );
     }
 
-    // Narrowed only for an actor whose roles live in particular companies.
-    // Not by the workspace they declared: stock is a shared pool, and a company
-    // that keeps no catalogue of its own still reserves from the ones that do.
-    // Everyone in this installation holds a wildcard role, so today this adds no
-    // filter and the list is the list it always was — deliberately, because the
-    // CRM task screen reads this route with no warehouse permission at all.
-    const scope = actor ? this.workspaces.scopeFor(actor, ['category']) : undefined;
-
+    // Not narrowed by who is asking. The catalogue is one shared pool for every
+    // company, and the CRM task screen reads this route with no warehouse
+    // permission at all — which companies somebody's roles live in, or where a
+    // category is filed, hides nothing from them.
     const where: any = {
-      // Local's actor scope leads, so every branch below — including the
-      // sub-warehouse one remote added — narrows from inside it rather than
-      // beside it.
-      ...(scope ?? {}),
       ...(categoryFilter ? { categoryId: { in: categoryFilter } } : {}),
       ...(query?.uncategorized === '1' ? { categoryId: null } : {}),
       ...(query?.type ? { type: query.type } : {}),
@@ -186,13 +176,10 @@ export class ItemsService {
     return rows.map((r) => ({ ...r, _count: { assets: mainOf.get(r.id) ?? 0 } }));
   }
 
-  async findOne(id: number, actor?: WarehouseActor) {
-    // Out of scope reads as missing rather than as forbidden: a bounded actor
-    // learns nothing about another company's catalogue, not even that a given
-    // id is taken.
-    const scope = actor ? this.workspaces.scopeFor(actor, ['category']) : undefined;
+  async findOne(id: number, _actor?: WarehouseActor) {
+    // The shared catalogue: every authenticated caller reads every item.
     const item = await this.prisma.item.findFirst({
-      where: { id, ...(scope ?? {}) },
+      where: { id },
       include: {
         category: true,
         _count: { select: { assets: true } },
@@ -212,8 +199,8 @@ export class ItemsService {
   async update(id: number, dto: UpdateItemDto, actor: WarehouseActor) {
     await this.findOne(id, actor);
     await this.assertMayEdit(actor, id);
-    // Moving an item into another company's catalogue moves the item itself.
-    // The destination has to be somewhere this person could have created it.
+    // A new category has to exist; where it is filed refiles the item in the
+    // books and refuses nobody — the catalogue is one shared pool.
     if (dto.categoryId !== undefined) await this.assertMayFileUnder(actor, dto.categoryId);
 
     // The code is system-issued and immutable — silently drop any attempt.

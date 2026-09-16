@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -9,7 +8,7 @@ import { PrismaService } from 'prisma/prisma.service';
 
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
-import { WarehouseActor, decideCreationWorkspace } from '../auth/actor';
+import { WarehouseActor } from '../auth/actor';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 
 @Injectable()
@@ -20,46 +19,40 @@ export class CategoriesService {
   ) {}
 
   /**
-   * Where a new or edited category is filed, decided here rather than taken
-   * from the request.
+   * Where a new or edited category is filed: what the request names, or the
+   * schema default (company 1) when it names nothing.
    *
-   * ItemCategory.entityId is the one workspace the warehouse actually stores,
-   * and until now it was written straight from the body: any caller who could
-   * reach this route could file a category into any of the seven companies,
-   * including ones they have no role in. A bounded actor is now held to their
-   * own; an unbounded one — every caller in this installation today — keeps
-   * choosing, which is what the client's category screen expects.
+   * WAREHOUSE V1 CONTRACT: the catalogue is one shared pool, so ItemCategory.
+   * entityId is bookkeeping, not a boundary. Who may create or change a
+   * category is `manage_categories` on the route — not which companies the
+   * actor's roles live in. The head of the warehouse holds a role only in
+   * company 6 and files into the pool kept under company 1.
    */
-  private workspaceFor(actor: WarehouseActor, requested?: number | null): number | undefined {
-    const decided = decideCreationWorkspace(actor, requested);
-    if (!decided.ok) {
-      throw new ForbiddenException(
-        decided.requested === null
-          ? 'Name the workspace this category belongs to'
-          : 'You hold no role in that workspace',
-      );
-    }
+  private workspaceFor(requested?: number | null): number | undefined {
     // undefined leaves the schema default in place on create and leaves the
     // stored value untouched on update; null is not a value this column takes.
-    return decided.workspace ?? undefined;
+    return requested == null ? undefined : Number(requested);
   }
 
   /**
-   * May this person file a category here? The same decision create makes,
-   * exposed so the preflight beside it asks exactly this and nothing else.
+   * Could this category be filed? The same checks create makes, exposed so the
+   * preflight beside it asks exactly this and nothing else.
    */
   async assertMayCreate(actor: WarehouseActor, dto: { entityId?: number; parentId?: number }) {
-    this.workspaceFor(actor, dto.entityId);
+    this.workspaceFor(dto.entityId);
     if (dto.parentId) await this.assertMayEdit(actor, dto.parentId);
   }
 
-  /** May this person change this category? It says its own workspace. */
+  /**
+   * Can this category be changed? It has to exist. Authority is the route's
+   * `manage_categories`; the company it is filed under refuses nobody.
+   */
   async assertMayEdit(actor: WarehouseActor, id: number) {
-    await this.workspaces.assertMayTouch(actor, 'category', id);
+    await this.workspaces.of('category', id);
   }
 
   async create(dto: CreateCategoryDto, actor: WarehouseActor) {
-    const entityId = this.workspaceFor(actor, dto.entityId);
+    const entityId = this.workspaceFor(dto.entityId);
 
     if (dto.parentId) {
       const parent = await this.prisma.itemCategory.findUnique({
@@ -71,8 +64,7 @@ export class CategoriesService {
       if (!parent) {
         throw new NotFoundException('Parent category not found');
       }
-      // A child under another company's parent would put the tree in two
-      // places at once; the parent has to be somewhere this person can reach.
+      // The parent has to exist; which company it is filed under is bookkeeping.
       await this.assertMayEdit(actor, dto.parentId);
     }
 
@@ -125,26 +117,24 @@ export class CategoriesService {
   }
 
   /**
-   * The workspace filter for a list. The query string may narrow the result;
-   * for a bounded actor it may not widen it, so their own scope is applied on
-   * top of whatever was asked for.
+   * The filter for a list. `?entityId=` narrows the shared catalogue to what is
+   * filed under one company when somebody asks for that; nothing narrows it on
+   * the actor's behalf. Every authenticated caller reads the whole pool.
    */
-  private listScope(entityId?: number, actor?: WarehouseActor) {
-    const mine = actor ? this.workspaces.scopeFor(actor, []) : undefined;
-    if (!mine) return entityId ? { entityId } : undefined;
-    return entityId ? { AND: [mine, { entityId }] } : mine;
+  private listScope(entityId?: number) {
+    return entityId ? { entityId } : undefined;
   }
 
-  async getAll(entityId?: number, actor?: WarehouseActor) {
+  async getAll(entityId?: number, _actor?: WarehouseActor) {
     return this.prisma.itemCategory.findMany({
-      where: this.listScope(entityId, actor),
+      where: this.listScope(entityId),
       orderBy: [{ position: 'asc' }, { name: 'asc' }],
     });
   }
 
-  async getTree(entityId?: number, actor?: WarehouseActor) {
+  async getTree(entityId?: number, _actor?: WarehouseActor) {
     const categories = await this.prisma.itemCategory.findMany({
-      where: this.listScope(entityId, actor),
+      where: this.listScope(entityId),
       orderBy: [{ position: 'asc' }, { name: 'asc' }],
     });
 
@@ -186,10 +176,10 @@ export class CategoriesService {
     }
 
     await this.assertMayEdit(actor, id);
-    // Changing entityId moves the category — and every item filed under it —
-    // into another company. Decided the same way a creation is.
+    // Changing entityId refiles the category — and every item under it — in
+    // the books. The pool stays one pool; decided the same way a creation is.
     const entityId =
-      dto.entityId === undefined ? undefined : this.workspaceFor(actor, dto.entityId);
+      dto.entityId === undefined ? undefined : this.workspaceFor(dto.entityId);
     if (dto.parentId) await this.assertMayEdit(actor, dto.parentId);
 
     if (dto.parentId === id) {

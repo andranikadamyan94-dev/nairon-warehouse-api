@@ -15,17 +15,17 @@ export class AssetsService {
   ) {}
 
   /**
-   * An asset is a serial-numbered instance of an item, so it is wherever the
-   * item is. Creating one is therefore the item's question, and it is asked
-   * before the row exists rather than after.
+   * An asset is a serial-numbered instance of an item, so the item has to exist
+   * before one is made. Authority is `manage_assets` on the route: the
+   * catalogue is one shared pool, and where the item is filed refuses nobody.
    */
   async assertMayCreateFor(actor: WarehouseActor, itemId: number) {
-    await this.workspaces.assertMayTouch(actor, 'item', itemId);
+    await this.workspaces.of('item', itemId);
   }
 
-  /** May this person change this asset? */
+  /** Can this asset be changed? It has to exist; authority is the route's `manage_assets`. */
   async assertMayEdit(actor: WarehouseActor, id: number) {
-    await this.workspaces.assertMayTouch(actor, 'asset', id);
+    await this.workspaces.of('asset', id);
   }
 
   async create(dto: CreateAssetDto, actor: WarehouseActor) {
@@ -37,10 +37,9 @@ export class AssetsService {
   }
 
   /**
-   * Remote added the `warehouseId` filter (#1989 sub-warehouses); local added
-   * the workspace an actor is held to. They answer different questions — WHICH
-   * warehouse you are looking at, and WHOSE catalogue you may see — so both
-   * narrow and they compose.
+   * The `warehouseId` filter (#1989 sub-warehouses) says WHICH warehouse you are
+   * looking at. Nothing narrows by who is asking: `view_assets`/`manage_assets`
+   * on the route is the authority, and the pool is shared by every company.
    */
   findAll(
     query?: {
@@ -50,9 +49,9 @@ export class AssetsService {
       sortOrder?: string;
       warehouseId?: string;
     },
-    actor?: WarehouseActor,
+    _actor?: WarehouseActor,
   ) {
-    const where: any = actor ? { ...(this.workspaces.scopeFor(actor, ['item', 'category']) ?? {}) } : {};
+    const where: any = {};
     if (query?.status) where.status = query.status;
     // #1989 workspaces: 'main' = the null-homed pool (all pre-existing rows).
     if (query?.warehouseId === 'main') where.warehouseId = null;
@@ -72,11 +71,9 @@ export class AssetsService {
     return this.prisma.asset.findMany({ where, include: { item: true }, orderBy });
   }
 
-  async findOne(id: number, actor?: WarehouseActor) {
-    // Out of scope answers as missing, the same as an id that was never used.
-    const scope = actor ? this.workspaces.scopeFor(actor, ['item', 'category']) : undefined;
+  async findOne(id: number, _actor?: WarehouseActor) {
     const asset = await this.prisma.asset.findFirst({
-      where: { id, ...(scope ?? {}) },
+      where: { id },
 
       include: {
         item: true,
@@ -99,7 +96,7 @@ export class AssetsService {
   async update(id: number, dto: UpdateAssetDto, actor: WarehouseActor) {
     await this.findOne(id, actor);
     await this.assertMayEdit(actor, id);
-    // Moving an asset onto another item can move it between companies.
+    // The item it moves onto has to exist.
     if (dto.itemId !== undefined) await this.assertMayCreateFor(actor, dto.itemId);
 
     return this.prisma.asset.update({

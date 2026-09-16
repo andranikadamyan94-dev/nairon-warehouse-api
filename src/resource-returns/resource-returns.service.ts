@@ -123,6 +123,24 @@ export class ResourceReturnsService {
   }
 
   /**
+   * Whether the actor is on the CRM task a LEGACY reservation serves.
+   *
+   * Asked only when the reservation cannot say which company requested it: that
+   * is when the task relationship is the one authoritative requester-side
+   * standing left, and nothing is guessed in its place — not the reservation's
+   * old entityId label. A reservation that names its requester is decided by
+   * that company alone, so CRM is not asked.
+   */
+  private async onTheTaskOfLegacy(
+    parties: { requester: number | null },
+    taskId: number | null,
+    actor: WarehouseActor,
+  ): Promise<boolean> {
+    if (parties.requester !== null) return false;
+    return this.reservations.isOnTask(taskId, actor.userId);
+  }
+
+  /**
    * Could this return be filed, right now — and what is actually out?
    *
    * Same authority, same measurement, nothing written. The outstanding figure is
@@ -137,14 +155,10 @@ export class ResourceReturnsService {
     if (!reservation) throw new NotFoundException('Reservation not found');
 
     const parties = await this.workspaces.partiesOfReservation(dto.reservationId);
-    const verdict = decideOperation(actor, parties, 'return.create');
-    if (!verdict.allowed) {
-      throw new ForbiddenException(
-        verdict.because === 'unknown-workspace'
-          ? 'This reservation cannot say which company asked for it, so nothing can be returned against it from inside one'
-          : 'This is another company’s to hand back',
-      );
-    }
+    const verdict = decideOperation(actor, parties, 'return.create', {
+      onTheTask: await this.onTheTaskOfLegacy(parties, reservation.taskId, actor),
+    });
+    if (!verdict.allowed) throw returnRefusal(verdict.because);
 
     /*
      * Assets are allocated one physical unit at a time, and a return says only a
@@ -207,16 +221,12 @@ export class ResourceReturnsService {
         `Վերադարձվող քանակը (${dto.quantity}) գերազանցում է տրամադրված մնացորդը (${Math.max(0, returnable)})`,
       );
     }
-    // Handing something back is the requester's act; the shelf owner receives it.
+    // Handing something back is the requester's act; the warehouse receives it.
     const parties = await this.workspaces.partiesOfReservation(dto.reservationId);
-    const verdict = decideOperation(actor, parties, 'return.create');
-    if (!verdict.allowed) {
-      throw new ForbiddenException(
-        verdict.because === 'unknown-workspace'
-          ? 'This reservation cannot say which company asked for it, so nothing can be returned against it from inside one'
-          : 'This is another company’s to hand back',
-      );
-    }
+    const verdict = decideOperation(actor, parties, 'return.create', {
+      onTheTask: await this.onTheTaskOfLegacy(parties, reservation.taskId, actor),
+    });
+    if (!verdict.allowed) throw returnRefusal(verdict.because);
 
     /*
      * Inside a transaction, and re-measured there: two people pressing return
@@ -318,11 +328,12 @@ export class ResourceReturnsService {
 
     if (!ret) throw new NotFoundException('Return not found');
 
-    // Taking goods back onto a shelf is the shelf owner's act.
+    // Taking goods back onto a shelf is the warehouse's act: its permission,
+    // whichever company asked and wherever the item is filed.
     if (actor) {
       const parties = await this.workspaces.partiesOfReturn(id);
       const verdict = decideOperation(actor, parties, 'return.receive');
-      if (!verdict.allowed) throw new ForbiddenException('This is another company’s stock to take back');
+      if (!verdict.allowed) throw new ForbiddenException('Receiving a return needs the warehouse permission for returns');
     }
     if (ret.status !== ResourceReturnStatus.PENDING) {
       throw new BadRequestException('Return is not in PENDING status');
@@ -476,7 +487,9 @@ export class ResourceReturnsService {
     if (actor) {
       const parties = await this.workspaces.partiesOfReturn(id);
       const verdict = decideOperation(actor, parties, 'return.cancel');
-      if (!verdict.allowed) throw new ForbiddenException('This is another company’s return to call off');
+      if (!verdict.allowed) {
+        throw new ForbiddenException('Calling off this return needs standing as its requester or the warehouse permission for returns');
+      }
     }
     if (ret.status !== ResourceReturnStatus.PENDING) {
       throw new BadRequestException('Only pending returns can be cancelled');
@@ -488,4 +501,17 @@ export class ResourceReturnsService {
       include: this.include,
     });
   }
+}
+
+/**
+ * Why a return could not be filed. The two requester-side refusals are not the
+ * same problem: one is another company's work, the other is a legacy
+ * reservation whose requester nobody can name and whose task the caller is not on.
+ */
+function returnRefusal(because: string) {
+  return new ForbiddenException(
+    because === 'unknown-workspace'
+      ? 'This reservation cannot say which company asked for it, and you are not on its task, so nothing can be returned against it as its requester'
+      : 'This is another company’s to hand back',
+  );
 }

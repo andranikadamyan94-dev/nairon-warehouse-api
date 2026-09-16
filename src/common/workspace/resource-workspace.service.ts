@@ -1,17 +1,18 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
 
-import {
-  WarehouseActor,
-  WorkspaceVerdict,
-  Workspace,
-  boundedTo,
-  decideWorkspace,
-} from '../../auth/actor';
+import { Workspace } from '../../auth/actor';
 
 /**
  * Which warehouse resources can say where they belong, and how.
+ *
+ * WAREHOUSE V1 CONTRACT: the warehouse is ONE shared pool for every company.
+ * What this service derives is bookkeeping — where a category is filed, which
+ * company asked for a reservation — and none of it decides whether somebody may
+ * see or work the pool. Catalogue reads are open to every authenticated caller
+ * the route admits; catalogue changes are decided by the existing manage_*
+ * permission on the route; reservation authority is two-party.ts.
  *
  * This is the whole answer to "in this workspace?", and most of the value is in
  * what it refuses to answer. Only one table in the warehouse stores a workspace
@@ -126,9 +127,11 @@ export class ResourceWorkspaceService {
    * Both companies of one reservation.
    *
    * The requester is read from the column where it was pinned when the
-   * reservation was made; the stock owner is derived now, because the item's
-   * catalogue is the live answer to where the goods are filed. Either may be
-   * null, and null means unknown — which is never a match for anybody.
+   * reservation was made, and it is the one that carries authority: null means
+   * unknown, and unknown is never guessed — not from ResourceReservation.entityId
+   * either. The stock owner is derived now from the item's catalogue and is
+   * DESCRIPTIVE ONLY: the warehouse is a shared pool, so where a category is
+   * filed grants and refuses nothing.
    */
   async partiesOfReservation(
     reservationId: number,
@@ -179,68 +182,4 @@ export class ResourceWorkspaceService {
         return this.ofMaintenance(id);
     }
   }
-
-  /**
-   * The assertion every mutation and every preflight calls. One implementation,
-   * so a PREPARE that says yes and a CONFIRM that says no is not a thing that
-   * can happen by drift.
-   *
-   * Throws on refusal and returns the resource's workspace on success, so a
-   * caller that needs to record where something happened does not look it up
-   * twice.
-   */
-  async assertMayTouch(
-    actor: WarehouseActor,
-    kind: WarehouseResource,
-    id: number,
-  ): Promise<ResourceWorkspace> {
-    const found = await this.of(kind, id);
-    const verdict = decideWorkspace(actor, found.workspace);
-    if (!verdict.allowed) throw refusal(kind, verdict);
-    return found;
-  }
-
-  /**
-   * The same question about a workspace already in hand — for creation, where
-   * there is no row yet, and for the parent a new row is being filed under.
-   */
-  assertMayTouchWorkspace(actor: WarehouseActor, kind: WarehouseResource, workspace: Workspace): void {
-    const verdict = decideWorkspace(actor, workspace);
-    if (!verdict.allowed) throw refusal(kind, verdict);
-  }
-
-  /**
-   * A `where` fragment that confines a list to what the actor may see, or
-   * `undefined` when they are not bounded and nothing should be narrowed.
-   *
-   * `pathToCategory` is the relation chain from the model being listed to its
-   * ItemCategory: `[]` for categories themselves, `['category']` for items,
-   * `['item','category']` for assets, and so on. Written as data rather than as
-   * a string so a typo is a compile error, not a silently unfiltered list.
-   */
-  scopeFor(actor: WarehouseActor, pathToCategory: string[]): Record<string, unknown> | undefined {
-    const bounds = boundedTo(actor);
-    if (bounds === null) return undefined;
-    const leaf = { entityId: bounds.length === 1 ? bounds[0] : { in: bounds } };
-    // Built inside out: ['item','category'] becomes { item: { category: leaf } }.
-    // An `is` would let NULL relations through; a plain nested filter requires
-    // the relation to exist, which is what "unknown is not a match" means here.
-    return pathToCategory.reduceRight<Record<string, unknown>>(
-      (inner, segment) => ({ [segment]: inner }),
-      leaf,
-    );
-  }
-}
-
-/**
- * The refusal says which of the two it was. They are not the same thing and
- * whoever reads the log should not have to guess: one means the resource is
- * somewhere else, the other means nothing in the schema can say where it is.
- */
-function refusal(kind: WarehouseResource, verdict: WorkspaceVerdict) {
-  return verdict.because === 'outside-scope'
-    ? new ForbiddenException(`This ${kind} belongs to another workspace`)
-    : new ForbiddenException(
-        `This ${kind} has no workspace, so it cannot be acted on from inside one`,
-      );
 }

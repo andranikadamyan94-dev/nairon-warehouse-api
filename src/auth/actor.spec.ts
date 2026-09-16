@@ -1,7 +1,6 @@
 import {
   WarehouseActor,
   boundedTo,
-  decideCreationWorkspace,
   decideWorkspace,
   mayDeclare,
   readDeclaredWorkspace,
@@ -17,12 +16,10 @@ const actor = (over: Partial<WarehouseActor> = {}): WarehouseActor => ({
   ...over,
 });
 
-/** What every caller in this installation looks like today. */
+/** A wildcard role holder: a role in every company. */
 const unbounded = actor();
 /** Somebody whose only role lives in company 1. */
 const inOne = actor({ home: { wildcard: false, entityIds: [1] } });
-/** The same person, having asked to act as company 1. */
-const declaringOne = actor({ home: { wildcard: false, entityIds: [1] }, declared: 1 });
 
 describe('reading the workspace a caller declared', () => {
   it('takes a positive integer', () => {
@@ -56,16 +53,14 @@ describe('who may declare a workspace', () => {
   });
 });
 
-describe('what an actor is bounded to', () => {
+describe('the organization boundary — the companies somebody holds a role in', () => {
   it('is nothing at all for a wildcard holder who declared nothing', () => {
     expect(boundedTo(unbounded)).toBeNull();
   });
 
   it('stays nothing for a wildcard holder even when they declare a company', () => {
-    // Deliberate, and the one place the warehouse differs from CRM and HR:
-    // stock is a shared pool, so which company somebody is acting as says
-    // nothing about which stock exists. The declaration narrows their
-    // permissions instead — see WarehouseActorService.
+    // A declaration narrows the permissions the actor holds — see
+    // WarehouseActorService — not the companies they hold a role in.
     expect(boundedTo(actor({ declared: 4 }))).toBeNull();
   });
 
@@ -74,18 +69,18 @@ describe('what an actor is bounded to', () => {
   });
 });
 
-describe('may this actor touch a resource in this workspace', () => {
-  it('refuses nothing when the actor is not bounded — today, every caller', () => {
+describe('may this actor act for this company · the requester side', () => {
+  it('refuses nothing to a wildcard role holder, whose role is in every company', () => {
     expect(decideWorkspace(unbounded, 4).allowed).toBe(true);
     expect(decideWorkspace(unbounded, null).allowed).toBe(true);
     expect(decideWorkspace(unbounded, 4).because).toBe('unbounded');
   });
 
-  it('allows a bounded actor inside their own', () => {
+  it('allows a bounded actor for their own company', () => {
     expect(decideWorkspace(inOne, 1)).toMatchObject({ allowed: true, because: 'in-scope' });
   });
 
-  it('refuses a bounded actor outside it', () => {
+  it('refuses a bounded actor for another company', () => {
     expect(decideWorkspace(inOne, 4)).toMatchObject({
       allowed: false,
       because: 'outside-scope',
@@ -93,7 +88,7 @@ describe('may this actor touch a resource in this workspace', () => {
     });
   });
 
-  it('refuses an unknown workspace rather than guessing at one', () => {
+  it('refuses an unknown company rather than guessing at one', () => {
     expect(decideWorkspace(inOne, null)).toMatchObject({
       allowed: false,
       because: 'unknown-workspace',
@@ -104,7 +99,7 @@ describe('may this actor touch a resource in this workspace', () => {
     expect(decideWorkspace(inOne, 4).because).not.toBe(decideWorkspace(inOne, null).because);
   });
 
-  it('lets somebody who holds two companies reach both, declaration or not', () => {
+  it('lets somebody who holds two companies act for both, declaration or not', () => {
     const both = actor({ home: { wildcard: false, entityIds: [1, 4] }, declared: 1 });
     expect(decideWorkspace(both, 4).allowed).toBe(true);
     expect(decideWorkspace(both, 7).allowed).toBe(false);
@@ -126,33 +121,31 @@ describe('may this actor touch a resource in this workspace', () => {
   });
 });
 
-describe('where a new row gets filed', () => {
-  it('lets an unbounded caller keep choosing, which is what the client does today', () => {
-    expect(decideCreationWorkspace(unbounded, 4)).toMatchObject({ ok: true, workspace: 4 });
-    expect(decideCreationWorkspace(unbounded, undefined)).toMatchObject({ ok: true, workspace: null });
+describe('a warehouse permission is not a role in anybody’s company', () => {
+  /** The warehouse head on real data: every warehouse right, one role, in company 6. */
+  const warehouseHead = actor({
+    permissionNames: ['manage_warehouse', 'manage_reservations', 'manage_resource_returns', 'manage_items'],
+    home: { wildcard: false, entityIds: [6] },
   });
 
-  it('files a bounded caller where they are when they name nothing', () => {
-    expect(decideCreationWorkspace(declaringOne, undefined)).toMatchObject({ ok: true, workspace: 1 });
+  it('does not let warehouse staff act for company 3, 4 or 1', () => {
+    for (const company of [1, 3, 4]) {
+      expect(decideWorkspace(warehouseHead, company)).toMatchObject({ allowed: false, because: 'outside-scope' });
+    }
   });
 
-  it('refuses a bounded caller who names a company they hold no role in', () => {
-    expect(decideCreationWorkspace(declaringOne, 4)).toMatchObject({ ok: false, requested: 4 });
+  it('does not stand in for an unknown requester either', () => {
+    expect(decideWorkspace(warehouseHead, null)).toMatchObject({ allowed: false, because: 'unknown-workspace' });
   });
 
-  it('accepts a bounded caller naming their own', () => {
-    expect(decideCreationWorkspace(declaringOne, 1)).toMatchObject({ ok: true, workspace: 1 });
+  it('still lets them act for the company their role is in', () => {
+    expect(decideWorkspace(warehouseHead, 6).allowed).toBe(true);
   });
 
-  it('asks a caller with two workspaces and no declaration to say which', () => {
-    const both = actor({ home: { wildcard: false, entityIds: [1, 4] } });
-    expect(decideCreationWorkspace(both, undefined)).toMatchObject({ ok: false, requested: null });
-    expect(decideCreationWorkspace(both, 4)).toMatchObject({ ok: true, workspace: 4 });
-  });
-
-  it('never returns a workspace the caller could not have had', () => {
-    const refused = decideCreationWorkspace(declaringOne, 4);
-    expect(refused.ok).toBe(false);
-    expect(refused.workspace).toBeNull();
+  it('answers the same with and without the permissions — the boundary reads roles only', () => {
+    const noPermissions = actor({ permissionNames: [], home: { wildcard: false, entityIds: [6] } });
+    for (const company of [null, 1, 3, 4, 6]) {
+      expect(decideWorkspace(warehouseHead, company)).toEqual(decideWorkspace(noPermissions, company));
+    }
   });
 });

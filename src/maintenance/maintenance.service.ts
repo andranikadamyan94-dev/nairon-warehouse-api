@@ -28,17 +28,18 @@ export class MaintenanceService {
   ) {}
 
   /**
-   * May this person raise maintenance on this asset? A record's company is the
-   * asset's, through the item and its category, so this is the asset's question
-   * asked before the record exists. Shared with the preflight beside it.
+   * Can maintenance be raised on this asset? The asset has to exist. Authority
+   * is `manage_maintenance` on the route: the pool is shared by every company,
+   * so where the asset's item is filed refuses nobody. Shared with the
+   * preflight beside it.
    */
   async assertMayMaintain(actor: WarehouseActor, assetId: number) {
-    await this.workspaces.assertMayTouch(actor, 'asset', assetId);
+    await this.workspaces.of('asset', assetId);
   }
 
-  /** May this person change this record? */
+  /** Can this record be changed? It has to exist; authority is the route's `manage_maintenance`. */
   async assertMayEdit(actor: WarehouseActor, id: number) {
-    await this.workspaces.assertMayTouch(actor, 'maintenance', id);
+    await this.workspaces.of('maintenance', id);
   }
 
   /**
@@ -264,18 +265,16 @@ export class MaintenanceService {
     });
   }
 
-  async getUpcomingMaintenance(actor?: WarehouseActor) {
-    const scope = actor ? this.workspaces.scopeFor(actor, ['asset', 'item', 'category']) : undefined;
-
+  async getUpcomingMaintenance(_actor?: WarehouseActor) {
     return this.prisma.maintenanceRecord.findMany({
-      where: { endDate: { gte: new Date() }, ...(scope ?? {}) },
+      where: { endDate: { gte: new Date() } },
       include,
       orderBy: { startDate: 'asc' },
     });
   }
 
   async getAssetMaintenanceHistory(assetId: number, actor?: WarehouseActor) {
-    if (actor) await this.workspaces.assertMayTouch(actor, 'asset', assetId);
+    if (actor) await this.workspaces.of('asset', assetId);
     return this.prisma.maintenanceRecord.findMany({
       where: { assetId },
       include,
@@ -283,17 +282,15 @@ export class MaintenanceService {
     });
   }
 
-  async getAll(query: any, actor?: WarehouseActor) {
+  async getAll(query: any, _actor?: WarehouseActor) {
     const page = Number(query.page ?? 1);
     const limit = Number(query.limit ?? 10);
     const search = query.search as string | undefined;
 
-    // Nothing at all for an unbounded actor, which is everyone here today.
-    const scope = actor ? this.workspaces.scopeFor(actor, ['asset', 'item', 'category']) : undefined;
-
+    // Not narrowed by who is asking: the route's view/manage permission is the
+    // authority, and the pool is shared by every company.
     const where: any = search
       ? {
-          ...(scope ?? {}),
           OR: [
             {
               asset: {
@@ -307,7 +304,7 @@ export class MaintenanceService {
             },
           ],
         }
-      : { ...(scope ?? {}) };
+      : {};
 
     const order: 'asc' | 'desc' = query.sortOrder === 'asc' ? 'asc' : 'desc';
     // Every sort ends with id, because none of these columns is unique.
@@ -336,17 +333,14 @@ export class MaintenanceService {
     return { data, total, page, limit };
   }
 
-  async getOne(id: number, actor?: WarehouseActor) {
-    // Out of scope reads as missing. The internal route calls this with no
-    // actor and is unaffected: finance asking about a record it was told to
-    // settle is not a person browsing someone else's stock.
-    const scope = actor ? this.workspaces.scopeFor(actor, ['asset', 'item', 'category']) : undefined;
+  async getOne(id: number, _actor?: WarehouseActor) {
+    // The same row for everybody the route admits — and for the internal route,
+    // which calls this with no actor: finance asking about a record it was told
+    // to settle.
     const record = await this.prisma.maintenanceRecord.findFirst({
-      where: { id, ...(scope ?? {}) },
+      where: { id },
       include,
     });
-    // Missing and out of scope answer identically, and both answer 404 the way
-    // every other point read in this service does.
     if (!record) throw new NotFoundException('Maintenance record not found');
     return record;
   }

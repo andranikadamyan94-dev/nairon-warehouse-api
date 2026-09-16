@@ -1,86 +1,145 @@
-import { WarehouseActor, Workspace, boundedTo } from '../auth/actor';
+import { WarehouseActor, Workspace, decideWorkspace } from '../auth/actor';
 
 /**
- * A reservation has two companies, and they are not interchangeable.
+ * A reservation has two sides, and they are not interchangeable.
  *
- * THE THING THIS FILE EXISTS TO SAY
+ * WAREHOUSE V1 CONTRACT (owner decision, 2026-09-16)
  *
- * The warehouse is a shared physical store. Every one of the 71 reservations
- * here whose two companies can both be determined has DIFFERENT ones: company 7
- * and company 3 do the work, companies 1 and 4 own the shelves. Not one row is
- * same-company. So "which workspace does this reservation belong to" has no
- * single answer, and every attempt to give it one is wrong in a way that either
- * trusts the caller or breaks the product.
- *
- * It has two answers:
+ * The warehouse is ONE shared pool for every company. So the two sides are:
  *
  *   requester    the company whose work asked for the resource — from the CRM
- *                project, pinned when the reservation was made.
- *   stock owner  the company whose catalogue the item is filed under — from the
- *                item's category, derived on the spot.
+ *                project, pinned on the reservation as requesterWorkspaceId
+ *                when it was made — or, where the operation already has one,
+ *                the authoritative CRM task relationship.
+ *   warehouse    the shared warehouse, operated by whoever holds the existing
+ *                warehouse permission for the act. Not a company.
  *
- * And two sides of authority that must not leak into each other:
+ * The model is Requester Organization <-> Shared Warehouse. It is NOT requester
+ * company <-> stock-owner company: the company a category happens to be filed
+ * under (ItemCategory.entityId, reported as `stockOwner`) is bookkeeping, and
+ * grants or refuses nothing. The head of the warehouse holds a role only in
+ * company 6; the pool is filed under company 1; they run all of it.
+ *
+ * And the two sides must not leak into each other:
  *
  *   A person who runs projects for the requester may ask, change their own
- *   request, hand things back and confirm receipt. They may NOT approve stock
- *   out of somebody else's store, reject a request, or take goods back onto a
- *   shelf that is not theirs.
+ *   request and hand things back. They may NOT approve stock, reject a
+ *   request, or take goods back onto a shelf — that needs a warehouse
+ *   permission.
  *
- *   A person who runs the stock owner's warehouse may approve, allocate,
- *   reject, release and receive. They may NOT rewrite what the requester asked
- *   for or why — that is another company's business purpose.
+ *   Warehouse staff may approve, allocate, reject, release and receive. They
+ *   may NOT act as the requester of another company's work — a warehouse
+ *   permission is not a role in the requester's company.
  *
  * Some actions belong to both sides and are marked as such. Reading is its own
  * question and lives in `mayRead` below.
+ *
+ * What is never an input: ResourceReservation.entityId. It is a legacy label
+ * whose rows mean three different things; it grants nothing, refuses nothing
+ * and is never a fallback for an unknown requester.
  */
 
-/** The two companies of one reservation, either of which may be unknown. */
+/**
+ * The two companies a reservation can name. Only `requester` carries
+ * authority; `stockOwner` is where the item is filed, kept for previews and
+ * logs. Either may be unknown.
+ */
 export type ReservationParties = {
   requester: Workspace;
   stockOwner: Workspace;
 };
 
-export type Side = 'requester' | 'stock-owner';
+export type Side = 'requester' | 'warehouse';
 
 export type SideVerdict = {
   allowed: boolean;
   because:
-    /** The actor's roles are not confined to any company, so nothing narrows. */
+    /** Requester: a wildcard role applies in every company, the requester's included. */
     | 'unbounded'
-    /** They hold a role in that side's company. */
+    /** Requester: they hold a role in the requester's company. */
     | 'in-scope'
-    /** They hold a role, but somewhere else. */
+    /** Requester: they hold a role, but somewhere else. */
     | 'outside-scope'
-    /** The row cannot say which company that side is. Never a match. */
-    | 'unknown-workspace';
+    /** Requester: the row cannot say which company asked, and nothing else stands in. */
+    | 'unknown-workspace'
+    /** Requester, legacy row: they are on the CRM task the reservation serves. */
+    | 'on-the-task'
+    /** Warehouse: they hold the warehouse permission this act needs. */
+    | 'warehouse-permission'
+    /** Warehouse: they do not. */
+    | 'no-warehouse-permission';
   side: Side;
+  /** The requester company for a requester verdict; always null for the warehouse. */
   workspace: Workspace;
 };
 
+/** What a caller already established about the actor and this reservation's task. */
+export type StandingContext = {
+  /** The actor holds one of the CRM task's role slots — asked of CRM, never of the body. */
+  onTheTask?: boolean;
+};
+
 /**
- * May this actor act on `side` of this reservation?
+ * May this actor act as the REQUESTER of this reservation?
  *
- * The same three-case rule the rest of the warehouse uses, asked separately per
- * side — which is the whole point. An actor unbounded by their roles passes
- * both, and that is every account in this installation today, so this changes
- * nothing for anyone until a company-scoped role exists. An actor bounded to the
- * requester's company passes the requester side and fails the stock owner's.
+ * The requester company is the authority. When it is known, the actor must
+ * hold a role in it (or a wildcard role, which is a role in every company). A
+ * warehouse permission is not a role there and changes nothing.
  *
- * An unknown company is never a match: a reservation whose project was deleted
- * cannot be acted on from inside a company, because nobody can say whether it
- * is inside it.
+ * When it is NOT known — the legacy rows made before it was pinned — nothing is
+ * guessed. A wildcard holder still passes, because every possible answer is a
+ * company they hold a role in. Anybody else passes only on the authoritative
+ * CRM task relationship, when the operation has one: being on the task is a
+ * narrower proof of taking part in the requesting work than a company would
+ * be. Without it, the requester-side act is refused.
  */
-export function decideSide(
+export function decideRequester(
   actor: WarehouseActor,
   parties: ReservationParties,
-  side: Side,
+  context: StandingContext = {},
 ): SideVerdict {
-  const workspace = side === 'requester' ? parties.requester : parties.stockOwner;
-  const bounds = boundedTo(actor);
-  if (bounds === null) return { allowed: true, because: 'unbounded', side, workspace };
-  if (workspace === null) return { allowed: false, because: 'unknown-workspace', side, workspace };
-  if (bounds.includes(workspace)) return { allowed: true, because: 'in-scope', side, workspace };
-  return { allowed: false, because: 'outside-scope', side, workspace };
+  const verdict = decideWorkspace(actor, parties.requester);
+  if (!verdict.allowed && verdict.because === 'unknown-workspace' && context.onTheTask === true) {
+    return { allowed: true, because: 'on-the-task', side: 'requester', workspace: null };
+  }
+  return { allowed: verdict.allowed, because: verdict.because, side: 'requester', workspace: verdict.workspace };
+}
+
+/**
+ * The existing warehouse permission each warehouse-side act needs — the same
+ * one its route already demands with `@Permissions` (checked against the real
+ * controllers in two-party.spec.ts). Not a new permission system: this is the
+ * route's answer, asked again where the service decides.
+ */
+export const WAREHOUSE_OPERATION_PERMISSIONS: Record<string, string[]> = {
+  'reservation.approve': ['manage_reservations'],
+  'reservation.allocate': ['manage_reservations'],
+  'reservation.reject': ['manage_reservations'],
+  'reservation.release': ['manage_reservations'],
+  'reservation.reallocate': ['manage_reservations'],
+  'reservation.cancel': ['manage_reservations'],
+  'reservation.uncancel': ['manage_reservations'],
+  'return.receive': ['manage_resource_returns'],
+  'return.cancel': ['manage_resource_returns'],
+};
+
+/**
+ * May this actor act as the WAREHOUSE for this operation?
+ *
+ * Permissions only, exactly as PermissionGuard grants them: a super admin, the
+ * warehouse super-permission `manage_warehouse`, or the operation's own
+ * permission. No company is consulted — not the actor's, not the category's,
+ * not the requester's — so a missing requesterWorkspaceId takes nothing away.
+ */
+export function decideWarehouse(actor: WarehouseActor, operation: string): SideVerdict {
+  const needed = WAREHOUSE_OPERATION_PERMISSIONS[operation] ?? [];
+  const holds =
+    actor.isSuperAdmin ||
+    actor.permissionNames.includes('manage_warehouse') ||
+    needed.some((p) => actor.permissionNames.includes(p));
+  return holds
+    ? { allowed: true, because: 'warehouse-permission', side: 'warehouse', workspace: null }
+    : { allowed: false, because: 'no-warehouse-permission', side: 'warehouse', workspace: null };
 }
 
 /**
@@ -91,9 +150,13 @@ export function decideSide(
  * "checked the wrong side", and that is only visible when the answers sit next
  * to each other.
  *
- * `both` means the action needs standing on either side and is not a leak in
- * either direction: cancelling a reservation ends an arrangement both companies
- * are part of, and either may walk away from it.
+ * `both` means standing on either side is enough, and is not a leak in either
+ * direction: cancelling a reservation ends an arrangement both sides are part
+ * of, and either may walk away from it.
+ *
+ * `reservation.accept` is classified here but decided in the service by the CRM
+ * task relationship (or super admin), as it always has been — confirming
+ * receipt is what the people on the task do.
  */
 export const OPERATION_SIDE: Record<string, Side | 'both'> = {
   /* The requester's business purpose. */
@@ -102,15 +165,15 @@ export const OPERATION_SIDE: Record<string, Side | 'both'> = {
   'reservation.accept': 'requester',
   'return.create': 'requester',
 
-  /* The stock owner's shelves. */
-  'reservation.approve': 'stock-owner',
-  'reservation.allocate': 'stock-owner',
-  'reservation.reject': 'stock-owner',
-  'reservation.release': 'stock-owner',
-  'reservation.reallocate': 'stock-owner',
-  'return.receive': 'stock-owner',
+  /* The shared warehouse. */
+  'reservation.approve': 'warehouse',
+  'reservation.allocate': 'warehouse',
+  'reservation.reject': 'warehouse',
+  'reservation.release': 'warehouse',
+  'reservation.reallocate': 'warehouse',
+  'return.receive': 'warehouse',
 
-  /* Either party may end an arrangement they are part of. */
+  /* Either side may end an arrangement they are part of. */
   'reservation.cancel': 'both',
   'reservation.uncancel': 'both',
   'return.cancel': 'both',
@@ -127,34 +190,37 @@ export function decideOperation(
   actor: WarehouseActor,
   parties: ReservationParties,
   operation: keyof typeof OPERATION_SIDE | string,
+  context: StandingContext = {},
 ): SideVerdict {
   const side = OPERATION_SIDE[operation];
   if (side === undefined) {
     // An operation nobody classified is not quietly allowed. Adding one means
     // deciding whose it is.
-    return { allowed: false, because: 'unknown-workspace', side: 'stock-owner', workspace: null };
+    return { allowed: false, because: 'no-warehouse-permission', side: 'warehouse', workspace: null };
   }
-  if (side !== 'both') return decideSide(actor, parties, side);
+  if (side === 'requester') return decideRequester(actor, parties, context);
+  if (side === 'warehouse') return decideWarehouse(actor, operation);
 
-  const asRequester = decideSide(actor, parties, 'requester');
+  const asRequester = decideRequester(actor, parties, context);
   if (asRequester.allowed) return asRequester;
-  return decideSide(actor, parties, 'stock-owner');
+  return decideWarehouse(actor, operation);
 }
 
 /**
  * Who may READ a reservation, which is a wider question than who may change it.
  *
- * Five audiences, and leaving any of them out breaks something real:
+ * Four audiences, and leaving any of them out breaks something real:
  *
  *   - the requester's people, or the store fills orders nobody can follow;
- *   - the stock owner's people, or warehouse staff cannot fulfil what was asked;
- *   - the people on the task, who are neither and are the ones holding the
- *     drill — decided by CRM, not here, which is why it arrives as a flag;
- *   - warehouse staff with a viewing permission, for the fulfilment screens;
- *   - global admins.
+ *   - the people on the task, who are the ones holding the drill — decided by
+ *     CRM, not here, which is why it arrives as a flag;
+ *   - warehouse staff with a viewing or managing warehouse permission, whichever
+ *     company their roles are in — the warehouse is shared, and they cannot
+ *     fulfil what they cannot see;
+ *   - super admins.
  *
- * What is NOT an audience: "anybody with a token", which is what
- * `GET /reservations/task/:taskId` answered until this phase.
+ * What is NOT an audience: "anybody with a token", and not "somebody with a
+ * role in the company the item is filed under" — that company is bookkeeping.
  */
 export function mayRead(
   actor: WarehouseActor,
@@ -163,9 +229,8 @@ export function mayRead(
 ): boolean {
   if (actor.isSuperAdmin) return true;
   if (context.onTheTask) return true;
-  if (decideSide(actor, parties, 'requester').allowed) return true;
-  if (decideSide(actor, parties, 'stock-owner').allowed) return true;
-  return context.warehouseViewer === true && boundedTo(actor) === null;
+  if (decideRequester(actor, parties).allowed) return true;
+  return context.warehouseViewer === true;
 }
 
 /** The permissions that make somebody warehouse staff for reading purposes. */
@@ -180,3 +245,20 @@ export const WAREHOUSE_VIEWER_PERMISSIONS = [
 
 export const isWarehouseViewer = (actor: WarehouseActor): boolean =>
   actor.isSuperAdmin || WAREHOUSE_VIEWER_PERMISSIONS.some((p) => actor.permissionNames.includes(p));
+
+/**
+ * Who may READ a reservation as warehouse staff: the viewers above, plus the
+ * people reservation alerts are sent to.
+ *
+ * `GET /reservations/:id` admits `receive_reservation_alerts` so that an alert
+ * can open the reservation it links to, and the service must not contradict
+ * that route with a 404. READ ONLY: this list is consulted by the reservation
+ * read paths and nothing else. It is not requester standing (decideRequester
+ * reads roles, never permissions), it is not warehouse authority
+ * (decideWarehouse reads WAREHOUSE_OPERATION_PERMISSIONS), and returns keep
+ * isWarehouseViewer.
+ */
+export const RESERVATION_READ_PERMISSIONS = [...WAREHOUSE_VIEWER_PERMISSIONS, 'receive_reservation_alerts'];
+
+export const isReservationReader = (actor: WarehouseActor): boolean =>
+  actor.isSuperAdmin || RESERVATION_READ_PERMISSIONS.some((p) => actor.permissionNames.includes(p));

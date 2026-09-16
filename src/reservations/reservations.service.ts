@@ -13,10 +13,10 @@ import { AvailabilityService } from '../availability/availability.service';
 
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
-import { WarehouseActor, boundedTo } from '../auth/actor';
+import { WarehouseActor } from '../auth/actor';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 import { RequesterWorkspaceService } from '../common/workspace/requester-workspace.service';
-import { ReservationParties, decideOperation, isWarehouseViewer, mayRead } from './two-party';
+import { ReservationParties, decideOperation, isReservationReader, mayRead } from './two-party';
 import { quantitiesOf } from './quantities';
 import { lockItem, lockReservation } from '../common/operations/row-lock';
 import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
@@ -520,33 +520,18 @@ export class ReservationsService {
   }
 
   /**
-   * The company label on a reservation, checked — not enforced.
-   *
-   * `ResourceReservation.entityId` is the old field, kept meaning what it always
-   * meant: a label the request body carried. Of the 55 rows here that carry one
-   * and whose project can still be found, 46 agree with the project's company,
-   * 3 name the STOCK OWNER and 6 name neither — three meanings in one column,
-   * which is why nothing authorizes anything with it. `requesterWorkspaceId` is
-   * the answer now, and it is derived rather than sent.
-   *
-   * This check survives as bookkeeping hygiene: somebody should not label their
-   * request with a company they have nothing to do with. It refuses nothing that
-   * the two-party rules would allow.
-   */
-  private assertMayLabelWith(actor: WarehouseActor | undefined, entityId?: number | null) {
-    if (!actor || entityId == null) return;
-    const bounds = boundedTo(actor);
-    if (bounds === null || bounds.includes(Number(entityId))) return;
-    throw new ForbiddenException('You hold no role in the company this request names');
-  }
-
-  /**
    * Both companies of a reservation, and the rule that uses them.
    *
    * Every mutation below that names a reservation asks this, with the operation
-   * it is about to perform, so that requester-side authority and stock-owner
+   * it is about to perform, so that requester-side authority and warehouse-side
    * authority stay separate. See two-party.ts for which operation belongs to
    * which side and why.
+   *
+   * `ResourceReservation.entityId` is not an input — here or anywhere. It is a
+   * legacy label the request body carried (46 rows name the project's company,
+   * 3 the catalogue's, 6 neither); it is still stored and returned as it always
+   * was, and it grants nothing and refuses nothing. `requesterWorkspaceId` is
+   * the requester, and it is derived rather than sent.
    */
   async assertMay(
     actor: WarehouseActor | undefined,
@@ -558,9 +543,11 @@ export class ReservationsService {
     const verdict = decideOperation(actor, parties, operation);
     if (!verdict.allowed) {
       throw new ForbiddenException(
-        verdict.because === 'unknown-workspace'
-          ? `This reservation cannot say which company is its ${verdict.side}, so it cannot be acted on from inside one`
-          : `This is another company's to ${verdict.side === 'requester' ? 'ask for' : 'fulfil'}`,
+        verdict.side === 'warehouse'
+          ? 'This needs the warehouse permission for it'
+          : verdict.because === 'unknown-workspace'
+            ? 'This reservation cannot say which company asked for it, so it cannot be acted on as its requester'
+            : "This is another company's to ask for",
       );
     }
     return parties;
@@ -574,7 +561,7 @@ export class ReservationsService {
   ): Promise<void> {
     if (!actor) return;
     const parties = await this.workspaces.partiesOfReservation(reservationId);
-    if (mayRead(actor, parties, { onTheTask, warehouseViewer: isWarehouseViewer(actor) })) return;
+    if (mayRead(actor, parties, { onTheTask, warehouseViewer: isReservationReader(actor) })) return;
     // Not found rather than forbidden: somebody with no standing learns nothing
     // about which ids are taken.
     throw new NotFoundException('Reservation not found');
@@ -592,8 +579,6 @@ export class ReservationsService {
   }
 
   async create(dto: CreateReservationDto, performedBy?: number, actor?: WarehouseActor) {
-    this.assertMayLabelWith(actor, dto.entityId);
-
     /*
      * Who asked, decided here rather than taken from the body. The project is
      * the authority — it is what says whose work this is — and the answer is
@@ -921,8 +906,6 @@ export class ReservationsService {
    * the answer can be binding.
    */
   async previewCreate(dto: CreateReservationDto, actor?: WarehouseActor): Promise<ReservationRequestPreview> {
-    this.assertMayLabelWith(actor, dto.entityId);
-
     const requesterWorkspaceId = await this.requesters.forRequest({
       projectId: dto.projectId,
       taskId: dto.taskId,
@@ -1017,8 +1000,6 @@ export class ReservationsService {
     dto: CreateReservationDto,
     actor?: WarehouseActor,
   ): Promise<ReservationUpdatePreview> {
-    this.assertMayLabelWith(actor, dto.entityId);
-
     const requesterWorkspaceId = await this.requesters.forRequest({ projectId: dto.projectId, taskId });
     if (requesterWorkspaceId === null) {
       throw new BadRequestException(
@@ -1246,7 +1227,7 @@ export class ReservationsService {
     quantity?: number,
     actor?: WarehouseActor,
   ) {
-    // Handing stock out is the shelf owner's decision, not the asker's.
+    // Handing stock out is the warehouse's decision, not the asker's.
     await this.assertMay(actor, reservationId, 'reservation.approve');    const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id: reservationId },
       include: { item: true },
@@ -1753,8 +1734,8 @@ export class ReservationsService {
    * "Could this person walk away from this arrangement, right now?"
    *
    * The two checks `cancel` makes, in the same order, and nothing written.
-   * Both parties come from `assertMay`, which decides requester-side and
-   * stock-owner-side authority separately — see two-party.ts.
+   * Both sides come from `assertMay`, which decides requester-side and
+   * warehouse-side authority separately — see two-party.ts.
    */
   async assertCanCancel(reservationId: number, actor?: WarehouseActor) {
     const parties = await this.assertMay(actor, reservationId, 'reservation.cancel');
@@ -1926,7 +1907,7 @@ export class ReservationsService {
   // ─── reject ──────────────────────────────────────────────────────────────────
 
   async reject(reservationId: number, performedBy?: number, reason?: string, actor?: WarehouseActor) {
-    // Turning a request down is the shelf owner's answer to it.
+    // Turning a request down is the warehouse's answer to it.
     await this.assertMay(actor, reservationId, 'reservation.reject');
     const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id: reservationId },
@@ -2477,7 +2458,7 @@ export class ReservationsService {
               requester: r.requesterWorkspaceId ?? null,
               stockOwner: (r as { item?: { category?: { entityId?: number } } }).item?.category?.entityId ?? null,
             },
-            { onTheTask, warehouseViewer: isWarehouseViewer(actor) },
+            { onTheTask, warehouseViewer: isReservationReader(actor) },
           ),
         )
       : reservations0;
@@ -2600,8 +2581,6 @@ export class ReservationsService {
     performedBy?: number,
     actor?: WarehouseActor,
   ) {
-    this.assertMayLabelWith(actor, dto.entityId);
-
     /*
      * Who asked, decided the same way create decides it. Rows this call creates
      * carry it; rows it keeps already have it. The requester of an existing
