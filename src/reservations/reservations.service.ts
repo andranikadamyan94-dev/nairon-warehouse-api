@@ -1684,13 +1684,38 @@ export class ReservationsService {
       };
     });
 
-    return { data: enriched, total, page, limit };
+    const requisitions = await this.requisitionsFor(enriched.map((r: any) => r.id));
+    return {
+      data: enriched.map((r: any) => ({ ...r, requisition: requisitions.get(r.id) ?? null })),
+      total,
+      page,
+      limit,
+    };
+  }
+
+  /**
+   * The purchase requisition raised for each reservation, if any — the latest
+   * line pointing at it, with its request's status, so the list can show
+   * «Հայտ #N» next to a short reservation (2026-09-16).
+   */
+  private async requisitionsFor(reservationIds: number[]): Promise<Map<number, { id: number; lineId: number; status: string }>> {
+    const map = new Map<number, { id: number; lineId: number; status: string }>();
+    if (!reservationIds.length) return map;
+    const lines = await (this.prisma as any).purchaseRequisitionLine.findMany({
+      where: { reservationId: { in: reservationIds } },
+      select: { id: true, reservationId: true, requisition: { select: { id: true, status: true } } },
+      orderBy: { id: 'desc' },
+    });
+    for (const l of lines) {
+      if (!map.has(l.reservationId)) map.set(l.reservationId, { id: l.requisition.id, lineId: l.id, status: l.requisition.status });
+    }
+    return map;
   }
 
   // ─── getOne ──────────────────────────────────────────────────────────────────
 
   async getOne(id: number) {
-    return this.prisma.resourceReservation.findUnique({
+    const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id },
       include: {
         item: true,
@@ -1699,6 +1724,10 @@ export class ReservationsService {
         allocationHistory: { include: { asset: true }, orderBy: { performedAt: 'asc' } },
       },
     });
+    if (!reservation) return null;
+    // The requisition raised for this reservation, so the drawer can say
+    // «Հայտ #N» instead of offering to raise a second one.
+    return { ...reservation, requisition: (await this.requisitionsFor([id])).get(id) ?? null };
   }
 
   // ─── getTaskReservations ─────────────────────────────────────────────────────
