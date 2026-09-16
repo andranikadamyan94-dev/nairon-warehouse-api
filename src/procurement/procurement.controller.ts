@@ -21,7 +21,9 @@ export class ProcurementController {
   constructor(private readonly procurementService: ProcurementService) {}
 
   @UseGuards(PermissionGuard)
-  @Permissions('view_procurement', 'manage_procurement')
+  // receive_procurement_alerts: the people the alerts are sent to must be able
+  // to open what the alert links to (read only — writes stay with manage_*).
+  @Permissions('view_procurement', 'manage_procurement', 'receive_procurement_alerts')
   @Get()
   @ApiOperation({ summary: 'Get all procurement orders' })
   findAll(@Query() query: any) { return this.procurementService.findAll(query); }
@@ -38,7 +40,7 @@ export class ProcurementController {
   findReceivable(@Query() query: any) { return this.procurementService.findReceivable(query); }
 
   @UseGuards(PermissionGuard)
-  @Permissions('view_procurement', 'manage_procurement')
+  @Permissions('view_procurement', 'manage_procurement', 'receive_procurement_alerts')
   @Get(':id')
   @ApiOperation({ summary: 'Get procurement order by id' })
   findOne(@Param('id', ParseIntPipe) id: number) { return this.procurementService.findOne(id); }

@@ -180,14 +180,15 @@ export class ReservationsController {
 
   @Get()
   @UseGuards(PermissionGuard)
-  @Permissions('view_reservations', 'manage_reservations')
+  // receive_reservation_alerts: alert holders can open the list the alert links to.
+  @Permissions('view_reservations', 'manage_reservations', 'receive_reservation_alerts')
   getAll(@Query() query: PaginationQueryDto) {
     return this.reservationsService.getAll(query);
   }
 
   @Get(':id')
   @UseGuards(PermissionGuard)
-  @Permissions('view_reservations', 'manage_reservations')
+  @Permissions('view_reservations', 'manage_reservations', 'receive_reservation_alerts')
   getOne(@Param('id') id: string) {
     return this.reservationsService.getOne(+id);
   }

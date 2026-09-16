@@ -33,7 +33,7 @@ export class AllocationsController {
   constructor(private readonly allocationsService: AllocationsService) {}
 
   @UseGuards(PermissionGuard)
-  @Permissions('view_reservations', 'manage_reservations')
+  @Permissions('view_reservations', 'manage_reservations', 'receive_reservation_alerts')
   @Get()
   getAll(
     @Query()

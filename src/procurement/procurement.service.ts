@@ -519,6 +519,8 @@ export class ProcurementService {
     if (prepaid > 0 && deliveredValue < prepaid - 0.005) {
       void this.notifications.send({
         permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+        // The one procurement alert that had no path — it landed on the app root.
+        path: '/procurement',
         title: 'Կանխավճարը գերազանցում է ստացվածը',
         body:
           `Պատվեր #${order.id}: կանխավճար ${prepaid}, ստացվել է ${deliveredValue}-ի չափով։ ` +

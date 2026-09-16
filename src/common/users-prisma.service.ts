@@ -169,7 +169,8 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
       JOIN "Role" r ON r.id = ur."roleId"
       LEFT JOIN "RolePermission" rp ON rp."roleId" = r.id
       LEFT JOIN "Permission" p ON p.id = rp."permissionId"
-      WHERE p.name = ANY(${permissions}::text[]) OR r."isSuperAdmin" = true
+      WHERE u."deactivatedAt" IS NULL
+        AND (p.name = ANY(${permissions}::text[]) OR r."isSuperAdmin" = true)
     `;
   }
 }
