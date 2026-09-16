@@ -76,6 +76,16 @@ export class ReservationsController {
     return this.reservationsService.restampTaskObject(+taskId, body?.objectId ?? null);
   }
 
+  // 2026-09-16: a task may not be marked Կատարված while goods it asked the
+  // warehouse for are still unaccepted. CRM asks here before the verdict.
+  @Public()
+  @UseGuards(InternalGuard)
+  @Get('internal/task/:taskId/unaccepted')
+  @ApiOperation({ summary: "A task's reservations still awaiting issue or acceptance (internal)" })
+  unacceptedForTask(@Param('taskId') taskId: string) {
+    return this.reservationsService.unacceptedForTask(+taskId);
+  }
+
   @Post('allocate')
   @UseGuards(PermissionGuard)
   @Permissions('manage_reservations')

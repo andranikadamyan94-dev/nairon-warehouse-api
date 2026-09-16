@@ -1732,6 +1732,67 @@ export class ReservationsService {
 
   // ─── getTaskReservations ─────────────────────────────────────────────────────
 
+  /**
+   * What the task still owes the warehouse handshake (2026-09-16): every live
+   * reservation that is not fully accepted — goods not yet issued, or issued
+   * goods the task has not confirmed. CRM refuses Կատարված while this is
+   * non-empty.
+   *
+   * Measured the way accept() measures: what is currently out is the sum of
+   * allocations that have not been released, and what was issued at all
+   * includes released ones — so handing goods back does not re-open the
+   * request, it only stops counting against acceptance.
+   */
+  async unacceptedForTask(taskId: number) {
+    const rows = await this.prisma.resourceReservation.findMany({
+      where: {
+        taskId,
+        status: {
+          notIn: [
+            ResourceReservationStatus.CANCELLED,
+            ResourceReservationStatus.REJECTED,
+            ResourceReservationStatus.COMPLETED,
+          ],
+        },
+        replacedByReservationId: null,
+      },
+      include: { item: { select: { id: true, name: true, unit: true } } },
+      orderBy: { id: 'asc' },
+    });
+
+    const blocking: {
+      id: number; itemName: string; unit: string | null; status: string;
+      requested: number; issued: number; accepted: number; outstandingToIssue: number; unacceptedOut: number;
+    }[] = [];
+
+    for (const r of rows) {
+      const [everAgg, outAgg] = await Promise.all([
+        this.prisma.reservationAllocation.aggregate({ where: { reservationId: r.id }, _sum: { quantity: true } }),
+        this.prisma.reservationAllocation.aggregate({ where: { reservationId: r.id, releasedAt: null }, _sum: { quantity: true } }),
+      ]);
+      const requested = roundQty(r.quantity ?? 0);
+      const issued = roundQty(everAgg._sum.quantity ?? 0);
+      const out = roundQty(outAgg._sum.quantity ?? 0);
+      const accepted = roundQty(r.acceptedQuantity ?? 0);
+      const outstandingToIssue = roundQty(Math.max(0, requested - issued));
+      const unacceptedOut = roundQty(Math.max(0, out - accepted));
+      if (outstandingToIssue > 0 || unacceptedOut > 0) {
+        blocking.push({
+          id: r.id,
+          itemName: r.item?.name ?? `#${r.itemId}`,
+          unit: (r.item?.unit as string | null) ?? null,
+          status: r.status,
+          requested,
+          issued,
+          accepted,
+          outstandingToIssue,
+          unacceptedOut,
+        });
+      }
+    }
+    return { blocking };
+  }
+
   async getTaskReservations(taskId: number) {
     const reservations = await this.prisma.resourceReservation.findMany({
       where: {
