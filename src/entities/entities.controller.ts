@@ -1,6 +1,7 @@
-import { Controller, Get, Patch, Headers, Body } from '@nestjs/common';
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { Controller, Get, Patch, Headers, Body, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
+import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 
 @ApiTags('Entities')
 @ApiBearerAuth()
@@ -20,6 +21,33 @@ export class EntitiesController {
       });
       if (!res.ok) return [];
       return res.json();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Every organization, id + name, regardless of the caller's memberships.
+   *
+   * A purchase order is bought FOR an organization, and procurement buys for
+   * all of them — the buyer's own memberships say nothing about who the goods
+   * are for. So the procurement form offers the whole directory (HR's internal
+   * list, the one the cross-entity request picker uses), not the scoped list
+   * above. Reading it takes the procurement permission; what the order then
+   * does with the organization is procurement's business, as before.
+   */
+  @Get('all')
+  @UseGuards(PermissionGuard)
+  @Permissions('view_procurement', 'manage_procurement')
+  @ApiOperation({ summary: 'All organizations (id + name) for the procurement form' })
+  async findAllUnscoped(): Promise<{ id: number; name: string }[]> {
+    try {
+      const res = await fetch(`${this.hrUrl}/api/entities/internal/all`, {
+        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || 'nairon-internal' },
+      });
+      if (!res.ok) return [];
+      const rows = (await res.json()) as { id: number; name: string }[];
+      return Array.isArray(rows) ? rows.map((e) => ({ id: e.id, name: e.name })) : [];
     } catch {
       return [];
     }
