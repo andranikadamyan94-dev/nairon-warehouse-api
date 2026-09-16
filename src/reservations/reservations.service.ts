@@ -2448,6 +2448,47 @@ export class ReservationsService {
 
   // ─── getTaskReservations ─────────────────────────────────────────────────────
 
+  /**
+   * What the task still owes the warehouse handshake (2026-09-16): every live
+   * reservation that is not fully accepted — goods not yet issued, or issued
+   * goods the task has not confirmed. CRM refuses Կատարված while this is
+   * non-empty. Returned goods do not count against acceptance.
+   */
+  async unacceptedForTask(taskId: number) {
+    const rows = await this.prisma.resourceReservation.findMany({
+      where: {
+        taskId,
+        status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.REJECTED, ResourceReservationStatus.COMPLETED] },
+        replacedByReservationId: null,
+      },
+      include: { item: { select: { id: true, name: true, unit: true } } },
+      orderBy: { id: 'asc' },
+    });
+    const blocking: {
+      id: number; itemName: string; unit: string | null; status: string;
+      requested: number; issued: number; accepted: number; outstandingToIssue: number; unacceptedOut: number;
+    }[] = [];
+    for (const r of rows) {
+      const q = await quantitiesOf(this.prisma, r.id);
+      const accepted = roundQty((r as any).acceptedQuantity ?? 0);
+      const unacceptedOut = roundQty(Math.max(0, q.out - accepted));
+      if (q.outstandingToIssue > 0 || unacceptedOut > 0) {
+        blocking.push({
+          id: r.id,
+          itemName: r.item?.name ?? `#${r.itemId}`,
+          unit: (r.item?.unit as string | null) ?? null,
+          status: r.status,
+          requested: q.requested,
+          issued: q.issued,
+          accepted,
+          outstandingToIssue: q.outstandingToIssue,
+          unacceptedOut,
+        });
+      }
+    }
+    return { blocking };
+  }
+
   async getTaskReservations(taskId: number, actor?: WarehouseActor) {
     const onTheTask = actor ? await this.isOnTask(taskId, actor.userId) : false;
     const reservations0 = await this.prisma.resourceReservation.findMany({
