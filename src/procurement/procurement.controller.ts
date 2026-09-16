@@ -96,11 +96,11 @@ export class ProcurementController {
   @ApiConsumes('multipart/form-data')
   @ApiOperation({
     summary:
-      'Record a delivery — requires a receipt file. Send `lines` for a partial delivery; omit it to receive the whole outstanding remainder.',
+      'Record a delivery — requires a document number; the receipt file is optional. Send `lines` for a partial delivery; omit it to receive the whole outstanding remainder.',
   })
   receive(
     @Param('id', ParseIntPipe) id: number,
-    @UploadedFile() receipt: Express.Multer.File,
+    @UploadedFile() receipt: Express.Multer.File | undefined,
     @Body() body: { lines?: string | ReceiveDeliveryLineDto[]; notes?: string; documentNumber?: string },
     @LoggedInUser('id') userId?: number,
   ) {

@@ -321,11 +321,8 @@ export class ProcurementService {
         'Պատվերը դեռ հաստատված չէ գնումների կողմից որպես պատվիրված',
       );
     }
-    if (!receiptFile) {
-      throw new BadRequestException(
-        'Մատակարարումը գրանցելու համար պարտադիր է կցել փաստաթուղթ',
-      );
-    }
+    // 2026-09-16: the receipt scan is optional; the document number below is
+    // what a delivery is filed under.
     // The paper's own number (invoice/waybill №) — without it the stored file
     // can't be reconciled against the supplier's books.
     const documentNumber = dto?.documentNumber?.trim();
@@ -368,7 +365,10 @@ export class ProcurementService {
       planned.push({ line, quantity: entry.quantity });
     }
 
-    const receiptUrl = this.fileService.upload(receiptFile);
+    // The receipt file is optional (2026-09-16): the document number is the
+    // record, the scan is a convenience. No file, no URL — never a crash on
+    // `undefined.mimetype`.
+    const receiptUrl = receiptFile ? this.fileService.upload(receiptFile) : null;
     const isFirstDelivery = !order.receivedAt;
 
     // Large asset orders (bulk createMany) need more than the 5s default
