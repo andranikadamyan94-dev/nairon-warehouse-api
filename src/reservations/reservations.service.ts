@@ -705,13 +705,22 @@ export class ReservationsService {
            * Availability was measured before this transaction opened, which is
            * a fine thing to SHOW somebody and not a thing to commit on. Two
            * requests for the last three of something both read "three free".
-           * Re-measured here, against rows this transaction can see.
+           * Re-measured here, against rows this transaction can see — in the
+           * reservation's own pool — and a request the shelf cannot cover is
+           * made PENDING for the warehouse to decide, not refused (Pre-P4 A4).
            */
-          await this.assertStillReservable(tx, resource.itemId, resource.quantity, startDate, endDate);
-
-          const isUnavailable = availability.unavailableResources.some(
-            (r) => r.itemId === resource.itemId && !r.date,
+          const stillFree = await this.stillReservable(
+            tx,
+            resource.itemId,
+            resource.quantity,
+            startDate,
+            endDate,
+            warehouseId,
           );
+
+          const isUnavailable =
+            !stillFree ||
+            availability.unavailableResources.some((r) => r.itemId === resource.itemId && !r.date);
           const status = isUnavailable
             ? ResourceReservationStatus.PENDING
             : ResourceReservationStatus.APPROVED;
@@ -739,13 +748,22 @@ export class ReservationsService {
       }
     });
 
-    if (availability.unavailableResources.length) {
+    // A row can also become PENDING on the re-measure inside the transaction,
+    // when another request took the stock in between; it needs the same alert.
+    const pendingRows = created.filter((c) => c.status === ResourceReservationStatus.PENDING);
+
+    if (availability.unavailableResources.length || pendingRows.length) {
       this.logger.warn(
         `CREATE reservation taskId=${dto.taskId} | unavailable: ${JSON.stringify(availability.unavailableResources)}`,
       );
       // Only conflicting requests land in PENDING and need a human decision —
       // freely available stock is auto-approved and needs no alert.
-      const names = [...new Set(availability.unavailableResources.map((r: any) => r.name ?? `#${r.itemId}`))];
+      const names = [
+        ...new Set([
+          ...availability.unavailableResources.map((r: any) => r.name ?? `#${r.itemId}`),
+          ...pendingRows.map((c) => `#${c.itemId}`),
+        ]),
+      ];
       void this.notifications.send({
         permissions: ['receive_reservation_alerts', 'manage_warehouse'],
         title: 'Ամրագրում սպասում է հաստատման',
@@ -762,7 +780,7 @@ export class ReservationsService {
     }
 
     return {
-      available: availability.unavailableResources.length === 0,
+      available: availability.unavailableResources.length === 0 && pendingRows.length === 0,
       unavailableResources: availability.unavailableResources,
       /*
        * Bounded on purpose: identifiers, the two companies, what was asked for
@@ -815,14 +833,23 @@ export class ReservationsService {
    *
    * Deliberately inside the caller's transaction: measuring outside it and
    * writing inside it is the race this exists to close.
+   *
+   * A consumable that is short is not refused (Pre-P4 A4): it is answered
+   * `false`, and the caller makes the row PENDING — the warehouse's decision,
+   * exactly as when the availability check before the transaction says short.
+   * It is measured in the reservation's OWN pool: a project warehouse's
+   * WarehouseStock, or the main Item quantity, with only that pool's claims
+   * counted — never one pool standing in for the other. Assets keep their
+   * refusal unchanged.
    */
-  private async assertStillReservable(
-    tx: { item: any; resourceReservation: any; asset: any; $queryRawUnsafe: any },
+  private async stillReservable(
+    tx: { item: any; warehouseStock: any; resourceReservation: any; asset: any; $queryRawUnsafe: any },
     itemId: number,
     wanted: number,
     startDate: Date,
     endDate: Date | null,
-  ): Promise<void> {
+    warehouseId: number | null,
+  ): Promise<boolean> {
     /*
      * Before counting anything. Two transactions asking "how much is free?" at
      * the same moment both get the same answer under READ COMMITTED, because
@@ -848,23 +875,29 @@ export class ReservationsService {
       : {};
 
     if (item.type === ItemType.CONSUMABLE) {
+      // #1989: the pool this reservation draws from, chosen as issuance and
+      // the availability check choose it.
+      const onShelf = warehouseId
+        ? (
+            await tx.warehouseStock.findUnique({
+              where: { warehouseId_itemId: { warehouseId, itemId } },
+              select: { quantity: true },
+            })
+          )?.quantity ?? 0
+        : item.quantity;
       const claimed = await tx.resourceReservation.aggregate({
         where: {
           itemId,
+          warehouseId: warehouseId ?? null,
           status: { in: [ResourceReservationStatus.PENDING, ResourceReservationStatus.APPROVED] },
           ...overlapping,
         },
         _sum: { quantity: true },
       });
       // APPROVED and PENDING rows are promises not yet handed out; anything
-      // already allocated has left the shelf and is gone from item.quantity.
-      const free = item.quantity - (claimed._sum.quantity ?? 0);
-      if (wanted > free) {
-        throw new BadRequestException(
-          `«${item.name}» — հասանելի է ${Math.max(0, free)}, պահանջվում է ${wanted}`,
-        );
-      }
-      return;
+      // already allocated has left the shelf and is gone from the stock figure.
+      const free = roundQty(onShelf - (claimed._sum.quantity ?? 0));
+      return roundQty(wanted) <= free;
     }
 
     const units = await tx.asset.count({ where: { itemId } });
@@ -889,6 +922,7 @@ export class ReservationsService {
         `«${item.name}» — այդ ժամկետում ազատ է ${Math.max(0, free)}, պահանջվում է ${wanted}`,
       );
     }
+    return true;
   }
 
   /**
@@ -1367,9 +1401,13 @@ export class ReservationsService {
        * And the request must not be over-issued either, for the same reason:
        * two partial approvals racing could together hand out more than was
        * asked for. Measured inside the transaction, after the stock moved.
+       *
+       * The sum is rounded like every other quantity (common/quantity.ts):
+       * 0.2 + 0.1 is 0.30000000000000004 in double precision, and compared raw
+       * it refused the last 0.1 of a 0.3 kg request (Pre-P4 A3).
        */
       const afterIssue = await quantitiesOf(tx as never, reservationId);
-      if (afterIssue.issued + toAllocate > afterIssue.requested) {
+      if (roundQty(afterIssue.issued + toAllocate) > afterIssue.requested) {
         throw new BadRequestException(
           `Տրամադրվող քանակը գերազանցում է չտրամադրված մնացորդը`,
         );
@@ -1445,7 +1483,7 @@ export class ReservationsService {
         { label: 'Ռեսուրս', value: reservation.item.name },
         { label: 'Տրամադրված', value: String(toAllocate) },
         ...(toAllocate < outstanding
-          ? [{ label: 'Մնացորդ', value: String(outstanding - toAllocate) }]
+          ? [{ label: 'Մնացորդ', value: String(roundQty(outstanding - toAllocate)) }]
           : []),
       ],
     );
