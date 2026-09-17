@@ -303,6 +303,8 @@ function reservations(opts: { parties: Parties; requester?: number | null; onTas
       aggregate: async () => ({ _sum: { quantity: 0 } }),
     },
     reservationAllocation: { aggregate: async () => ({ _sum: { quantity: 0 } }) },
+    // getOne() also reports the purchase requisition raised for a reservation (bea3fe3); none here.
+    purchaseRequisitionLine: { findMany: async () => [] },
   };
   const workspaces: any = {
     partiesOfReservation: async () => opts.parties,
