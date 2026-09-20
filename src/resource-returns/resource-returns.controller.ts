@@ -22,16 +22,14 @@ export class ResourceReturnsController {
   ) {}
 
   /**
-   * `view_warehouse` dropped here for the same reason as on reservation
-   * create: `@Permissions` is ANY-OF, so pairing it with a manage right let a
-   * viewing permission file returns and call them off — and the two-party rule
-   * behind it is a no-op while every account is unbounded by role. See
-   * reservations.controller.ts for the full reasoning and the policy question
-   * it leaves open.
+   * Filing a return is the requester's act, like asking was: the project
+   * person who had the goods hands them back. `view_warehouse` files;
+   * `manage_resource_returns` accepts and calls off (owner's decision,
+   * 2026-09-20 — see reservations.controller.ts).
    */
   @Post()
   @UseGuards(PermissionGuard)
-  @Permissions('manage_resource_returns')
+  @Permissions('view_warehouse', 'manage_resource_returns')
   async create(
     @Body() dto: CreateReturnDto,
     @Actor() actor: WarehouseActor,

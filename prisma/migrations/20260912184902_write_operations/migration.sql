@@ -1,5 +1,5 @@
 -- CreateTable
-CREATE TABLE "WriteOperation" (
+CREATE TABLE IF NOT EXISTS "WriteOperation" (
     "id" SERIAL NOT NULL,
     "key" TEXT NOT NULL,
     "userId" INTEGER NOT NULL,
@@ -16,10 +16,10 @@ CREATE TABLE "WriteOperation" (
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "WriteOperation_key_key" ON "WriteOperation"("key");
+CREATE UNIQUE INDEX IF NOT EXISTS "WriteOperation_key_key" ON "WriteOperation"("key");
 
 -- CreateIndex
-CREATE INDEX "WriteOperation_userId_idx" ON "WriteOperation"("userId");
+CREATE INDEX IF NOT EXISTS "WriteOperation_userId_idx" ON "WriteOperation"("userId");
 
 -- CreateIndex
-CREATE INDEX "WriteOperation_createdAt_idx" ON "WriteOperation"("createdAt");
+CREATE INDEX IF NOT EXISTS "WriteOperation_createdAt_idx" ON "WriteOperation"("createdAt");

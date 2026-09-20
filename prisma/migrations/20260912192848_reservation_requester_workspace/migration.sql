@@ -1,5 +1,5 @@
 -- AlterTable
-ALTER TABLE "ResourceReservation" ADD COLUMN     "requesterWorkspaceId" INTEGER;
+ALTER TABLE "ResourceReservation" ADD COLUMN IF NOT EXISTS "requesterWorkspaceId" INTEGER;
 
 -- CreateIndex
-CREATE INDEX "ResourceReservation_requesterWorkspaceId_idx" ON "ResourceReservation"("requesterWorkspaceId");
+CREATE INDEX IF NOT EXISTS "ResourceReservation_requesterWorkspaceId_idx" ON "ResourceReservation"("requesterWorkspaceId");

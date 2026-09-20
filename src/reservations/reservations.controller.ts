@@ -45,29 +45,19 @@ export class ReservationsController {
   ) {}
 
   /**
-   * WHY THIS NO LONGER ACCEPTS `view_warehouse`
+   * Who may ASK for goods (owner's decision, 2026-09-20).
    *
-   * It read `@Permissions('view_warehouse', 'manage_reservations')`, and
-   * `@Permissions` is ANY-OF — so a viewing permission opened a route that
-   * consumes stock. The backstop was supposed to be the two-party rule in the
-   * service, but `decideSide` says it plainly: an actor unbounded by their
-   * roles passes both sides, "and that is every account in this installation
-   * today". The controller permission was the only gate there actually was.
-   *
-   * Four roles here hold `view_warehouse` without `manage_reservations` —
-   * developer, technical lead, and two director roles. None has ever created a
-   * reservation: every one in the database was made by an account that also
-   * holds `manage_reservations`, or by a super admin.
-   *
-   * `manage_warehouse` still passes; it is the warehouse super-permission.
-   *
-   * If the product does intend project people to request resources without
-   * warehouse rights, that needs a permission of its own rather than a viewing
-   * one — a policy decision, named in the phase report, not invented here.
+   * `view_warehouse` opens no page of the warehouse app — it is the CRM
+   * task panel's right, held by project people so they can request what a
+   * task needs. Asking is not approving: a request lands PENDING or APPROVED
+   * by the stock rules, and `manage_reservations` is what approves,
+   * allocates, rejects and cancels. So the two are paired here again, and
+   * the requester rule in the service still binds who may ask for whose
+   * work. `manage_warehouse` passes as the warehouse super-permission.
    */
   @Post()
   @UseGuards(PermissionGuard)
-  @Permissions('manage_reservations')
+  @Permissions('view_warehouse', 'manage_reservations')
   @ApiOperation({ summary: 'Create resource reservations' })
   @ApiResponse({ status: 201 })
   async create(
@@ -97,7 +87,7 @@ export class ReservationsController {
    */
   @Post('preflight/create')
   @UseGuards(PermissionGuard)
-  @Permissions('manage_reservations')
+  @Permissions('view_warehouse', 'manage_reservations')
   @ApiOperation({ summary: 'Preflight: may this be reserved, and what would it create?' })
   async preflightCreate(@Body() dto: CreateReservationDto, @Actor() actor: WarehouseActor) {
     return { ...PREFLIGHT_OK, request: await this.reservationsService.previewCreate(dto, actor) };
@@ -105,7 +95,7 @@ export class ReservationsController {
 
   @Post('preflight/task/:taskId')
   @UseGuards(PermissionGuard)
-  @Permissions('manage_reservations')
+  @Permissions('view_warehouse', 'manage_reservations')
   @ApiOperation({ summary: 'Preflight: what would changing this task’s resources do?' })
   async preflightUpdate(
     @Param('taskId') taskId: string,
@@ -117,7 +107,7 @@ export class ReservationsController {
 
   @Patch('task/:taskId')
   @UseGuards(PermissionGuard)
-  @Permissions('manage_reservations')
+  @Permissions('view_warehouse', 'manage_reservations')
   updateTaskReservations(
     @Param('taskId') taskId: string,
     @Body() dto: CreateReservationDto,
