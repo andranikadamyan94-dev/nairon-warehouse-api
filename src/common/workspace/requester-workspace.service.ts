@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 
 import { Workspace } from '../../auth/actor';
 import { requireInternalSecret } from '../internal-headers';
@@ -23,6 +23,9 @@ import { requireInternalSecret } from '../internal-headers';
  * reservations here already point at deleted projects, and "we cannot tell" is
  * the truthful thing to record about them.
  */
+/** What a person is told when CRM cannot be asked whose work this is. */
+const CRM_UNREACHABLE = 'Առաջադրանքների ծառայությունը հասանելի չէ, փորձեք մի փոքր ուշ';
+
 @Injectable()
 export class RequesterWorkspaceService {
   private readonly logger = new Logger(RequesterWorkspaceService.name);
@@ -38,10 +41,13 @@ export class RequesterWorkspaceService {
   /**
    * The company whose work this project is, or `null` when CRM cannot say.
    *
-   * `null` covers three different situations on purpose — no such project, a
-   * project filed under no company, and CRM being unreachable — because all
-   * three mean the same thing to the caller: nobody may be authorized on the
-   * strength of this. They are told apart in the log, not in the return value.
+   * `null` covers two situations — no such project, and a project filed
+   * under no company — which mean the same thing to the caller: nobody may be
+   * authorized on the strength of this. CRM being unreachable is a third thing
+   * and is NOT folded in (2026-09-20): it still authorizes nobody, but it is
+   * reported as an outage, because the caller used to turn it into "this
+   * request is not linked to a project", which was false and sent people
+   * looking for a problem in their own request.
    */
   async ofProject(projectId: number | null | undefined): Promise<Workspace> {
     if (!Number.isInteger(projectId) || Number(projectId) <= 0) return null;
@@ -49,9 +55,10 @@ export class RequesterWorkspaceService {
       const res = await fetch(`${this.crmUrl}/api/projects/${projectId}/workspace/internal`, {
         headers: { 'x-internal-secret': this.secret },
       });
+      if (res.status === 404) return null;
       if (!res.ok) {
         this.logger.warn(`CRM project ${projectId} workspace lookup failed: ${res.status}`);
-        return null;
+        throw new ServiceUnavailableException(CRM_UNREACHABLE);
       }
       const body = (await res.json()) as { found?: boolean; entityId?: number | null };
       if (!body?.found) {
@@ -61,8 +68,9 @@ export class RequesterWorkspaceService {
       const entityId = Number(body.entityId);
       return Number.isInteger(entityId) && entityId > 0 ? entityId : null;
     } catch (e: unknown) {
+      if (e instanceof ServiceUnavailableException) throw e;
       this.logger.warn(`CRM project ${projectId} workspace lookup error: ${(e as Error)?.message}`);
-      return null;
+      throw new ServiceUnavailableException(CRM_UNREACHABLE);
     }
   }
 
@@ -77,15 +85,17 @@ export class RequesterWorkspaceService {
       const res = await fetch(`${this.crmUrl}/api/project-tasks/${taskId}/internal`, {
         headers: { 'x-internal-secret': this.secret },
       });
+      if (res.status === 404) return null;
       if (!res.ok) {
         this.logger.warn(`CRM task ${taskId} lookup failed: ${res.status}`);
-        return null;
+        throw new ServiceUnavailableException(CRM_UNREACHABLE);
       }
       const task = (await res.json()) as { projectId?: number };
       return this.ofProject(task?.projectId);
     } catch (e: unknown) {
+      if (e instanceof ServiceUnavailableException) throw e;
       this.logger.warn(`CRM task ${taskId} lookup error: ${(e as Error)?.message}`);
-      return null;
+      throw new ServiceUnavailableException(CRM_UNREACHABLE);
     }
   }
 

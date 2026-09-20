@@ -544,10 +544,10 @@ export class ReservationsService {
     if (!verdict.allowed) {
       throw new ForbiddenException(
         verdict.side === 'warehouse'
-          ? 'This needs the warehouse permission for it'
+          ? 'Սրա համար պահեստի թույլտվություն է պետք'
           : verdict.because === 'unknown-workspace'
-            ? 'This reservation cannot say which company asked for it, so it cannot be acted on as its requester'
-            : "This is another company's to ask for",
+            ? 'Պարզ չէ, թե որ կազմակերպությունն է պահանջել այս ամրագրումը, ուստի պահանջողի անունից գործել հնարավոր չէ'
+            : 'Սա այլ կազմակերպության պահանջն է',
       );
     }
     return parties;
@@ -607,7 +607,7 @@ export class ReservationsService {
         'reservation.create',
       );
       if (!verdict.allowed) {
-        throw new ForbiddenException('This is another company’s work to ask for');
+        throw new ForbiddenException('Այս առաջադրանքն այլ կազմակերպությանն է, դրա համար պահանջել հնարավոր չէ');
       }
     }
 
@@ -955,7 +955,7 @@ export class ReservationsService {
         { requester: requesterWorkspaceId, stockOwner: null },
         'reservation.create',
       );
-      if (!verdict.allowed) throw new ForbiddenException('This is another company’s work to ask for');
+      if (!verdict.allowed) throw new ForbiddenException('Այս առաջադրանքն այլ կազմակերպությանն է, դրա համար պահանջել հնարավոր չէ');
     }
 
     if (!dto.resources?.length) {
@@ -1046,7 +1046,7 @@ export class ReservationsService {
         { requester: requesterWorkspaceId, stockOwner: null },
         'reservation.update',
       );
-      if (!verdict.allowed) throw new ForbiddenException('This is another company’s work to change');
+      if (!verdict.allowed) throw new ForbiddenException('Այս առաջադրանքն այլ կազմակերպությանն է, դրա ամրագրումը փոխել հնարավոր չէ');
     }
 
     const existing = await this.prisma.resourceReservation.findMany({
@@ -2706,7 +2706,7 @@ export class ReservationsService {
         { requester: requesterWorkspaceId, stockOwner: null },
         'reservation.update',
       );
-      if (!verdict.allowed) throw new ForbiddenException('This is another company’s work to change');
+      if (!verdict.allowed) throw new ForbiddenException('Այս առաջադրանքն այլ կազմակերպությանն է, դրա ամրագրումը փոխել հնարավոր չէ');
     }
 
     this.logger.log(

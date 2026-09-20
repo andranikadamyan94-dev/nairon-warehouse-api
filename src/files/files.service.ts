@@ -11,19 +11,40 @@ import {
 } from '../common/stored-files';
 
 /**
- * Which record a stored receipt belongs to, and whether this person may read
- * it.
+ * Which record a stored file belongs to, and whether this person may read it.
  *
- * Two columns hold every uploaded file in this service: a procurement order's
- * own receipt, and the receipt of one delivery against it. Both describe the
- * same order, so both ask the same question.
+ * Three columns hold every uploaded file in this service: a procurement
+ * order's own receipt, the receipt of one delivery against it, and an
+ * attachment on a purchase requisition. The first two describe an order and
+ * ask the procurement question; the third describes a requisition, which the
+ * people who file, approve and fulfil requisitions may all read.
  *
  * Nonexistent, unreferenced and refused all come back as the same `null`, so
  * the answer never distinguishes them.
  */
 
-/** Reading procurement at all. The 2026-09-01 split keeps this its own domain. */
-const READ_PROCUREMENT = ['view_procurement', 'manage_procurement'];
+type StoredFileKind = 'receipt' | 'requisition-attachment';
+
+/**
+ * Reading a receipt. Procurement's own people, and — since 2026-09-20 — the
+ * people who receive the goods against it: the Receiving page is opened with
+ * manage_inventory and shows the receipt link, and manage_warehouse opens
+ * every page but procurement's. A receipt is what they check the delivery
+ * against, so they read it.
+ */
+const READ_RECEIPT = ['view_procurement', 'manage_procurement', 'manage_inventory', 'manage_warehouse'];
+
+/**
+ * Reading a requisition's attachment: whoever may see requisitions at all.
+ * The requester holds create_purchase_requisition (they filed it), the
+ * organization's approver approve_purchase_requisition, procurement its own.
+ */
+const READ_REQUISITION = [
+  'view_procurement',
+  'manage_procurement',
+  'approve_purchase_requisition',
+  'create_purchase_requisition',
+];
 
 @Injectable()
 export class FilesService {
@@ -36,8 +57,9 @@ export class FilesService {
     if (!isStoredName(name)) return null;
     const file = storedPath(UPLOADS_DIR, name);
     if (!file) return null;
-    if (!(await this.referenced(name))) return null;
-    return (await this.mayRead(who)) ? file : null;
+    const kind = await this.referenced(name);
+    if (!kind) return null;
+    return (await this.mayRead(who, kind)) ? file : null;
   }
 
   /**
@@ -49,9 +71,9 @@ export class FilesService {
    * is then confirmed by parsing the stored value, so a name that is merely a
    * prefix of another cannot borrow its record.
    */
-  private async referenced(name: string): Promise<boolean> {
+  private async referenced(name: string): Promise<StoredFileKind | null> {
     const suffix = { endsWith: `/uploads/${name}` };
-    const [orders, deliveries] = await Promise.all([
+    const [orders, deliveries, attachments] = await Promise.all([
       this.prisma.procurementOrder.findMany({
         where: { receiptUrl: suffix },
         select: { receiptUrl: true },
@@ -60,8 +82,14 @@ export class FilesService {
         where: { receiptUrl: suffix },
         select: { receiptUrl: true },
       }),
+      this.prisma.purchaseRequisitionAttachment.findMany({
+        where: { url: suffix },
+        select: { url: true },
+      }),
     ]);
-    return [...orders, ...deliveries].some((row) => storedNameOf(row.receiptUrl) === name);
+    if ([...orders, ...deliveries].some((row) => storedNameOf(row.receiptUrl) === name)) return 'receipt';
+    if (attachments.some((row) => storedNameOf(row.url) === name)) return 'requisition-attachment';
+    return null;
   }
 
   /**
@@ -77,9 +105,10 @@ export class FilesService {
    * Read with no entity context (0), so a grant made in any single workspace
    * still counts — the same answer the procurement routes themselves give.
    */
-  private async mayRead(who: FileRequester): Promise<boolean> {
+  private async mayRead(who: FileRequester, kind: StoredFileKind): Promise<boolean> {
     const info = await this.usersPrisma.getUserAccessInfo(who.userId, 0);
     if (info.isSuperAdmin) return true;
-    return READ_PROCUREMENT.some((permission) => info.permissionNames.includes(permission));
+    const allowed = kind === 'receipt' ? READ_RECEIPT : READ_REQUISITION;
+    return allowed.some((permission) => info.permissionNames.includes(permission));
   }
 }

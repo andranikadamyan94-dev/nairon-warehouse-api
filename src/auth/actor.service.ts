@@ -49,7 +49,7 @@ export class WarehouseActorService {
     if (asked !== null && !mayDeclare(home, asked)) {
       // Deliberately the same shape as any other refusal: it says the claim was
       // rejected, not which workspaces exist or which ones this person holds.
-      throw new ForbiddenException('You hold no role in the requested workspace');
+      throw new ForbiddenException('Դուք նշված կազմակերպությունում դեր չունեք');
     }
 
     const { isSuperAdmin, isGlobalSuperAdmin, permissionNames } =
