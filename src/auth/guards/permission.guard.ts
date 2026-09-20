@@ -56,7 +56,7 @@ export class PermissionGuard implements CanActivate {
     if (!required?.length) return true;
 
     const request = context.switchToHttp().getRequest();
-    if (!request.user) throw new ForbiddenException('Access denied');
+    if (!request.user) throw new ForbiddenException('Մուտքն արգելված է');
     /*
      * BOTH SIDES, because neither was complete on its own.
      *
@@ -88,7 +88,7 @@ export class PermissionGuard implements CanActivate {
     if (!procurementOnly && permissionNames.includes('manage_warehouse')) return true;
 
     if (!required.some((p) => permissionNames.includes(p))) {
-      throw new ForbiddenException('Insufficient warehouse permissions');
+      throw new ForbiddenException('Պահեստի թույլտվությունները բավարար չեն');
     }
     return true;
   }

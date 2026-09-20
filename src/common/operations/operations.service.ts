@@ -93,7 +93,7 @@ export class OperationsService {
 
     const key = String(input.key).trim();
     if (!key || key.length > 200) {
-      throw new ConflictException('The idempotency key is not usable');
+      throw new ConflictException('Կրկնության բանալին անվավեր է');
     }
     const fingerprint = OperationsService.fingerprint(input.route, input.body);
 
@@ -175,15 +175,15 @@ export class OperationsService {
         .create({ data: mine })
         .catch(() => null);
       if (row) return { kind: 'claimed', id: row.id };
-      throw new ConflictException('That request is already being handled');
+      throw new ConflictException('Այդ հարցումն արդեն մշակվում է');
     }
 
     if (existing.userId !== input.actor.userId) {
       this.logger.warn(`user ${input.actor.userId} tried to redeem operation key held by ${existing.userId}`);
-      throw new ConflictException('That idempotency key has already been used for something else');
+      throw new ConflictException('Այդ բանալին արդեն օգտագործվել է այլ գործողության համար');
     }
     if (existing.route !== input.route || existing.fingerprint !== input.fingerprint) {
-      throw new ConflictException('That idempotency key has already been used for something else');
+      throw new ConflictException('Այդ բանալին արդեն օգտագործվել է այլ գործողության համար');
     }
 
     if (existing.status === 'SUCCEEDED') {
@@ -192,7 +192,7 @@ export class OperationsService {
 
     const age = Date.now() - existing.createdAt.getTime();
     if (age < LEASE_MS) {
-      throw new ConflictException('That request is already being handled');
+      throw new ConflictException('Այդ հարցումն արդեն մշակվում է');
     }
 
     /*
@@ -206,7 +206,7 @@ export class OperationsService {
       where: { id: existing.id, status: 'IN_FLIGHT', createdAt: existing.createdAt },
       data: { createdAt: new Date(), entityId: input.actor.declared },
     });
-    if (taken.count !== 1) throw new ConflictException('That request is already being handled');
+    if (taken.count !== 1) throw new ConflictException('Այդ հարցումն արդեն մշակվում է');
     this.logger.warn(`took over abandoned operation ${existing.id} for ${input.route}`);
     return { kind: 'claimed', id: existing.id };
   }

@@ -176,7 +176,7 @@ export class ResourceReturnsService {
     const q = await quantitiesOf(this.prisma, dto.reservationId);
     if (dto.quantity > q.returnable) {
       throw new BadRequestException(
-        `Cannot return ${dto.quantity} units — only ${q.returnable} are out and not yet returned`,
+        `Հնարավոր չէ վերադարձնել ${dto.quantity} — տրված և դեռ չվերադարձված է միայն ${q.returnable}`,
       );
     }
 
@@ -250,7 +250,7 @@ export class ResourceReturnsService {
       }
       if (dto.quantity > returnable) {
         throw new BadRequestException(
-          `Cannot return ${dto.quantity} units — only ${returnable} are out and not yet returned`,
+          `Հնարավոր չէ վերադարձնել ${dto.quantity} — տրված և դեռ չվերադարձված է միայն ${returnable}`,
         );
       }
 
@@ -272,7 +272,7 @@ export class ResourceReturnsService {
     actor: WarehouseActor,
   ) {
     if (!filters.taskId && !this.mayListEverything(actor)) {
-      throw new ForbiddenException('Name the task whose returns you are asking about');
+      throw new ForbiddenException('Նշեք առաջադրանքը, որի վերադարձներն եք հարցնում');
     }
     /*
      * Naming a task was enough on its own until now: anybody with a token could
@@ -333,10 +333,10 @@ export class ResourceReturnsService {
     if (actor) {
       const parties = await this.workspaces.partiesOfReturn(id);
       const verdict = decideOperation(actor, parties, 'return.receive');
-      if (!verdict.allowed) throw new ForbiddenException('Receiving a return needs the warehouse permission for returns');
+      if (!verdict.allowed) throw new ForbiddenException('Վերադարձ ընդունելու համար պահեստի վերադարձների թույլտվություն է պետք');
     }
     if (ret.status !== ResourceReturnStatus.PENDING) {
-      throw new BadRequestException('Return is not in PENDING status');
+      throw new BadRequestException('Վերադարձը սպասման կարգավիճակում չէ');
     }
 
     const isAsset = ret.reservation.item.type === ItemType.ASSET;
@@ -488,11 +488,11 @@ export class ResourceReturnsService {
       const parties = await this.workspaces.partiesOfReturn(id);
       const verdict = decideOperation(actor, parties, 'return.cancel');
       if (!verdict.allowed) {
-        throw new ForbiddenException('Calling off this return needs standing as its requester or the warehouse permission for returns');
+        throw new ForbiddenException('Վերադարձը կարող են չեղարկել պահանջողը կամ պահեստի վերադարձների թույլտվություն ունեցողը');
       }
     }
     if (ret.status !== ResourceReturnStatus.PENDING) {
-      throw new BadRequestException('Only pending returns can be cancelled');
+      throw new BadRequestException('Միայն սպասող վերադարձները կարելի է չեղարկել');
     }
 
     return this.prisma.resourceReturn.update({
@@ -511,7 +511,7 @@ export class ResourceReturnsService {
 function returnRefusal(because: string) {
   return new ForbiddenException(
     because === 'unknown-workspace'
-      ? 'This reservation cannot say which company asked for it, and you are not on its task, so nothing can be returned against it as its requester'
-      : 'This is another company’s to hand back',
+      ? 'Պարզ չէ, թե որ կազմակերպությունն է պահանջել այս ամրագրումը, և դուք դրա առաջադրանքում չեք, ուստի պահանջողի անունից վերադարձնել հնարավոր չէ'
+      : 'Սա այլ կազմակերպության վերադարձն է',
   );
 }

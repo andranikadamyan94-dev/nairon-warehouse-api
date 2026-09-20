@@ -84,7 +84,7 @@ export class AllocationsService {
         });
 
         if (!allocation || allocation.releasedAt) {
-          throw new NotFoundException(`Allocation ${entry.allocationId} not found or already released`);
+          throw new NotFoundException(`Հատկացում #${entry.allocationId} չի գտնվել կամ արդեն ազատված է`);
         }
 
         const isConsumable = allocation.reservation.item.type === ItemType.CONSUMABLE;

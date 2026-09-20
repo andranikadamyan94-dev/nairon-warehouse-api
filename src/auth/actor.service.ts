@@ -74,7 +74,7 @@ export class WarehouseActorService {
   private async build(request: RequestLike): Promise<WarehouseActor> {
     const userId = Number(request.user?.id);
     if (!Number.isInteger(userId) || userId <= 0) {
-      throw new ForbiddenException('Access denied');
+      throw new ForbiddenException('Մուտքն արգելված է');
     }
 
     const roles = await this.usersPrisma.getUserWorkspaces(userId);

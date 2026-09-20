@@ -1324,7 +1324,7 @@ export class ReservationsService {
       }
     } else if (reservation.item.quantity < toAllocate) {
       throw new BadRequestException(
-        `Insufficient stock: ${reservation.item.quantity} available, ${toAllocate} requested`,
+        `Բավարար պաշար չկա (${reservation.item.quantity} առկա, ${toAllocate} պահանջվում է)`,
       );
     }
 
@@ -1393,7 +1393,7 @@ export class ReservationsService {
         throw new BadRequestException(
           reservation.warehouseId
             ? `Նախագծային պահեստում բավարար պաշար չկա (${available} առկա, ${toAllocate} պահանջվում է)`
-            : `Insufficient stock: ${available} available, ${toAllocate} requested`,
+            : `Բավարար պաշար չկա (${available} առկա, ${toAllocate} պահանջվում է)`,
         );
       }
 

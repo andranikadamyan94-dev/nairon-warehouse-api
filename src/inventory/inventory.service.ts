@@ -67,7 +67,7 @@ export class InventoryService {
 
     newQuantity = roundQty(newQuantity);
     if (newQuantity < 0) {
-      throw new BadRequestException('Insufficient inventory quantity');
+      throw new BadRequestException('Պաշարը բավարար չէ');
     }
 
     const movement = await this.prisma.$transaction(async (tx) => {

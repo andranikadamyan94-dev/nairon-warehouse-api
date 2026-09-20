@@ -83,9 +83,15 @@ export class ResourceReturnsController {
     return this.service.receive(+id, userId, actor);
   }
 
+  /**
+   * Calling off a return is the requester's act as much as filing it was —
+   * the service's own rule says so ("standing as its requester") — so
+   * view_warehouse passes here as it does on create and as it did in
+   * production; manage_resource_returns keeps it for warehouse staff.
+   */
   @Patch(':id/cancel')
   @UseGuards(PermissionGuard)
-  @Permissions('manage_resource_returns')
+  @Permissions('view_warehouse', 'manage_resource_returns')
   cancel(@Param('id') id: string, @Actor() actor: WarehouseActor) {
     return this.service.cancel(+id, actor);
   }
