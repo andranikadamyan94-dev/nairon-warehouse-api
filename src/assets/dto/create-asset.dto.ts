@@ -1,4 +1,4 @@
-import { IsEnum, IsInt, IsOptional, IsString } from 'class-validator';
+import { IsDefined, IsEnum, IsInt, IsOptional, IsString } from 'class-validator';
 
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -6,6 +6,7 @@ import { AssetStatus } from '../../common/enums/asset-status.enum';
 
 export class CreateAssetDto {
   @ApiProperty()
+  @IsDefined()
   @IsInt()
   itemId: number;
 

@@ -108,7 +108,13 @@ function translate(errors: ValidationError[], parent = ''): string[] {
   const out: string[] = [];
   for (const error of errors) {
     const field = parent ? `${parent}.${error.property}` : error.property;
-    for (const [rule, english] of Object.entries(error.constraints ?? {})) {
+    // A missing value fails every rule on the property at once; "required"
+    // is the one the person can act on, so it is the only one reported
+    // (#2310: «Ռեսուրս» empty used to say "must be an integer").
+    let constraints = Object.entries(error.constraints ?? {});
+    const required = constraints.filter(([rule]) => rule === 'isDefined' || rule === 'isNotEmpty');
+    if (required.length) constraints = [required[0]];
+    for (const [rule, english] of constraints) {
       const label = labelFor(field);
       const template = TEMPLATES[rule];
       out.push(
