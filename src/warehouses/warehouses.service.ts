@@ -255,6 +255,13 @@ export class WarehousesService {
       employeeIds?: number[];
     },
   ) {
+
+    if (dto.name !== undefined && !dto.name.trim()) {
+      throw new BadRequestException('Անվանումը պարտադիր է');
+    }
+    if (dto.code !== undefined && !dto.code.trim()) {
+      throw new BadRequestException('Կոդը պարտադիր է');
+    }
     const wh = await this.prisma.warehouse.findUnique({ where: { id }, include: { backlogs: true } });
     if (!wh) throw new NotFoundException('Պահեստը չի գտնվել');
     // The main row's identity is fixed, but linking backlogs TO main is the
