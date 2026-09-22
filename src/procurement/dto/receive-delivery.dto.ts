@@ -6,6 +6,7 @@ import {
   IsOptional,
   IsPositive,
   IsString,
+  Min,
   ValidateNested,
 } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
@@ -19,6 +20,13 @@ export class ReceiveDeliveryLineDto {
   @IsPositive()
   @Type(() => Number)
   quantity: number;
+
+  /** Unit price on the accompanying document, when it differs from the ordered one. */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Type(() => Number)
+  unitPrice?: number;
 }
 
 export class ReceiveDeliveryDto {
@@ -42,7 +50,9 @@ export class ReceiveDeliveryDto {
   // the DTO level because multipart bodies bypass this class anyway (the
   // controller assembles the DTO from strings) and the service owns the
   // Armenian error message.
-  @ApiPropertyOptional({ description: 'Invoice/waybill № of the accompanying document. Required.' })
+  @ApiPropertyOptional({
+    description: 'Invoice/waybill № of the accompanying document. Required.',
+  })
   @IsOptional()
   @IsString()
   documentNumber?: string;

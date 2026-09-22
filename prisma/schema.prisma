@@ -64,6 +64,12 @@ enum ProcurementOrderStatus {
 enum ProcurementPaymentType {
   PREPAYMENT
   BALANCE
+  /// Price correction after receipt (2026-09-22): the invoice came higher
+  /// than what finance booked — the difference is a new expense.
+  ADJUSTMENT
+  /// The invoice came lower than what was booked — money to get back from
+  /// the supplier, raised in finance as income.
+  REFUND
 }
 
 enum MaintenanceStatus {
@@ -962,6 +968,9 @@ model ProcurementOrderItem {
 
   quantity  Float
   unitPrice Float?
+  /// The price on the supplier's invoice, when it differed from the ordered
+  /// one (entered at receipt or by a later amendment). Null = as ordered.
+  invoicedUnitPrice Float?
 
   /// Cached rollup of this line's ProcurementDeliveryItem quantities. Derivable,
   /// but kept denormalised so list views and the "remaining" column don't have
@@ -1004,6 +1013,8 @@ model ProcurementDeliveryItem {
   orderItemId Int
 
   quantity Float
+  /// Unit price on the document that came with this delivery, if entered.
+  unitPrice Float?
 
   delivery  ProcurementDelivery  @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
   orderItem ProcurementOrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
@@ -1027,6 +1038,11 @@ model ProcurementPayment {
   /// refers to by this, since both payments call back on the same order URL.
   financeTransferId Int?
   status            String @default("PENDING")
+  /// Why this money exists, for corrections: the reason given and the
+  /// supplier's document it came from, and who entered it.
+  note           String?
+  documentNumber String?
+  createdBy      Int?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

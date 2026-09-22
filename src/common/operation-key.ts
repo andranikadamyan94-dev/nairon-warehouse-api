@@ -23,7 +23,12 @@
 
 export type FinanceSource = 'warehouse_procurement' | 'warehouse_maintenance';
 
-export type PaymentKind = 'FULL' | 'PREPAYMENT' | 'BALANCE';
+export type PaymentKind =
+  | 'FULL'
+  | 'PREPAYMENT'
+  | 'BALANCE'
+  | 'ADJUSTMENT'
+  | 'REFUND';
 
 /**
  * `warehouse_procurement:28:transfer.prepayment:2`

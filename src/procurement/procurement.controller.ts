@@ -1,7 +1,18 @@
 import {
   BadRequestException,
-  Body, Controller, Delete, Get, Param, ParseIntPipe,
-  Patch, Post, Req, UploadedFile, UseGuards, UseInterceptors, Query,
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  ParseIntPipe,
+  Patch,
+  Post,
+  Req,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+  Query,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -14,6 +25,7 @@ import { InternalGuard } from '../auth/guards/internal.guard';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { LoggedInUser } from '../auth/decorators/logged-in-user.decorator';
 import { ReceiveDeliveryLineDto } from './dto/receive-delivery.dto';
+import { AmendProcurementDto } from './dto/amend-procurement.dto';
 
 @ApiTags('Procurement')
 @Controller('procurement')
@@ -23,10 +35,16 @@ export class ProcurementController {
   @UseGuards(PermissionGuard)
   // receive_procurement_alerts: the people the alerts are sent to must be able
   // to open what the alert links to (read only — writes stay with manage_*).
-  @Permissions('view_procurement', 'manage_procurement', 'receive_procurement_alerts')
+  @Permissions(
+    'view_procurement',
+    'manage_procurement',
+    'receive_procurement_alerts',
+  )
   @Get()
   @ApiOperation({ summary: 'Get all procurement orders' })
-  findAll(@Query() query: any) { return this.procurementService.findAll(query); }
+  findAll(@Query() query: any) {
+    return this.procurementService.findAll(query);
+  }
 
   // Receiving belongs to the warehouse side of the 2026-09-01 split: orders
   // the procurement side has confirmed (ORDERED) plus anything mid-delivery,
@@ -36,22 +54,40 @@ export class ProcurementController {
   @UseGuards(PermissionGuard)
   @Permissions('manage_inventory', 'manage_warehouse')
   @Get('receivable')
-  @ApiOperation({ summary: 'Orders awaiting or amid delivery (warehouse receiving list)' })
-  findReceivable(@Query() query: any) { return this.procurementService.findReceivable(query); }
+  @ApiOperation({
+    summary: 'Orders awaiting or amid delivery (warehouse receiving list)',
+  })
+  findReceivable(@Query() query: any) {
+    return this.procurementService.findReceivable(query);
+  }
 
   @UseGuards(PermissionGuard)
-  @Permissions('view_procurement', 'manage_procurement', 'receive_procurement_alerts')
+  @Permissions(
+    'view_procurement',
+    'manage_procurement',
+    'receive_procurement_alerts',
+  )
   @Get(':id')
   @ApiOperation({ summary: 'Get procurement order by id' })
-  findOne(@Param('id', ParseIntPipe) id: number) { return this.procurementService.findOne(id); }
+  findOne(@Param('id', ParseIntPipe) id: number) {
+    return this.procurementService.findOne(id);
+  }
 
   @UseGuards(PermissionGuard)
   @Permissions('manage_procurement')
   @Post()
   @ApiOperation({ summary: 'Create procurement order' })
-  create(@Body() dto: CreateProcurementDto, @LoggedInUser('id') userId?: number, @Req() req?: any) {
+  create(
+    @Body() dto: CreateProcurementDto,
+    @LoggedInUser('id') userId?: number,
+    @Req() req?: any,
+  ) {
     const active = Number(req?.headers?.['x-entity-id'] ?? 0);
-    return this.procurementService.create(dto, userId, active > 0 ? active : null);
+    return this.procurementService.create(
+      dto,
+      userId,
+      active > 0 ? active : null,
+    );
   }
 
   /**
@@ -66,27 +102,39 @@ export class ProcurementController {
   @UseGuards(PermissionGuard)
   @Permissions('manage_procurement')
   @Patch(':id/entity')
-  @ApiOperation({ summary: "Re-file an order under another organization (super-admin)" })
+  @ApiOperation({
+    summary: 'Re-file an order under another organization (super-admin)',
+  })
   setEntity(
     @Param('id', ParseIntPipe) id: number,
     @Body('entityId') entityId: number | null,
     @Req() req: any,
   ) {
-    return this.procurementService.setEntity(id, entityId ?? null, !!req.isSuperAdmin);
+    return this.procurementService.setEntity(
+      id,
+      entityId ?? null,
+      !!req.isSuperAdmin,
+    );
   }
 
   @UseGuards(PermissionGuard)
   @Permissions('manage_procurement')
   @Patch(':id')
   @ApiOperation({ summary: 'Update procurement order' })
-  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateProcurementDto) {
+  update(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: UpdateProcurementDto,
+  ) {
     return this.procurementService.update(id, dto);
   }
 
   @UseGuards(PermissionGuard)
   @Permissions('manage_procurement')
   @Patch(':id/order')
-  @ApiOperation({ summary: 'Confirm the purchase — order placed with the supplier, hands off to warehouse receiving' })
+  @ApiOperation({
+    summary:
+      'Confirm the purchase — order placed with the supplier, hands off to warehouse receiving',
+  })
   markOrdered(@Param('id', ParseIntPipe) id: number) {
     return this.procurementService.confirmOrdered(id);
   }
@@ -103,7 +151,12 @@ export class ProcurementController {
   receive(
     @Param('id', ParseIntPipe) id: number,
     @UploadedFile() receipt: Express.Multer.File | undefined,
-    @Body() body: { lines?: string | ReceiveDeliveryLineDto[]; notes?: string; documentNumber?: string },
+    @Body()
+    body: {
+      lines?: string | ReceiveDeliveryLineDto[];
+      notes?: string;
+      documentNumber?: string;
+    },
     @LoggedInUser('id') userId?: number,
   ) {
     // multipart carries everything as strings, so a per-line array arrives
@@ -130,7 +183,8 @@ export class ProcurementController {
   @Permissions('manage_inventory', 'manage_warehouse')
   @Patch(':id/close-short')
   @ApiOperation({
-    summary: 'Settle a partially delivered order — the outstanding quantity is not coming',
+    summary:
+      'Settle a partially delivered order — the outstanding quantity is not coming',
   })
   closeShort(
     @Param('id', ParseIntPipe) id: number,
@@ -151,7 +205,12 @@ export class ProcurementController {
     @Body() body: { reason?: string },
     @Req() req: any,
   ) {
-    return this.procurementService.cancel(id, req.user?.id, !!req.isSuperAdmin, body?.reason);
+    return this.procurementService.cancel(
+      id,
+      req.user?.id,
+      !!req.isSuperAdmin,
+      body?.reason,
+    );
   }
 
   @UseGuards(PermissionGuard)
@@ -181,17 +240,46 @@ export class ProcurementController {
   @Public()
   @UseGuards(InternalGuard)
   @Post(':id/finance-callback')
-  @ApiOperation({ summary: 'Finance approval callback (called by finance API)' })
+  @ApiOperation({
+    summary: 'Finance approval callback (called by finance API)',
+  })
   financeCallback(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { status: 'APPROVED' | 'REJECTED'; rejectionReason?: string },
+    @Body()
+    body: {
+      status: 'APPROVED' | 'REJECTED';
+      rejectionReason?: string;
+      transferId?: number;
+    },
   ) {
-    return this.procurementService.financeCallback(id, body.status, body.rejectionReason);
+    return this.procurementService.financeCallback(
+      id,
+      body.status,
+      body.rejectionReason,
+      body.transferId,
+    );
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_procurement')
+  @Patch(':id/amend')
+  @ApiOperation({
+    summary:
+      "Correct the prices of a received order to the supplier's invoice (2026-09-22). The difference goes to finance as an adjustment or a refund through the normal approval.",
+  })
+  amend(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: AmendProcurementDto,
+    @LoggedInUser('id') userId?: number,
+  ) {
+    return this.procurementService.amend(id, dto, userId);
   }
 
   @UseGuards(PermissionGuard)
   @Permissions('manage_procurement')
   @Delete(':id')
   @ApiOperation({ summary: 'Delete procurement order' })
-  remove(@Param('id', ParseIntPipe) id: number) { return this.procurementService.remove(id); }
+  remove(@Param('id', ParseIntPipe) id: number) {
+    return this.procurementService.remove(id);
+  }
 }
