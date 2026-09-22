@@ -120,12 +120,20 @@ export class ProcurementController {
   @UseGuards(PermissionGuard)
   @Permissions('manage_procurement')
   @Patch(':id')
-  @ApiOperation({ summary: 'Update procurement order' })
+  @ApiOperation({
+    summary:
+      'Update procurement order. A settled order (received / closed short) yields only to a super-admin, and then only its supplier, note and line prices.',
+  })
   update(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: UpdateProcurementDto,
+    @Req() req: any,
+    @LoggedInUser('id') userId?: number,
   ) {
-    return this.procurementService.update(id, dto);
+    return this.procurementService.update(id, dto, {
+      isSuperAdmin: !!req.isSuperAdmin,
+      userId,
+    });
   }
 
   @UseGuards(PermissionGuard)

@@ -194,11 +194,21 @@ export class ProcurementService {
     return { ...updated, financeMovedBooked };
   }
 
-  async update(id: number, dto: UpdateProcurementDto) {
+  async update(
+    id: number,
+    dto: UpdateProcurementDto,
+    actor: { isSuperAdmin?: boolean; userId?: number } = {},
+  ) {
     const order = await this.findOne(id);
-    if (order.status === ProcurementOrderStatus.RECEIVED) {
+    // A settled order (received, or closed short) is final for everyone but a
+    // super-admin, who may still correct the supplier, the note and the line
+    // prices — never the goods or the quantities, which are already on the
+    // shelf and billed. See overrideSettled.
+    const settled = (['RECEIVED', 'CLOSED_SHORT'] as string[]).includes(order.status);
+    if (settled && !actor.isSuperAdmin) {
       throw new BadRequestException('Ստացված պատվերը հնարավոր չէ խմբագրել');
     }
+    if (settled) return this.overrideSettled(order, dto, actor.userId);
 
     // The deposit is frozen once the order leaves DRAFT, because finalize has
     // already raised transfers for it. Changing it afterwards would leave the
@@ -767,6 +777,83 @@ export class ProcurementService {
     );
     return { action: 'raised', delta, transferId };
   }
+  /**
+   * Super-admin edit of a settled order (2026-09-22, owner's ask): supplier,
+   * note and line prices only. A changed ordered price on a line that has no
+   * invoiced price is what the stock cost and finance were told, so the
+   * movements are re-costed and finance is reconciled (best effort, as at
+   * receipt). Anything touching the goods or the quantities is refused.
+   */
+  private async overrideSettled(order: any, dto: UpdateProcurementDto, userId?: number) {
+    if (dto.entityId !== undefined && (dto.entityId ?? null) !== (order.entityId ?? null))
+      throw new BadRequestException('Կազմակերպությունը փոխվում է առանձին գործողությամբ');
+    const priceChanges = new Map<number, { line: any; price: number | null }>();
+    if (dto.items !== undefined) {
+      const byItem = new Map<number, any>(order.items.map((l: any) => [l.itemId, l]));
+      if (
+        dto.items.length !== order.items.length ||
+        dto.items.some((i) => !byItem.has(i.itemId))
+      )
+        throw new BadRequestException('Ստացված պատվերի ապրանքները չեն փոխվում, միայն գները');
+      for (const i of dto.items) {
+        const line = byItem.get(i.itemId)!;
+        if (Math.abs(i.quantity - line.quantity) > 1e-9)
+          throw new BadRequestException('Ստացված պատվերի քանակները չեն փոխվում');
+        if ((i.unitPrice ?? null) !== (line.unitPrice ?? null))
+          priceChanges.set(line.id, { line, price: i.unitPrice ?? null });
+      }
+    }
+    const changed: string[] = [];
+    await this.prisma.$transaction(async (tx) => {
+      const data: any = {};
+      if (dto.supplierId !== undefined && (dto.supplierId ?? null) !== (order.supplierId ?? null)) {
+        data.supplierId = dto.supplierId ?? null;
+        changed.push('մատակարար');
+      }
+      if (dto.notes !== undefined && (dto.notes ?? null) !== (order.notes ?? null)) {
+        data.notes = dto.notes ?? null;
+        changed.push('նշում');
+      }
+      if (Object.keys(data).length) await tx.procurementOrder.update({ where: { id: order.id }, data });
+      for (const [orderItemId, { line, price }] of priceChanges) {
+        await tx.procurementOrderItem.update({ where: { id: orderItemId }, data: { unitPrice: price } });
+        // Without an invoiced price the ordered one is the cost of the stock.
+        if (line.invoicedUnitPrice == null) await this.recostMovements(tx, order.id, line.itemId, price ?? 0);
+        changed.push(`${line.item?.name ?? line.itemId}: ${line.unitPrice ?? '—'} → ${price ?? '—'}`);
+      }
+    });
+    if (!changed.length) return this.findOne(order.id);
+    this.logger.warn(`Order #${order.id}: settled order edited by super-admin ${userId ?? '?'} — ${changed.join(', ')}`);
+    void this.notifications.send({
+      permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+      title: 'Ստացված պատվերը խմբագրվել է',
+      body: `Գնման պատվեր #${order.id}-ը փոփոխվել է սուպեր-ադմինի կողմից՝ ${changed.join(', ')}։`,
+      path: '/procurement',
+      details: [{ label: 'Պատվեր', value: `#${order.id}` }],
+    });
+    if (priceChanges.size) {
+      const fresh = await this.findOne(order.id);
+      await this.reconcileWithFinance(
+        fresh,
+        this.invoicedValue(fresh.items),
+        'Պատվերը խմբագրվել է սուպեր-ադմինի կողմից',
+        { createdBy: userId ?? null },
+      );
+    }
+    return this.findOne(order.id);
+  }
+  /** The stock that came in under an order now costs `price` per unit. */
+  private async recostMovements(tx: any, orderId: number, itemId: number, price: number) {
+    const movements = await tx.inventoryMovement.findMany({
+      where: { itemId, type: 'IN', notes: { startsWith: `Գնման պատվեր #${orderId},` } },
+      select: { id: true, quantity: true },
+    });
+    for (const m of movements)
+      await tx.inventoryMovement.update({
+        where: { id: m.id },
+        data: { unitCost: price, totalCost: m.quantity * price },
+      });
+  }
   /** Value of what has actually been received on an order, at invoiced prices where known. */
   private invoicedValue(items: any[]): number {
     return items.reduce(
@@ -828,19 +915,7 @@ export class ProcurementService {
             data: { invoicedUnitPrice: unitPrice },
           });
           // The stock that came in under this order now costs what the invoice says.
-          const movements = await tx.inventoryMovement.findMany({
-            where: {
-              itemId: item.itemId,
-              type: 'IN',
-              notes: { startsWith: `Գնման պատվեր #${id},` },
-            },
-            select: { id: true, quantity: true },
-          });
-          for (const m of movements)
-            await tx.inventoryMovement.update({
-              where: { id: m.id },
-              data: { unitCost: unitPrice, totalCost: m.quantity * unitPrice },
-            });
+          await this.recostMovements(tx, id, item.itemId, unitPrice);
         }
       });
     }
