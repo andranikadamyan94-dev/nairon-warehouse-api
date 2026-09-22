@@ -24,6 +24,8 @@ const include = {
     orderBy: { receivedAt: 'desc' as const },
     include: { items: true },
   },
+  // Money raised for the order, corrections included (2026-09-22).
+  payments: { orderBy: { createdAt: 'asc' as const } },
 };
 
 @Injectable()
@@ -67,7 +69,10 @@ export class ProcurementService {
     const orderBy: any[] =
       query?.sortBy === 'status'
         ? [{ status: order }, { id: 'desc' }]
-        : [{ createdAt: query?.sortBy === 'createdAt' ? order : 'desc' }, { id: 'desc' }];
+        : [
+            { createdAt: query?.sortBy === 'createdAt' ? order : 'desc' },
+            { id: 'desc' },
+          ];
 
     const [data, total] = await Promise.all([
       this.prisma.procurementOrder.findMany({
@@ -92,7 +97,11 @@ export class ProcurementService {
     return order;
   }
 
-  async create(dto: CreateProcurementDto, createdBy?: number, activeEntityId?: number | null) {
+  async create(
+    dto: CreateProcurementDto,
+    createdBy?: number,
+    activeEntityId?: number | null,
+  ) {
     return this.prisma.procurementOrder.create({
       data: {
         // Stamped reliably: cancel is creator-only, and a null creator would
@@ -129,7 +138,9 @@ export class ProcurementService {
    */
   async setEntity(id: number, entityId: number | null, isSuperAdmin: boolean) {
     if (!isSuperAdmin) {
-      throw new ForbiddenException('Պատվերի կազմակերպությունը կարող է փոխել միայն ադմինիստրատորը');
+      throw new ForbiddenException(
+        'Պատվերի կազմակերպությունը կարող է փոխել միայն ադմինիստրատորը',
+      );
     }
     const order = await this.findOne(id);
     if (((order as any).entityId ?? null) === (entityId ?? null)) return order;
@@ -159,22 +170,36 @@ export class ProcurementService {
             `(${(body?.moved ?? []).length} moved, ${financeMovedBooked.length} of them already booked)`,
         );
       } else {
-        this.logger.warn(`Order #${id}: finance refused the organization change (${res.status})`);
+        this.logger.warn(
+          `Order #${id}: finance refused the organization change (${res.status})`,
+        );
       }
     } catch (e: any) {
       // The order is the record of truth for what was bought for whom; a
       // finance outage must not undo that. Reported, not thrown.
-      this.logger.warn(`Order #${id}: could not reach finance to re-file transfers — ${e?.message ?? e}`);
+      this.logger.warn(
+        `Order #${id}: could not reach finance to re-file transfers — ${e?.message ?? e}`,
+      );
     }
 
     return { ...updated, financeMovedBooked };
   }
 
-  async update(id: number, dto: UpdateProcurementDto) {
+  async update(
+    id: number,
+    dto: UpdateProcurementDto,
+    actor: { isSuperAdmin?: boolean; userId?: number } = {},
+  ) {
     const order = await this.findOne(id);
-    if (order.status === ProcurementOrderStatus.RECEIVED) {
+    // A settled order (received, or closed short) is final for everyone but a
+    // super-admin, who may still correct the supplier, the note and the line
+    // prices — never the goods or the quantities, which are already on the
+    // shelf and billed. See overrideSettled.
+    const settled = (['RECEIVED', 'CLOSED_SHORT'] as string[]).includes(order.status);
+    if (settled && !actor.isSuperAdmin) {
       throw new BadRequestException('Ստացված պատվերը հնարավոր չէ խմբագրել');
     }
+    if (settled) return this.overrideSettled(order, dto, actor.userId);
 
     // The deposit is frozen once the order leaves DRAFT, because finalize has
     // already raised transfers for it. Changing it afterwards would leave the
@@ -240,13 +265,20 @@ export class ProcurementService {
    * The warehouse receiving list: confirmed orders awaiting delivery, orders
    * mid-delivery, and (for the page's history tab) recently settled ones.
    */
-  async findReceivable(query?: { history?: string; page?: string; limit?: string }) {
+  async findReceivable(query?: {
+    history?: string;
+    page?: string;
+    limit?: string;
+  }) {
     const page = Number(query?.page ?? 1);
     const limit = Number(query?.limit ?? 20);
     const statuses =
       query?.history === '1'
         ? [ProcurementOrderStatus.RECEIVED, ProcurementOrderStatus.CLOSED_SHORT]
-        : [ProcurementOrderStatus.ORDERED, ProcurementOrderStatus.PARTIALLY_RECEIVED];
+        : [
+            ProcurementOrderStatus.ORDERED,
+            ProcurementOrderStatus.PARTIALLY_RECEIVED,
+          ];
     const where = { status: { in: statuses } };
     const [data, total] = await this.prisma.$transaction([
       this.prisma.procurementOrder.findMany({
@@ -295,7 +327,9 @@ export class ProcurementService {
       throw new BadRequestException('Պատվերն արդեն ստացվել է');
     }
     if (order.status === ProcurementOrderStatus.CLOSED_SHORT) {
-      throw new BadRequestException('Պատվերը փակված է թերի — այլևս հնարավոր չէ ընդունել');
+      throw new BadRequestException(
+        'Պատվերը փակված է թերի — այլևս հնարավոր չէ ընդունել',
+      );
     }
     if (order.status === ProcurementOrderStatus.CANCELLED) {
       throw new BadRequestException('Պատվերը չեղարկված է');
@@ -334,7 +368,11 @@ export class ProcurementService {
       line.quantity - (line.receivedQuantity ?? 0);
 
     // No explicit lines → deliver everything still outstanding.
-    const requested = dto?.lines?.length
+    const requested: {
+      orderItemId: number;
+      quantity: number;
+      unitPrice?: number;
+    }[] = dto?.lines?.length
       ? dto.lines
       : order.items
           .filter((l) => remaining(l) > 0)
@@ -346,14 +384,22 @@ export class ProcurementService {
 
     // Validate before touching anything — a delivery is all-or-nothing.
     const byId = new Map(order.items.map((l) => [l.id, l]));
-    const planned: { line: (typeof order.items)[number]; quantity: number }[] = [];
+    const planned: {
+      line: (typeof order.items)[number];
+      quantity: number;
+      unitPrice?: number;
+    }[] = [];
     for (const entry of requested) {
       const line = byId.get(entry.orderItemId);
       if (!line) {
-        throw new BadRequestException(`Line ${entry.orderItemId} is not on order #${id}`);
+        throw new BadRequestException(
+          `Line ${entry.orderItemId} is not on order #${id}`,
+        );
       }
       if (entry.quantity <= 0) {
-        throw new BadRequestException(`Delivered quantity must be greater than 0`);
+        throw new BadRequestException(
+          `Delivered quantity must be greater than 0`,
+        );
       }
       // Over-delivery is rejected: silently absorbing extra stock would break
       // reconciliation against what finance was billed.
@@ -362,13 +408,22 @@ export class ProcurementService {
           `Cannot receive ${entry.quantity} of "${line.item.name}" — only ${remaining(line)} outstanding`,
         );
       }
-      planned.push({ line, quantity: entry.quantity });
+      if (entry.unitPrice != null && !(entry.unitPrice >= 0)) {
+        throw new BadRequestException('Գինը պետք է լինի զրո կամ ավելի');
+      }
+      planned.push({
+        line,
+        quantity: entry.quantity,
+        unitPrice: entry.unitPrice ?? undefined,
+      });
     }
 
     // The receipt file is optional (2026-09-16): the document number is the
     // record, the scan is a convenience. No file, no URL — never a crash on
     // `undefined.mimetype`.
-    const receiptUrl = receiptFile ? this.fileService.upload(receiptFile) : null;
+    const receiptUrl = receiptFile
+      ? this.fileService.upload(receiptFile)
+      : null;
     const isFirstDelivery = !order.receivedAt;
 
     // Large asset orders (bulk createMany) need more than the 5s default
@@ -384,9 +439,17 @@ export class ProcurementService {
           },
         });
 
-        for (const { line, quantity } of planned) {
+        for (const { line, quantity, unitPrice } of planned) {
+          // The document's price is the truth about what this stock cost.
+          const cost =
+            unitPrice ?? line.invoicedUnitPrice ?? line.unitPrice ?? null;
           await tx.procurementDeliveryItem.create({
-            data: { deliveryId: delivery.id, orderItemId: line.id, quantity },
+            data: {
+              deliveryId: delivery.id,
+              orderItemId: line.id,
+              quantity,
+              unitPrice: unitPrice ?? null,
+            },
           });
 
           if (line.item.type === 'ASSET') {
@@ -396,7 +459,9 @@ export class ProcurementService {
             const count = Math.round(quantity);
             if (count > 0) {
               await tx.asset.createMany({
-                data: Array.from({ length: count }, () => ({ itemId: line.itemId })),
+                data: Array.from({ length: count }, () => ({
+                  itemId: line.itemId,
+                })),
               });
             }
           } else {
@@ -409,7 +474,10 @@ export class ProcurementService {
 
           await tx.procurementOrderItem.update({
             where: { id: line.id },
-            data: { receivedQuantity: { increment: quantity } },
+            data: {
+              receivedQuantity: { increment: quantity },
+              ...(unitPrice != null ? { invoicedUnitPrice: unitPrice } : {}),
+            },
           });
 
           await tx.inventoryMovement.create({
@@ -419,16 +487,20 @@ export class ProcurementService {
               type: 'IN',
               supplierId: order.supplierId ?? undefined,
               // #2042: the purchase price is this receipt's real cost — freeze it.
-              unitCost: line.unitPrice ?? null,
-              totalCost: line.unitPrice != null ? quantity * line.unitPrice : null,
+              unitCost: cost,
+              totalCost: cost != null ? quantity * cost : null,
               notes: `Գնման պատվեր #${id}, առաքում #${delivery.id}, փաստ. № ${documentNumber}`,
             },
           });
         }
 
         // Complete only when every line is fully satisfied.
-        const lines = await tx.procurementOrderItem.findMany({ where: { orderId: id } });
-        const complete = lines.every((l) => l.receivedQuantity >= l.quantity - 1e-9);
+        const lines = await tx.procurementOrderItem.findMany({
+          where: { orderId: id },
+        });
+        const complete = lines.every(
+          (l) => l.receivedQuantity >= l.quantity - 1e-9,
+        );
 
         return tx.procurementOrder.update({
           where: { id },
@@ -448,14 +520,19 @@ export class ProcurementService {
 
     // Restocking mainly clears the low-stock latch — only for what arrived.
     this.stockAlerts.check(
-      planned.filter((p) => p.line.item.type !== 'ASSET').map((p) => p.line.itemId),
+      planned
+        .filter((p) => p.line.item.type !== 'ASSET')
+        .map((p) => p.line.itemId),
     );
 
     const complete = result.status === ProcurementOrderStatus.RECEIVED;
     // #1885: requisitions this order was raised for are now satisfied.
     if (complete) {
       await this.prisma.purchaseRequisition
-        .updateMany({ where: { orderId: id, status: 'APPROVED' }, data: { status: 'FULFILLED' } })
+        .updateMany({
+          where: { orderId: id, status: 'APPROVED' },
+          data: { status: 'FULFILLED' },
+        })
         .catch(() => {});
     }
 
@@ -463,24 +540,31 @@ export class ProcurementService {
     // that equals the ordered value and settleWithFinance is a no-op; it only
     // does work if quantities ended up differing.
     if (complete) {
-      await this.settleWithFinance(
+      await this.reconcileWithFinance(
         result,
-        this.deliveredValue(result.items),
+        this.invoicedValue(result.items),
         'Պատվերն ամբողջությամբ ստացվել է',
+        { documentNumber, createdBy: receivedBy ?? null },
       );
     }
     void this.notifications.send({
       permissions: ['receive_procurement_alerts', 'manage_warehouse'],
-      title: complete ? 'Գնման պատվերը ստացվել է' : 'Գնման պատվերը ստացվել է մասնակի',
+      title: complete
+        ? 'Գնման պատվերը ստացվել է'
+        : 'Գնման պատվերը ստացվել է մասնակի',
       body: complete
         ? `Գնման պատվեր #${id} ամբողջությամբ ստացվել է և պաշարը թարմացվել է։`
         : `Գնման պատվեր #${id}-ի մի մասը ստացվել է։ Մնացած քանակը դեռ սպասվում է։`,
       path: '/procurement',
       details: [
         { label: 'Պատվեր', value: `#${id}` },
-        ...(order.supplier?.name ? [{ label: 'Մատակարար', value: order.supplier.name }] : []),
+        ...(order.supplier?.name
+          ? [{ label: 'Մատակարար', value: order.supplier.name }]
+          : []),
         { label: 'Ստացված այս անգամ', value: String(planned.length) },
-        ...(complete ? [] : [{ label: 'Կարգավիճակ', value: 'Մասնակի ստացված' }]),
+        ...(complete
+          ? []
+          : [{ label: 'Կարգավիճակ', value: 'Մասնակի ստացված' }]),
       ],
     });
 
@@ -488,121 +572,352 @@ export class ProcurementService {
   }
 
   /**
-   * Bill finance for what actually arrived.
+   * Bring finance in line with what the supplier actually billed (2026-09-22).
    *
-   * The order is authorized at the ordered value when it's finalized, which in
-   * finance terms is a PENDING transfer that finance approves (APPROVED =
-   * planned, not yet booked as expense). Settling corrects that amount to the
-   * delivered value before finance books it, so a short delivery is simply
-   * never paid for — no credit note, nothing to chase.
+   * The order was authorized at the ordered value. Once the goods and the
+   * invoice are here, the invoiced value can differ — a short delivery, or
+   * prices that changed (VAT left out of the order was today's case). This
+   * step settles the difference:
    *
-   * Best-effort and never throws: failing to adjust must not block closing the
-   * order. If finance already booked the transfer the adjustment is refused,
-   * and that discrepancy is surfaced to a human rather than silently rewritten.
+   *   1. While the balance transfer is still unbooked (PENDING/APPROVED) and
+   *      no correction has been raised yet, its amount is corrected in place —
+   *      finance simply books the right figure.
+   *   2. Otherwise the money finance has, or will book, is compared with the
+   *      invoiced value and the difference becomes ONE new transfer under the
+   *      same order reference: an ADJUSTMENT expense when the invoice is
+   *      higher, a REFUND income when it is lower. Both go through finance's
+   *      normal approval; the booked transfers are never rewritten.
+   *
+   * `strict` (the amendment route) throws on a finance failure so the person
+   * sees it; the receipt route stays best-effort and notifies instead, because
+   * failing to reconcile must never block putting stock on the shelf.
    */
-  private async settleWithFinance(order: any, deliveredValue: number, reason: string) {
-    const transferId = order.financeTransferId;
-
+  private async reconcileWithFinance(
+    order: any,
+    invoicedValue: number,
+    reason: string,
+    meta: { documentNumber?: string | null; createdBy?: number | null } = {},
+    strict = false,
+  ): Promise<{
+    action: 'none' | 'adjusted' | 'raised' | 'failed';
+    delta: number;
+    transferId?: number;
+  }> {
+    const prepaid = order.prepaymentAmount ?? 0;
     const orderedValue = order.items.reduce(
       (sum: number, l: any) => sum + l.quantity * (l.unitPrice ?? 0),
       0,
     );
-
-    // A deposit has already been paid, so the balance transfer only ever covers
-    // what is still owed. Clamped at zero: a delivery worth less than the
-    // deposit means the supplier owes us money, which is a refund to chase —
-    // never a negative expense.
-    const prepaid = order.prepaymentAmount ?? 0;
-    const balanceDue = Math.max(0, deliveredValue - prepaid);
-    const balanceAuthorized = Math.max(0, orderedValue - prepaid);
-
-    if (prepaid > 0 && deliveredValue < prepaid - 0.005) {
+    const payments = await this.prisma.procurementPayment.findMany({
+      where: { orderId: order.id },
+      orderBy: { createdAt: 'asc' },
+    });
+    const live = payments.filter((p) => p.status !== 'REJECTED');
+    const balance = live.find(
+      (p) => p.type === 'BALANCE' && p.financeTransferId,
+    );
+    const corrected = live.some(
+      (p) => p.type === 'ADJUSTMENT' || p.type === 'REFUND',
+    );
+    if (prepaid > 0 && invoicedValue < prepaid - 0.005) {
       void this.notifications.send({
         permissions: ['receive_procurement_alerts', 'manage_warehouse'],
-        // The one procurement alert that had no path — it landed on the app root.
         path: '/procurement',
         title: 'Կանխավճարը գերազանցում է ստացվածը',
         body:
-          `Պատվեր #${order.id}: կանխավճար ${prepaid}, ստացվել է ${deliveredValue}-ի չափով։ ` +
-          `Մատակարարը պարտք է ${Math.round((prepaid - deliveredValue) * 100) / 100}։ Պահանջեք վերադարձ։`,
+          `Պատվեր #${order.id}: կանխավճար ${prepaid}, ստացվել է ${invoicedValue}-ի չափով։ ` +
+          `Մատակարարը պարտք է ${Math.round((prepaid - invoicedValue) * 100) / 100}։ Պահանջեք վերադարձ։`,
       });
     }
-
-    // Checked after the overpayment alert above, not before: a fully prepaid
-    // order has no balance transfer at all, and that is exactly the case where
-    // the supplier is most likely to owe money back.
-    if (!transferId) return;
-    if (Math.abs(balanceAuthorized - balanceDue) < 0.005) return; // nothing to correct
-
-    const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
-    try {
-      const res = await fetch(`${financeUrl}/api/transfer/external/${transferId}/amount`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-internal-secret': process.env.INTERNAL_SECRET || '',
-        },
-        body: JSON.stringify({ amount: balanceDue, reason }),
-      });
-
-      if (res.ok) {
-        // finalize already wrote a BALANCE row for this transfer; correct it
-        // rather than stacking a second row for the same payment.
-        const existing = await this.prisma.procurementPayment.findFirst({
-          where: { orderId: order.id, financeTransferId: transferId, type: 'BALANCE' },
-          select: { id: true },
-        });
-        if (existing) {
-          await this.prisma.procurementPayment.update({
-            where: { id: existing.id },
-            data: { amount: balanceDue, status: 'ADJUSTED' },
-          });
-        } else {
-          await this.prisma.procurementPayment.create({
-            data: {
-              orderId: order.id,
-              type: 'BALANCE',
-              amount: balanceDue,
-              financeTransferId: transferId,
-              status: 'ADJUSTED',
-            },
-          });
-        }
-        this.logger.log(
-          `Order #${order.id}: finance transfer ${transferId} corrected ${balanceAuthorized} → ${balanceDue} (prepaid ${prepaid})`,
-        );
-        return;
-      }
-
-      // 409 = already booked. Anything else is a genuine failure; both need a person.
-      const detail = await res.text().catch(() => '');
+    const fail = async (detail: string) => {
       this.logger.error(
-        `Order #${order.id}: could not correct finance transfer ${transferId} (${res.status}) ${detail}`,
+        `Order #${order.id}: finance reconcile failed — ${detail}`,
       );
+      if (strict)
+        throw new BadRequestException(
+          `Ֆինանսի հետ ճշգրտումը չհաջողվեց — ${detail}`,
+        );
       void this.notifications.send({
         permissions: ['receive_procurement_alerts', 'manage_warehouse'],
         title: 'Ֆինանսական գումարը չհամապատասխանեց',
         body:
           `Գնման պատվեր #${order.id}-ի գումարը չհաջողվեց ճշգրտել։ ` +
           `Հաստատվել է ${Math.round(orderedValue).toLocaleString('hy-AM')} ֏, ` +
-          `փաստացի ստացվել է ${Math.round(deliveredValue).toLocaleString('hy-AM')} ֏ արժեքով։ ` +
+          `փաստացի արժեքը ${Math.round(invoicedValue).toLocaleString('hy-AM')} ֏ է։ ` +
           `Անհրաժեշտ է ձեռքով ճշգրտում ֆինանսների հետ։`,
         path: '/procurement',
-        details: [
-          { label: 'Պատվեր', value: `#${order.id}` },
-          { label: 'Ֆինանսական փոխանցում', value: `#${transferId}` },
-        ],
+        details: [{ label: 'Պատվեր', value: `#${order.id}` }],
       });
-    } catch (e: any) {
-      this.logger.error(`Order #${order.id}: finance adjust error — ${e?.message ?? e}`);
+      return { action: 'failed' as const, delta: 0 };
+    };
+    const financeUrl = process.env.FINANCE_API_URL || 'http://localhost:3005';
+    const internalKey = process.env.INTERNAL_SECRET;
+    if (!internalKey) return fail('INTERNAL_SECRET is not configured');
+    const headers = {
+      'Content-Type': 'application/json',
+      'x-internal-secret': internalKey,
+    };
+    // 1. Correct the unbooked balance in place.
+    if (balance && !corrected) {
+      const balanceDue = Math.max(0, invoicedValue - prepaid);
+      if (Math.abs(balance.amount - balanceDue) < 0.005)
+        return { action: 'none', delta: 0 };
+      let res: Response;
+      try {
+        res = await fetch(
+          `${financeUrl}/api/transfer/external/${balance.financeTransferId}/amount`,
+          {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify({ amount: balanceDue, reason }),
+          },
+        );
+      } catch (e: any) {
+        return fail(`network error reaching finance: ${e?.message ?? e}`);
+      }
+      if (res.ok) {
+        await this.prisma.procurementPayment.update({
+          where: { id: balance.id },
+          data: {
+            amount: balanceDue,
+            status: 'ADJUSTED',
+            note: reason,
+            documentNumber: meta.documentNumber ?? undefined,
+          },
+        });
+        this.logger.log(
+          `Order #${order.id}: balance transfer ${balance.financeTransferId} corrected ${balance.amount} → ${balanceDue}`,
+        );
+        return {
+          action: 'adjusted',
+          delta: balanceDue - balance.amount,
+          transferId: balance.financeTransferId!,
+        };
+      }
+      // 409 = already booked: the difference becomes its own transfer below.
+      if (res.status !== 409)
+        return fail(
+          `finance-api ${res.status} ${await res.text().catch(() => '')}`,
+        );
     }
+    // 2. The difference between the invoice and what finance has.
+    const covered = payments.length
+      ? live.reduce(
+          (sum, p) => sum + (p.type === 'REFUND' ? -p.amount : p.amount),
+          0,
+        )
+      : order.financeTransferId || prepaid > 0
+        ? orderedValue
+        : 0;
+    const delta = Math.round((invoicedValue - covered) * 100) / 100;
+    if (Math.abs(delta) < 0.005) return { action: 'none', delta: 0 };
+    const kind: 'ADJUSTMENT' | 'REFUND' = delta > 0 ? 'ADJUSTMENT' : 'REFUND';
+    const attempt = payments.filter((p) => p.type === kind).length + 1;
+    const supplierSuffix = order.supplier ? ` — ${order.supplier.name}` : '';
+    let transferId: number;
+    try {
+      const res = await fetch(`${financeUrl}/api/transfer/external`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          amount: Math.abs(delta),
+          type: kind === 'ADJUSTMENT' ? 'EXPENSE' : 'INCOME',
+          entityId: order.entityId ?? undefined,
+          description:
+            (kind === 'ADJUSTMENT'
+              ? 'Գնի ճշգրտում — գնման պատվեր'
+              : 'Վերադարձ մատակարարից — գնման պատվեր') +
+            ` #${order.id}${supplierSuffix}` +
+            (meta.documentNumber ? ` · փաստ. № ${meta.documentNumber}` : '') +
+            ` · ${reason}`,
+          // Prod finance has no operation keys yet (staging sends one built from
+          // `attempt`); the reference stays the same as staging's so the data
+          // reads alike after the full promotion.
+          externalRef: `warehouse_procurement:${order.id}:${kind.toLowerCase()}`,
+          paymentKind: kind,
+        }),
+      });
+      const body = await res.text();
+      if (!res.ok) return fail(`finance-api ${res.status}: ${body}`);
+      transferId = JSON.parse(body).id;
+    } catch (e: any) {
+      if (e instanceof BadRequestException) throw e;
+      return fail(`network error reaching finance: ${e?.message ?? e}`);
+    }
+    await this.prisma.procurementPayment.create({
+      data: {
+        orderId: order.id,
+        type: kind,
+        amount: Math.abs(delta),
+        financeTransferId: transferId,
+        status: 'PENDING',
+        note: reason,
+        documentNumber: meta.documentNumber ?? null,
+        createdBy: meta.createdBy ?? null,
+      },
+    });
+    this.logger.log(
+      `Order #${order.id}: ${kind} #${attempt} of ${Math.abs(delta)} raised as finance transfer ${transferId}`,
+    );
+    return { action: 'raised', delta, transferId };
   }
-
-  /** Value of what has actually been received on an order. */
-  private deliveredValue(items: any[]): number {
-    return items.reduce((sum, l) => sum + (l.receivedQuantity ?? 0) * (l.unitPrice ?? 0), 0);
+  /**
+   * Super-admin edit of a settled order (2026-09-22, owner's ask): supplier,
+   * note and line prices only. A changed ordered price on a line that has no
+   * invoiced price is what the stock cost and finance were told, so the
+   * movements are re-costed and finance is reconciled (best effort, as at
+   * receipt). Anything touching the goods or the quantities is refused.
+   */
+  private async overrideSettled(order: any, dto: UpdateProcurementDto, userId?: number) {
+    if (dto.entityId !== undefined && (dto.entityId ?? null) !== (order.entityId ?? null))
+      throw new BadRequestException('Կազմակերպությունը փոխվում է առանձին գործողությամբ');
+    const priceChanges = new Map<number, { line: any; price: number | null }>();
+    if (dto.items !== undefined) {
+      const byItem = new Map<number, any>(order.items.map((l: any) => [l.itemId, l]));
+      if (
+        dto.items.length !== order.items.length ||
+        dto.items.some((i) => !byItem.has(i.itemId))
+      )
+        throw new BadRequestException('Ստացված պատվերի ապրանքները չեն փոխվում, միայն գները');
+      for (const i of dto.items) {
+        const line = byItem.get(i.itemId)!;
+        if (Math.abs(i.quantity - line.quantity) > 1e-9)
+          throw new BadRequestException('Ստացված պատվերի քանակները չեն փոխվում');
+        if ((i.unitPrice ?? null) !== (line.unitPrice ?? null))
+          priceChanges.set(line.id, { line, price: i.unitPrice ?? null });
+      }
+    }
+    const changed: string[] = [];
+    await this.prisma.$transaction(async (tx) => {
+      const data: any = {};
+      if (dto.supplierId !== undefined && (dto.supplierId ?? null) !== (order.supplierId ?? null)) {
+        data.supplierId = dto.supplierId ?? null;
+        changed.push('մատակարար');
+      }
+      if (dto.notes !== undefined && (dto.notes ?? null) !== (order.notes ?? null)) {
+        data.notes = dto.notes ?? null;
+        changed.push('նշում');
+      }
+      if (Object.keys(data).length) await tx.procurementOrder.update({ where: { id: order.id }, data });
+      for (const [orderItemId, { line, price }] of priceChanges) {
+        await tx.procurementOrderItem.update({ where: { id: orderItemId }, data: { unitPrice: price } });
+        // Without an invoiced price the ordered one is the cost of the stock.
+        if (line.invoicedUnitPrice == null) await this.recostMovements(tx, order.id, line.itemId, price ?? 0);
+        changed.push(`${line.item?.name ?? line.itemId}: ${line.unitPrice ?? '—'} → ${price ?? '—'}`);
+      }
+    });
+    if (!changed.length) return this.findOne(order.id);
+    this.logger.warn(`Order #${order.id}: settled order edited by super-admin ${userId ?? '?'} — ${changed.join(', ')}`);
+    void this.notifications.send({
+      permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+      title: 'Ստացված պատվերը խմբագրվել է',
+      body: `Գնման պատվեր #${order.id}-ը փոփոխվել է սուպեր-ադմինի կողմից՝ ${changed.join(', ')}։`,
+      path: '/procurement',
+      details: [{ label: 'Պատվեր', value: `#${order.id}` }],
+    });
+    if (priceChanges.size) {
+      const fresh = await this.findOne(order.id);
+      await this.reconcileWithFinance(
+        fresh,
+        this.invoicedValue(fresh.items),
+        'Պատվերը խմբագրվել է սուպեր-ադմինի կողմից',
+        { createdBy: userId ?? null },
+      );
+    }
+    return this.findOne(order.id);
   }
-
+  /** The stock that came in under an order now costs `price` per unit. */
+  private async recostMovements(tx: any, orderId: number, itemId: number, price: number) {
+    const movements = await tx.inventoryMovement.findMany({
+      where: { itemId, type: 'IN', notes: { startsWith: `Գնման պատվեր #${orderId},` } },
+      select: { id: true, quantity: true },
+    });
+    for (const m of movements)
+      await tx.inventoryMovement.update({
+        where: { id: m.id },
+        data: { unitCost: price, totalCost: m.quantity * price },
+      });
+  }
+  /** Value of what has actually been received on an order, at invoiced prices where known. */
+  private invoicedValue(items: any[]): number {
+    return items.reduce(
+      (sum, l) =>
+        sum +
+        (l.receivedQuantity ?? 0) * (l.invoicedUnitPrice ?? l.unitPrice ?? 0),
+      0,
+    );
+  }
+  /**
+   * Price correction on a received order (2026-09-22): the supplier's invoice
+   * differed from the ordered prices. Prices are written first — the order
+   * must show what was actually billed — then finance is reconciled; a
+   * finance failure is reported and the same amendment can be sent again.
+   */
+  async amend(
+    id: number,
+    dto: {
+      lines: { orderItemId: number; unitPrice: number }[];
+      reason: string;
+      documentNumber?: string;
+    },
+    userId?: number,
+  ) {
+    const order = await this.findOne(id);
+    if (
+      !(
+        ['PARTIALLY_RECEIVED', 'RECEIVED', 'CLOSED_SHORT'] as string[]
+      ).includes(order.status)
+    )
+      throw new BadRequestException(
+        'Գները կարող են ճշգրտվել միայն ստացված պատվերի համար',
+      );
+    const reason = dto.reason?.trim();
+    if (!reason) throw new BadRequestException('Նշեք ճշգրտման պատճառը');
+    const byId = new Map(order.items.map((l) => [l.id, l]));
+    const changes = new Map<number, number>();
+    for (const line of dto.lines ?? []) {
+      const item = byId.get(line.orderItemId);
+      if (!item)
+        throw new BadRequestException(
+          `Line ${line.orderItemId} is not on order #${id}`,
+        );
+      if (!(line.unitPrice >= 0))
+        throw new BadRequestException('Գինը պետք է լինի զրո կամ ավելի');
+      if (
+        Math.abs(
+          (item.invoicedUnitPrice ?? item.unitPrice ?? 0) - line.unitPrice,
+        ) >= 0.005
+      )
+        changes.set(line.orderItemId, line.unitPrice);
+    }
+    if (changes.size) {
+      await this.prisma.$transaction(async (tx) => {
+        for (const [orderItemId, unitPrice] of changes) {
+          const item = byId.get(orderItemId)!;
+          await tx.procurementOrderItem.update({
+            where: { id: orderItemId },
+            data: { invoicedUnitPrice: unitPrice },
+          });
+          // The stock that came in under this order now costs what the invoice says.
+          await this.recostMovements(tx, id, item.itemId, unitPrice);
+        }
+      });
+    }
+    const fresh = await this.findOne(id);
+    const result = await this.reconcileWithFinance(
+      fresh,
+      this.invoicedValue(fresh.items),
+      reason,
+      {
+        documentNumber: dto.documentNumber?.trim() || null,
+        createdBy: userId ?? null,
+      },
+      true,
+    );
+    if (!changes.size && result.action === 'none')
+      throw new BadRequestException('Գները չեն փոխվել և ճշգրտելու բան չկա');
+    return { ...(await this.findOne(id)), amendment: result };
+  }
   /**
    * Cancel an order (2026-09-01 rules). Only the creator — or a super-admin —
    * may cancel. Anything up to and including ORDERED cancels outright: the
@@ -612,7 +927,12 @@ export class ProcurementService {
    * stock stays, which is exactly close-short semantics, so it delegates
    * there. RECEIVED/CLOSED_SHORT/CANCELLED are final.
    */
-  async cancel(id: number, userId?: number, isSuperAdmin = false, reason?: string) {
+  async cancel(
+    id: number,
+    userId?: number,
+    isSuperAdmin = false,
+    reason?: string,
+  ) {
     const order = await this.findOne(id);
     const status = order.status as ProcurementOrderStatus;
     if (status === ProcurementOrderStatus.RECEIVED) {
@@ -624,8 +944,14 @@ export class ProcurementService {
     if (status === ProcurementOrderStatus.CANCELLED) {
       throw new BadRequestException('Պատվերն արդեն չեղարկված է');
     }
-    if (!isSuperAdmin && order.createdBy != null && order.createdBy !== userId) {
-      throw new ForbiddenException('Միայն պատվերը ստեղծողը կարող է չեղարկել այն');
+    if (
+      !isSuperAdmin &&
+      order.createdBy != null &&
+      order.createdBy !== userId
+    ) {
+      throw new ForbiddenException(
+        'Միայն պատվերը ստեղծողը կարող է չեղարկել այն',
+      );
     }
 
     if (status === ProcurementOrderStatus.PARTIALLY_RECEIVED) {
@@ -659,7 +985,10 @@ export class ProcurementService {
           `Ֆինանսական գործարքը չհաջողվեց չեղարկել (finance-api ${res.status})`,
         );
       }
-      const voided = (await res.json()) as { cancelled: number[]; skippedCompleted: number[] };
+      const voided = (await res.json()) as {
+        cancelled: number[];
+        skippedCompleted: number[];
+      };
       if (voided.skippedCompleted?.length) {
         financeNote =
           'Ուշադրություն. գործարք(ներ)ը արդեն կատարված են ֆինանսում — գումարի վերադարձը պետք է լուծվի առանձին';
@@ -679,7 +1008,9 @@ export class ProcurementService {
       path: '/procurement',
       details: [
         { label: 'Պատվեր', value: `#${id}` },
-        ...(order.supplier?.name ? [{ label: 'Մատակարար', value: order.supplier.name }] : []),
+        ...(order.supplier?.name
+          ? [{ label: 'Մատակարար', value: order.supplier.name }]
+          : []),
         ...(financeNote ? [{ label: 'Ֆինանս', value: financeNote }] : []),
       ],
     });
@@ -707,7 +1038,8 @@ export class ProcurementService {
     }
 
     const shortfallValue = order.items.reduce(
-      (sum, l) => sum + (l.quantity - (l.receivedQuantity ?? 0)) * (l.unitPrice ?? 0),
+      (sum, l) =>
+        sum + (l.quantity - (l.receivedQuantity ?? 0)) * (l.unitPrice ?? 0),
       0,
     );
     const shortLines = order.items.filter(
@@ -725,9 +1057,9 @@ export class ProcurementService {
     });
 
     // Pay only for what arrived — the authorized amount covered the full order.
-    await this.settleWithFinance(
+    await this.reconcileWithFinance(
       order,
-      this.deliveredValue(order.items),
+      this.invoicedValue(order.items),
       `Պատվերը փակվել է թերի${reason ? `՝ ${reason}` : ''}`,
     );
 
@@ -746,9 +1078,14 @@ export class ProcurementService {
       path: '/procurement',
       details: [
         { label: 'Պատվեր', value: `#${id}` },
-        ...(order.supplier?.name ? [{ label: 'Մատակարար', value: order.supplier.name }] : []),
+        ...(order.supplier?.name
+          ? [{ label: 'Մատակարար', value: order.supplier.name }]
+          : []),
         { label: 'Չմատակարարված տողեր', value: String(shortLines.length) },
-        { label: 'Չմատակարարված գումար', value: `${Math.round(shortfallValue).toLocaleString('hy-AM')} ֏` },
+        {
+          label: 'Չմատակարարված գումար',
+          value: `${Math.round(shortfallValue).toLocaleString('hy-AM')} ֏`,
+        },
         ...(reason ? [{ label: 'Պատճառ', value: reason }] : []),
       ],
     });
@@ -775,7 +1112,9 @@ export class ProcurementService {
   async finalize(id: number) {
     const order = await this.findOne(id);
     if (order.status !== ProcurementOrderStatus.DRAFT) {
-      throw new BadRequestException('Միայն նախագիծ պատվերները կարող են ուղարկվել հաստատման');
+      throw new BadRequestException(
+        'Միայն նախագիծ պատվերները կարող են ուղարկվել հաստատման',
+      );
     }
 
     const total = order.items.reduce(
@@ -834,7 +1173,9 @@ export class ProcurementService {
         `[procurement:finalize] finance-api response (${kind}): status=${res.status} body=${body}`,
       );
       if (!res.ok) {
-        throw new Error(`finance-api ${res.status} (url: ${financeUrl}): ${body}`);
+        throw new Error(
+          `finance-api ${res.status} (url: ${financeUrl}): ${body}`,
+        );
       }
       return JSON.parse(body).id;
     };
@@ -852,18 +1193,23 @@ export class ProcurementService {
         // transfer would put a meaningless row in the approval queue for
         // someone to action.
         if (total - prepayment > 0.005) {
-          balanceTransferId = await raise(total - prepayment, 'BALANCE', 'Մնացորդ — գնման պատվեր');
+          balanceTransferId = await raise(
+            total - prepayment,
+            'BALANCE',
+            'Մնացորդ — գնման պատվեր',
+          );
         }
       } else {
         balanceTransferId = await raise(total, 'FULL', 'Գնման պատվեր');
       }
     } catch (e: any) {
-      const financeError =
-        e?.message?.startsWith('finance-api')
-          ? e.message
-          : `network error reaching ${financeUrl}: ${e?.message ?? e}`;
+      const financeError = e?.message?.startsWith('finance-api')
+        ? e.message
+        : `network error reaching ${financeUrl}: ${e?.message ?? e}`;
       console.error(`[procurement:finalize] ${financeError}`);
-      throw new BadRequestException(`Finance notification failed — ${financeError}`);
+      throw new BadRequestException(
+        `Finance notification failed — ${financeError}`,
+      );
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -874,7 +1220,9 @@ export class ProcurementService {
         where: { id },
         data: {
           status: ProcurementOrderStatus.PENDING_FINANCE_APPROVAL,
-          ...(balanceTransferId ? { financeTransferId: balanceTransferId } : {}),
+          ...(balanceTransferId
+            ? { financeTransferId: balanceTransferId }
+            : {}),
         },
         include,
       });
@@ -914,15 +1262,38 @@ export class ProcurementService {
    * retry into a permanent deadlock — warehouse had already moved on, finance
    * had rolled back, and every subsequent attempt hit the same 400.
    */
-  async financeCallback(id: number, status: 'APPROVED' | 'REJECTED', rejectionReason?: string) {
+  async financeCallback(
+    id: number,
+    status: 'APPROVED' | 'REJECTED',
+    rejectionReason?: string,
+    transferId?: number,
+  ) {
     const order = await this.findOne(id);
+    // Finance names the transfer it decided on. A payment row that carries it
+    // takes the verdict; a price correction ends there — the order's own
+    // status has nothing to do with it any more.
+    if (transferId) {
+      const payment = await this.prisma.procurementPayment.findFirst({
+        where: { orderId: id, financeTransferId: transferId },
+      });
+      if (payment) {
+        await this.prisma.procurementPayment.update({
+          where: { id: payment.id },
+          data: { status },
+        });
+        if (payment.type === 'ADJUSTMENT' || payment.type === 'REFUND')
+          return this.findOne(id);
+      }
+    }
     const target =
       status === 'APPROVED'
         ? ProcurementOrderStatus.FINANCE_APPROVED
         : ProcurementOrderStatus.FINANCE_REJECTED;
 
     if (order.status === target) {
-      this.logger.log(`Order #${id} is already ${target} — finance callback treated as a no-op`);
+      this.logger.log(
+        `Order #${id} is already ${target} — finance callback treated as a no-op`,
+      );
       return order;
     }
     if (order.status !== ProcurementOrderStatus.PENDING_FINANCE_APPROVAL) {
@@ -939,7 +1310,8 @@ export class ProcurementService {
             : ProcurementOrderStatus.FINANCE_REJECTED,
         // Cleared on approval, so an order rejected once and approved on the
         // second pass does not keep showing the old reason.
-        financeRejectionReason: status === 'REJECTED' ? (rejectionReason ?? null) : null,
+        financeRejectionReason:
+          status === 'REJECTED' ? (rejectionReason ?? null) : null,
       },
       include,
     });
