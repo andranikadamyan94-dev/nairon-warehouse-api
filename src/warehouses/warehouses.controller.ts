@@ -14,6 +14,8 @@ import {
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { WarehousesService } from './warehouses.service';
+import { CreateWarehouseDto } from './dto/create-warehouse.dto';
+import { UpdateWarehouseDto } from './dto/update-warehouse.dto';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 
 @ApiTags('Warehouses')
@@ -61,7 +63,7 @@ export class WarehousesController {
   @Permissions('manage_warehouses')
   @Post()
   @ApiOperation({ summary: 'Create a project warehouse' })
-  create(@Body() dto: any, @Req() req: any) {
+  create(@Body() dto: CreateWarehouseDto, @Req() req: any) {
     return this.warehousesService.create(dto, req.user?.id);
   }
 
@@ -69,7 +71,7 @@ export class WarehousesController {
   @Permissions('manage_warehouses')
   @Patch(':id')
   @ApiOperation({ summary: 'Update a project warehouse' })
-  update(@Param('id', ParseIntPipe) id: number, @Body() dto: any) {
+  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateWarehouseDto) {
     return this.warehousesService.update(id, dto);
   }
 }
