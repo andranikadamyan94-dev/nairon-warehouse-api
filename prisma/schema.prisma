@@ -158,6 +158,8 @@ model Item {
   category ItemCategory? @relation(fields: [categoryId], references: [id])
 
   @@index([type])
+
+  assetRequests AssetRequest[]
 }
 
 model Asset {
@@ -194,6 +196,8 @@ model Asset {
   allocations ReservationAllocation[]
 
   responsibilities AssetResponsibility[]
+
+  custodies AssetCustody[]
 
   allocationHistory ReservationAllocationHistory[]
 
@@ -1160,4 +1164,111 @@ model WriteOperation {
 
   @@index([userId])
   @@index([createdAt])
+}
+
+// ── Asset custody (2026-09-23) ───────────────────────────────────────────────
+// Who holds an asset, and how it got there. Replaces AssetResponsibility (kept
+// dormant; its rows were copied in by the migration). A holder is a person or
+// a construction object; an object's custody is permanent from the warehouse's
+// point of view, a person's ends with a return.
+
+enum AssetHolderType {
+  USER
+  OBJECT
+}
+
+enum AssetCustodyVia {
+  TASK_ALLOCATION
+  PERSONAL_REQUEST
+  DIRECT_ISSUE
+  OBJECT_REASSIGN
+}
+
+enum AssetRequestKind {
+  PERSONAL
+  OBJECT
+}
+
+enum AssetRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  ISSUED
+  CANCELLED
+}
+
+enum AssetReleaseCondition {
+  OK
+  DAMAGED
+  LOST
+}
+
+model AssetRequest {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  kind AssetRequestKind @default(PERSONAL)
+
+  /// Organisation the request is filed in (the requester's workspace).
+  entityId Int?
+
+  requestedBy Int
+  forUserId   Int?
+  forObjectId Int?
+
+  itemId   Int
+  quantity Int @default(1)
+  reason   String?
+
+  status       AssetRequestStatus @default(PENDING)
+  decidedBy    Int?
+  decidedAt    DateTime?
+  decisionNote String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  item      Item           @relation(fields: [itemId], references: [id])
+  custodies AssetCustody[]
+
+  @@index([forUserId])
+  @@index([forObjectId])
+  @@index([status])
+  @@index([requestedBy])
+}
+
+model AssetCustody {
+  id   Int    @id @default(autoincrement())
+  uuid String @unique @default(uuid())
+
+  assetId Int
+
+  holderType     AssetHolderType @default(USER)
+  holderUserId   Int?
+  holderObjectId Int?
+  /// An asset given to an object and then to a person keeps its object; a
+  /// return from that person goes back to the object, not to the warehouse.
+  originObjectId Int?
+
+  via           AssetCustodyVia @default(DIRECT_ISSUE)
+  requestId     Int?
+  reservationId Int?
+
+  assignedBy Int?
+  assignedAt DateTime  @default(now())
+  /// The holder confirmed receipt (mandatory for people).
+  acceptedAt DateTime?
+
+  releasedAt       DateTime?
+  releasedBy       Int?
+  releaseCondition AssetReleaseCondition?
+  notes            String?
+
+  asset   Asset         @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  request AssetRequest? @relation(fields: [requestId], references: [id])
+
+  @@index([assetId])
+  @@index([holderUserId])
+  @@index([holderObjectId])
+  @@index([releasedAt])
 }

@@ -64,36 +64,31 @@ export class ResponsibilitiesService {
     });
   }
 
+  // Reads come from the custody register (2026-09-23) — the legacy rows were
+  // copied there by the migration and new hand-overs only land there. The
+  // shape is mapped back to what the responsibilities page renders.
+  private fromCustody(c: any) {
+    return { id: c.id, assetId: c.assetId, userId: c.holderUserId, assignedAt: c.assignedAt, releasedAt: c.releasedAt, assignedBy: c.assignedBy, notes: c.notes, acceptedAt: c.acceptedAt, holderType: c.holderType, holderObjectId: c.holderObjectId, via: c.via, asset: c.asset };
+  }
+
   async getAssetHistory(assetId: number) {
-    return this.prisma.assetResponsibility.findMany({
-      where: {
-        assetId,
-      },
-      orderBy: {
-        assignedAt: 'desc',
-      },
-    });
+    const rows = await this.prisma.assetCustody.findMany({ where: { assetId }, orderBy: { assignedAt: 'desc' } });
+    return rows.map((c) => this.fromCustody(c));
   }
   async getAll() {
-    return this.prisma.assetResponsibility.findMany({
+    const rows = await this.prisma.assetCustody.findMany({
       include: { asset: { include: { item: true } } },
       orderBy: { assignedAt: 'desc' },
     });
+    return rows.map((c) => this.fromCustody(c));
   }
 
   async getUserResponsibilities(userId: number) {
-    return this.prisma.assetResponsibility.findMany({
-      where: {
-        userId,
-      },
-
-      include: {
-        asset: true,
-      },
-
-      orderBy: {
-        assignedAt: 'desc',
-      },
+    const rows = await this.prisma.assetCustody.findMany({
+      where: { holderUserId: userId },
+      include: { asset: true },
+      orderBy: { assignedAt: 'desc' },
     });
+    return rows.map((c) => this.fromCustody(c));
   }
 }

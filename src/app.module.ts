@@ -21,6 +21,7 @@ import { ReservationsModule } from './reservations/reservations.module';
 import { AvailabilityModule } from './availability/availability.module';
 import { MaintenanceModule } from './maintenance/maintenance.module';
 import { ResponsibilitiesModule } from './responsibilities/responsibilities.module';
+import { AssetCustodyModule } from './asset-custody/asset-custody.module';
 import { AllocationsModule } from './allocations/allocations.module';
 import { UsersModule } from './users/users.module';
 import { CategoriesModule } from './categories/categories.module';
@@ -53,6 +54,7 @@ import { ObjectsModule } from './objects/objects.module';
     AvailabilityModule,
     MaintenanceModule,
     ResponsibilitiesModule,
+    AssetCustodyModule,
     AllocationsModule,
     UsersModule,
     CategoriesModule,
