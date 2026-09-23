@@ -8,6 +8,12 @@ export class CreateAssetRequestDto {
   @IsPositive()
   forUserId?: number;
 
+  @ApiPropertyOptional({ description: 'Or the construction object the asset is for (permanent custody)' })
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  forObjectId?: number;
+
   @ApiProperty()
   @IsInt()
   @IsPositive()
@@ -56,6 +62,37 @@ export class DirectIssueDto {
   assetId: number;
 
   @ApiProperty()
+  @IsInt()
+  @IsPositive()
+  holderUserId: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  notes?: string;
+}
+
+export class ObjectIssueDto {
+  @ApiProperty()
+  @IsInt()
+  @IsPositive()
+  assetId: number;
+
+  @ApiProperty()
+  @IsInt()
+  @IsPositive()
+  objectId: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  notes?: string;
+}
+
+export class ReassignCustodyDto {
+  @ApiProperty({ description: "The person who now holds the asset on the object's behalf" })
   @IsInt()
   @IsPositive()
   holderUserId: number;

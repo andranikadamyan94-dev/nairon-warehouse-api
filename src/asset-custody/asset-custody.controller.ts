@@ -1,7 +1,7 @@
 import { Body, Controller, ForbiddenException, Get, Headers, Param, ParseIntPipe, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { AssetCustodyService, PERM } from './asset-custody.service';
-import { CreateAssetRequestDto, DecideAssetRequestDto, DirectIssueDto, IssueAssetRequestDto, ReturnCustodyDto } from './dto/asset-custody.dto';
+import { CreateAssetRequestDto, DecideAssetRequestDto, DirectIssueDto, IssueAssetRequestDto, ObjectIssueDto, ReassignCustodyDto, ReturnCustodyDto } from './dto/asset-custody.dto';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { Public } from '../auth/decorators/public.decorator';
 import { UsersPrismaService } from '../common/users-prisma.service';
@@ -80,10 +80,30 @@ export class AssetCustodyController {
     return this.service.directIssue(dto, await this.actor(req));
   }
 
+  @Post('custody/object')
+  @UseGuards(PermissionGuard)
+  @Permissions(PERM.issue)
+  @ApiOperation({ summary: 'Give an asset to a construction object (permanent; no return to the warehouse)' })
+  async issueToObject(@Body() dto: ObjectIssueDto, @Req() req: any) {
+    return this.service.directIssueToObject(dto, await this.actor(req));
+  }
+
+  @Post('custody/:id/reassign')
+  @ApiOperation({ summary: "Hand an object's asset to a person (the object's responsible or the warehouse)" })
+  async reassign(@Param('id', ParseIntPipe) id: number, @Body() dto: ReassignCustodyDto, @Req() req: any) {
+    return this.service.reassign(id, dto, await this.actor(req));
+  }
+
+  @Get('custody/object/:objectId')
+  @ApiOperation({ summary: 'What an object holds and held' })
+  async forObject(@Param('objectId', ParseIntPipe) objectId: number) {
+    return this.service.forObject(objectId);
+  }
+
   @Get('custody')
-  @ApiOperation({ summary: 'The custody register (filters: holderUserId, assetId, open=1)' })
+  @ApiOperation({ summary: 'The custody register (filters: holderUserId, holderObjectId, assetId, open=1)' })
   async list(@Query() q: any, @Req() req: any) {
-    return this.service.list({ holderUserId: q.holderUserId ? Number(q.holderUserId) : undefined, assetId: q.assetId ? Number(q.assetId) : undefined, open: q.open === '1' || q.open === 'true' }, await this.actor(req));
+    return this.service.list({ holderUserId: q.holderUserId ? Number(q.holderUserId) : undefined, holderObjectId: q.holderObjectId ? Number(q.holderObjectId) : undefined, assetId: q.assetId ? Number(q.assetId) : undefined, open: q.open === '1' || q.open === 'true' }, await this.actor(req));
   }
 
   @Get('custody/mine')

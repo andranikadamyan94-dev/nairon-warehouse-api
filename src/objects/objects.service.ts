@@ -25,7 +25,7 @@ export class ObjectsService {
   private static readonly OBJECTS_TTL_MS = 60_000;
 
   async crmObjects(): Promise<
-    { id: number; code: string; name: string; backlogId: number; status: string; plannedCost: number | null }[]
+    { id: number; code: string; name: string; backlogId: number; status: string; plannedCost: number | null; responsibleId?: number | null }[]
   > {
     if (this.objectsCache && Date.now() - this.objectsCache.at < ObjectsService.OBJECTS_TTL_MS) {
       return this.objectsCache.data;

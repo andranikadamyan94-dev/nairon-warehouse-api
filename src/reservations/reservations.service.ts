@@ -1152,6 +1152,9 @@ export class ReservationsService {
         if (!asset) throw new NotFoundException('Asset not found');
         if (asset.status !== AssetStatus.AVAILABLE)
           throw new BadRequestException(`Asset ${asset.id} unavailable`);
+        // An asset in somebody's (or an object's) custody is not on the shelf (2026-09-23).
+        const held = await tx.assetCustody.findFirst({ where: { assetId: asset.id, releasedAt: null }, select: { id: true } });
+        if (held) throw new BadRequestException(`Ակտիվ #${asset.id}-ը տրամադրված է և հասանելի չէ`);
         if (asset.itemId !== reservation.itemId)
           throw new BadRequestException(`Asset ${asset.id} does not belong to requested item type`);
         // #1989 workspaces: the asset must be homed in the reservation's pool.
