@@ -6,4 +6,5 @@ export enum ItemUnit {
   HOUR = 'HOUR',
   BOX = 'BOX',
   LITER = 'LITER',
+  SQUARE_METER = 'SQUARE_METER',
 }
