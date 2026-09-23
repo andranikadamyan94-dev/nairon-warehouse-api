@@ -342,6 +342,33 @@ export class ReservationsService {
     }
   }
 
+  /** The task's first executor — the default person responsible for an asset issued to it. */
+  private async taskExecutor(taskId: number | null | undefined): Promise<number | null> {
+    if (!taskId) return null;
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    try {
+      const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
+        headers: { 'x-internal-secret': requireInternalSecret() },
+      });
+      if (!res.ok) return null;
+      const task = (await res.json()) as { executors?: { id?: number; userId?: number }[] };
+      const id = (task?.executors ?? []).map((u) => u.id ?? u.userId).find((x): x is number => Number.isFinite(x));
+      return id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Close the task custody of an asset that leaves the task (release, cancel, reject, reallocation). */
+  private async closeTaskCustody(tx: any, reservationId: number, assetId: number | null | undefined, releasedBy?: number | null) {
+    if (!assetId) return;
+    await tx.assetCustody.updateMany({
+      where: { reservationId, assetId, via: 'TASK_ALLOCATION', releasedAt: null },
+      data: { releasedAt: new Date(), releasedBy: releasedBy ?? null, releaseCondition: 'OK' },
+    });
+    await tx.asset.update({ where: { id: assetId }, data: { responsibleUserId: null } });
+  }
+
   /** Tell the requesting task's assignees what happened to their reservation. */
   private async notifyRequesters(
     reservation: { taskId?: number | null; projectName?: string | null },
@@ -1134,8 +1161,24 @@ export class ReservationsService {
     // about — a partial allocation isn't yet a usable outcome.
     const fullyAllocated: { taskId: number | null; projectName: string | null; quantity: number }[] = [];
 
+    // Asset custody phase 3 (2026-09-23): an asset issued to a task is on a
+    // person's name from the moment it leaves the shelf — the caller's pick,
+    // else the task's executor. Resolved before the transaction (CRM lookup).
+    const holders = new Map<number, number>();
+    for (const [i, allocation] of dto.allocations.entries()) {
+      let holder = allocation.holderUserId ?? null;
+      if (!holder) {
+        const r = await this.prisma.resourceReservation.findUnique({ where: { id: allocation.reservationId }, select: { taskId: true } });
+        holder = await this.taskExecutor(r?.taskId);
+      }
+      if (!holder) throw new BadRequestException('Նշեք գույքի պատասխանատուին — առաջադրանքը կատարող չունի');
+      if (await this.usersPrisma.isDeactivated(holder)) throw new BadRequestException('Պատասխանատուն ապաակտիվացված աշխատակից է');
+      holders.set(i, holder);
+    }
+
     const result = await this.prisma.$transaction(async (tx) => {
-      for (const allocation of dto.allocations) {
+      for (const [i, allocation] of dto.allocations.entries()) {
+        const holder = holders.get(i)!;
         const reservation = await tx.resourceReservation.findUnique({
           where: { id: allocation.reservationId },
         });
@@ -1198,6 +1241,10 @@ export class ReservationsService {
         await tx.reservationAllocationHistory.create({
           data: { reservationId: allocation.reservationId, assetId: allocation.assetId, action: 'ALLOCATED', performedBy: allocatedBy },
         });
+        await tx.assetCustody.create({
+          data: { assetId: allocation.assetId, holderType: 'USER', holderUserId: holder, via: 'TASK_ALLOCATION', reservationId: allocation.reservationId, assignedBy: allocatedBy ?? null },
+        });
+        await tx.asset.update({ where: { id: allocation.assetId }, data: { responsibleUserId: holder } });
 
         const updatedCount = await tx.reservationAllocation.count({
           where: { reservationId: allocation.reservationId, releasedAt: null },
@@ -1225,6 +1272,16 @@ export class ReservationsService {
 
       return { success: true };
     });
+
+    for (const holder of new Set(holders.values())) {
+      Promise.resolve(
+        this.notifications.sendToUsers([holder], {
+          title: 'Ձեզ գույք է տրամադրվել առաջադրանքի համար',
+          body: 'Գույքը ձեր պատասխանատվության տակ է, քանի դեռ առաջադրանքն այն պահում է․ ստացումը հաստատվում է առաջադրանքում։',
+          path: '/profile?tab=assets',
+        }),
+      ).catch(() => {});
+    }
 
     for (const r of fullyAllocated) {
       void this.notifyRequesters(
@@ -1609,6 +1666,17 @@ export class ReservationsService {
       });
 
       if (landed) {
+        if (isAsset) {
+          // The task's acceptance is the holder's receipt (custody phase 3).
+          const pending = await this.prisma.assetCustody.findMany({
+            where: { reservationId, via: 'TASK_ALLOCATION', releasedAt: null, acceptedAt: null },
+            orderBy: { assignedAt: 'asc' },
+            take: Math.max(1, Math.round(quantity)),
+          });
+          for (const c of pending) {
+            await this.prisma.assetCustody.update({ where: { id: c.id }, data: { acceptedAt: new Date() } });
+          }
+        }
         return this.prisma.resourceReservation.findUnique({ where: { id: reservationId } });
       }
       // someone else's acceptance landed first — re-validate against fresh state
@@ -1899,6 +1967,7 @@ export class ReservationsService {
           where: { id: alloc.id },
           data: { releasedAt: new Date() },
         });
+        await this.closeTaskCustody(tx, reservationId, alloc.assetId, performedBy);
         await tx.reservationAllocationHistory.create({
           data: {
             reservationId,
@@ -1979,6 +2048,7 @@ export class ReservationsService {
           where: { id: alloc.id },
           data: { releasedAt: new Date() },
         });
+        await this.closeTaskCustody(tx, reservationId, alloc.assetId, performedBy);
         await tx.reservationAllocationHistory.create({
           data: {
             reservationId,
@@ -2041,6 +2111,7 @@ export class ReservationsService {
         where: { id: allocationId },
         data: { releasedAt: new Date() },
       });
+      await this.closeTaskCustody(tx, allocation.reservationId, allocation.assetId, releasedBy);
       await tx.reservationAllocationHistory.create({
         data: {
           reservationId: allocation.reservationId,
@@ -2172,10 +2243,14 @@ export class ReservationsService {
     if (overlappingMaintenance) throw new BadRequestException('Asset under maintenance');
 
     return this.prisma.$transaction(async (tx) => {
+      const oldCustody = allocation.assetId
+        ? await tx.assetCustody.findFirst({ where: { reservationId: allocation.reservationId, assetId: allocation.assetId, via: 'TASK_ALLOCATION', releasedAt: null } })
+        : null;
       await tx.reservationAllocation.update({
         where: { id: allocation.id },
         data: { releasedAt: new Date() },
       });
+      await this.closeTaskCustody(tx, allocation.reservationId, allocation.assetId, performedBy);
       await tx.reservationAllocationHistory.create({
         data: {
           reservationId: allocation.reservationId,
@@ -2189,6 +2264,13 @@ export class ReservationsService {
       const newAllocation = await tx.reservationAllocation.create({
         data: { reservationId: allocation.reservationId, assetId: dto.newAssetId, allocatedBy: performedBy },
       });
+      // The replacement goes on the same person's name (pre-phase-3 allocations have nobody to carry).
+      if (oldCustody?.holderUserId) {
+        await tx.assetCustody.create({
+          data: { assetId: dto.newAssetId, holderType: 'USER', holderUserId: oldCustody.holderUserId, via: 'TASK_ALLOCATION', reservationId: allocation.reservationId, assignedBy: performedBy ?? null, acceptedAt: oldCustody.acceptedAt },
+        });
+        await tx.asset.update({ where: { id: dto.newAssetId }, data: { responsibleUserId: oldCustody.holderUserId } });
+      }
       await tx.reservationAllocationHistory.create({
         data: {
           reservationId: allocation.reservationId,
@@ -2801,6 +2883,7 @@ export class ReservationsService {
               where: { id: alloc.id },
               data: { releasedAt: new Date() },
             });
+            await this.closeTaskCustody(tx, existing.id, alloc.assetId, null);
             await tx.reservationAllocationHistory.create({
               data: {
                 reservationId: existing.id,

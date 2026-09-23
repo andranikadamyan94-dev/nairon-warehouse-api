@@ -169,6 +169,9 @@ export class AssetsService {
         maintenanceRecords: {
           none: maintenanceFilter,
         },
+        // Asset custody (2026-09-23): an asset on a person's or an object's
+        // name is not on the shelf, whatever its allocations say.
+        custodies: { none: { releasedAt: null } },
       },
       include: {
         item: true,

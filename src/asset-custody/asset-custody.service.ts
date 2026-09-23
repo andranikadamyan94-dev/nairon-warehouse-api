@@ -331,6 +331,7 @@ export class AssetCustodyService {
     if (!c) throw new NotFoundException('Գրառումը չի գտնվել');
     if (c.holderUserId !== actor.userId) throw new ForbiddenException('Ստացումը հաստատում է միայն ստացողը');
     if (c.releasedAt) throw new BadRequestException('Գույքն արդեն վերադարձված է');
+    if (c.via === 'TASK_ALLOCATION') throw new BadRequestException('Առաջադրանքով տրված գույքի ստացումը հաստատվում է առաջադրանքում («Ընդունել»)');
     if (c.acceptedAt) return c;
     return this.prisma.assetCustody.update({ where: { id }, data: { acceptedAt: new Date() }, include: custodyInclude });
   }
@@ -342,6 +343,7 @@ export class AssetCustodyService {
     if (c.holderUserId !== actor.userId && !this.has(actor, PERM.issue)) {
       throw new ForbiddenException('Վերադարձը գրանցում է ստացողը կամ պահեստը');
     }
+    if (c.via === 'TASK_ALLOCATION') throw new BadRequestException('Առաջադրանքով տրված գույքը պահեստ է վերադառնում ամրագրման միջոցով (ազատել հատկացումը)');
     if (c.holderType === 'OBJECT') throw new BadRequestException('Օբյեկտին տրված գույքը պահեստ չի վերադառնում');
     const status = dto.condition === ReleaseCondition.OK ? 'AVAILABLE' : dto.condition === ReleaseCondition.DAMAGED ? 'DAMAGED' : 'RETIRED';
     return this.prisma.$transaction(async (tx) => {

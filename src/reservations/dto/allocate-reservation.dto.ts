@@ -1,8 +1,8 @@
-import { IsArray, IsInt, ValidateNested } from 'class-validator';
+import { IsArray, IsInt, IsOptional, IsPositive, ValidateNested } from 'class-validator';
 
 import { Type } from 'class-transformer';
 
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class ReservationAllocationItemDto {
   @ApiProperty()
@@ -12,6 +12,12 @@ export class ReservationAllocationItemDto {
   @ApiProperty()
   @IsInt()
   assetId: number;
+
+  @ApiPropertyOptional({ description: 'The person responsible for the asset while the task holds it; defaults to the task executor' })
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  holderUserId?: number;
 }
 
 export class AllocateReservationDto {
