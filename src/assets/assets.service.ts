@@ -6,12 +6,14 @@ import { CreateAssetDto } from './dto/create-asset.dto';
 import { UpdateAssetDto } from './dto/update-asset.dto';
 import { WarehouseActor } from '../auth/actor';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
+import { UsersPrismaService } from '../common/users-prisma.service';
 
 @Injectable()
 export class AssetsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly workspaces: ResourceWorkspaceService,
+    private readonly usersPrisma: UsersPrismaService,
   ) {}
 
   /**
@@ -155,7 +157,9 @@ export class AssetsService {
       ? { startDate: { lte: endDate }, endDate: { gte: startDate } }
       : { startDate: { gte: startDate } }; // open-ended: blocked by any future maintenance
 
-    return this.prisma.asset.findMany({
+    // Asset custody (2026-09-23): a task only takes an asset that already has a
+    // responsible person, so only those are offered — with the person's name.
+    const rows = await this.prisma.asset.findMany({
       where: {
         itemId: query.itemId,
         warehouseId: poolWarehouseId,
@@ -169,13 +173,19 @@ export class AssetsService {
         maintenanceRecords: {
           none: maintenanceFilter,
         },
-        // Asset custody (2026-09-23): an asset on a person's or an object's
-        // name is not on the shelf, whatever its allocations say.
-        custodies: { none: { releasedAt: null } },
+        custodies: { some: { releasedAt: null, holderType: 'USER' } },
       },
       include: {
         item: true,
+        custodies: { where: { releasedAt: null }, select: { holderUserId: true } },
       },
+    });
+    const ids = [...new Set(rows.map((r) => r.custodies[0]?.holderUserId).filter((x): x is number => !!x))];
+    const users = ids.length ? await this.usersPrisma.getUsersByIds(ids) : [];
+    const name = new Map(users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
+    return rows.map(({ custodies, ...asset }) => {
+      const responsibleUserId = custodies[0]?.holderUserId ?? null;
+      return { ...asset, responsibleUserId, responsibleName: responsibleUserId ? name.get(responsibleUserId) ?? `#${responsibleUserId}` : null };
     });
   }
 

@@ -125,7 +125,7 @@ function catalogue() {
     wheres: (table: string, op: string) => seen.filter((s) => s.table === table && s.op === op).map((s) => s.args.where),
     items: new ItemsService(prisma, categories, { check: () => undefined } as any, workspaces),
     categories,
-    assets: new AssetsService(prisma, workspaces),
+    assets: new AssetsService(prisma, workspaces, { getUsersByIds: async () => [] } as any),
     maintenance: new MaintenanceService(prisma, workspaces),
   };
 }
