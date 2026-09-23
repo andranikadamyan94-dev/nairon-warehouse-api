@@ -1520,9 +1520,12 @@ export class ReservationsService {
     }
     // Goods only. An asset reservation flipped COMPLETED while the asset is
     // physically out would look FREE to availability — a double-booking trap.
-    if (reservation.item.type !== ItemType.CONSUMABLE) {
-      throw new BadRequestException('Միայն ապրանքային (ծախսվող) ամրագրումները կարող են ընդունվել');
-    }
+    // Assets are accepted the same way (2026-09-23): a unit is one allocated
+    // asset, so "issued" is the count of live asset allocations rather than a
+    // summed quantity. The handshake used to refuse assets outright, which
+    // left every asset reservation stuck short of COMPLETED and the task's
+    // «Ընդունել» button answering 400.
+    const isAsset = reservation.item.type === ItemType.ASSET;
     quantity = roundQty(quantity);
     if (!(quantity > 0)) {
       throw new BadRequestException('Ընդունվող քանակը պետք է լինի դրական թիվ');
@@ -1543,11 +1546,18 @@ export class ReservationsService {
       });
       if (!current) throw new NotFoundException('Reservation not found');
 
-      const issuedAgg = await this.prisma.reservationAllocation.aggregate({
-        where: { reservationId, releasedAt: null },
-        _sum: { quantity: true },
-      });
-      const issued = roundQty(issuedAgg._sum.quantity ?? 0);
+      const issued = isAsset
+        ? await this.prisma.reservationAllocation.count({
+            where: { reservationId, releasedAt: null, assetId: { not: null } },
+          })
+        : roundQty(
+            (
+              await this.prisma.reservationAllocation.aggregate({
+                where: { reservationId, releasedAt: null },
+                _sum: { quantity: true },
+              })
+            )._sum.quantity ?? 0,
+          );
       const acceptable = roundQty(issued - (current.acceptedQuantity ?? 0));
       if (acceptable <= 0) {
         throw new BadRequestException('Ընդունելու ենթակա տրամադրված քանակ չկա');
