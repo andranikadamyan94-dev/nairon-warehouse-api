@@ -32,7 +32,7 @@ function store(order: Record<string, unknown>) {
       },
     },
   };
-  const service = new ProcurementService(prisma, {} as any, {} as any, {} as any);
+  const service = new ProcurementService(prisma, {} as any, {} as any, {} as any, {} as any);
   return { service, row };
 }
 

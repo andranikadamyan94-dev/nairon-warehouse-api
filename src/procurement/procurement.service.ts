@@ -17,6 +17,10 @@ import { ReceiveDeliveryDto } from './dto/receive-delivery.dto';
 import { requireInternalSecret } from '../common/internal-headers';
 import { requireFinanceUrl } from '../common/finance-url';
 import { transferOperationKey } from '../common/operation-key';
+import { UsersPrismaService } from '../common/users-prisma.service';
+
+/** 2026-09-25: an order needs this right, held in the order's organization, before finance hears of it. */
+export const APPROVE_ORDER_PERMISSION = 'approve_purchase_order';
 
 const include = {
   supplier: true,
@@ -40,6 +44,7 @@ export class ProcurementService {
     private readonly fileService: FileService,
     private readonly stockAlerts: StockAlertService,
     private readonly notifications: WarehouseNotificationsService,
+    private readonly usersPrisma: UsersPrismaService,
   ) {}
 
   async findAll(query?: {
@@ -345,6 +350,9 @@ export class ProcurementService {
     }
     if (order.status === ProcurementOrderStatus.PENDING_FINANCE_APPROVAL) {
       throw new BadRequestException('Պատվերը սպասում է ֆինանսական հաստատման');
+    }
+    if (order.status === ProcurementOrderStatus.PENDING_APPROVAL) {
+      throw new BadRequestException('Պատվերը սպասում է հաստատման');
     }
     if (order.status === ProcurementOrderStatus.DRAFT) {
       throw new BadRequestException(
@@ -1143,25 +1151,97 @@ export class ProcurementService {
     });
   }
 
-  async finalize(id: number) {
-    const order = await this.findOne(id);
-    if (order.status !== ProcurementOrderStatus.DRAFT) {
-      throw new BadRequestException(
-        'Միայն նախագիծ պատվերները կարող են ուղարկվել հաստատման',
-      );
-    }
-
+  /** The order's sum and deposit, refused when the deposit exceeds the sum. */
+  private payable(order: { items: { quantity: number; unitPrice: number | null }[]; prepaymentAmount: number | null }) {
     const total = order.items.reduce(
       (sum, i) => sum + i.quantity * (i.unitPrice ?? 0),
       0,
     );
-
     const prepayment = order.prepaymentAmount ?? 0;
     if (prepayment > total) {
       throw new BadRequestException(
         `Կանխավճարը (${prepayment}) չի կարող գերազանցել պատվերի արժեքը (${total})`,
       );
     }
+    return { total, prepayment };
+  }
+
+  /**
+   * Step one (2026-09-25): procurement sends the draft for approval. Nothing
+   * reaches finance yet — approve() does that once a holder of
+   * approve_purchase_order in the order's organization says yes.
+   */
+  async finalize(id: number, userId?: number) {
+    const order = await this.findOne(id);
+    if (order.status !== ProcurementOrderStatus.DRAFT) {
+      throw new BadRequestException(
+        'Միայն նախագիծ պատվերները կարող են ուղարկվել հաստատման',
+      );
+    }
+    this.payable(order as any);
+    return this.prisma.procurementOrder.update({
+      where: { id },
+      data: {
+        status: ProcurementOrderStatus.PENDING_APPROVAL,
+        submittedForApprovalBy: userId ?? null,
+        submittedForApprovalAt: new Date(),
+        approvalRejectedBy: null,
+        approvalRejectedAt: null,
+        approvalRejectionReason: null,
+      },
+      include,
+    });
+  }
+
+  private async assertMayApprove(order: { entityId: number | null }, userId: number) {
+    // Held in the order's organization; an order without one needs the right anywhere.
+    const info = await this.usersPrisma.getUserAccessInfo(userId, order.entityId ?? undefined);
+    if (!info.isSuperAdmin && !info.permissionNames.includes(APPROVE_ORDER_PERMISSION)) {
+      throw new ForbiddenException('Դուք այս կազմակերպության գնման պատվերները հաստատելու թույլտվություն չունեք');
+    }
+  }
+
+  /** Step two: the approver says yes — the money is raised with finance and the order waits for finance's word. */
+  async approve(id: number, userId: number) {
+    const order = await this.findOne(id);
+    if (order.status !== ProcurementOrderStatus.PENDING_APPROVAL) {
+      throw new BadRequestException('Պատվերը հաստատման սպասման մեջ չէ');
+    }
+    await this.assertMayApprove(order as any, userId);
+    await this.prisma.procurementOrder.update({
+      where: { id },
+      data: { approvedBy: userId, approvedAt: new Date() },
+    });
+    return this.sendToFinance(id);
+  }
+
+  /** The approver says no — back to draft with the reason, the way a finance rejection returns it. */
+  async rejectApproval(id: number, userId: number, reason?: string) {
+    if (!reason?.trim()) throw new BadRequestException('Մերժման պատճառը պարտադիր է');
+    const order = await this.findOne(id);
+    if (order.status !== ProcurementOrderStatus.PENDING_APPROVAL) {
+      throw new BadRequestException('Պատվերը հաստատման սպասման մեջ չէ');
+    }
+    await this.assertMayApprove(order as any, userId);
+    return this.prisma.procurementOrder.update({
+      where: { id },
+      data: {
+        status: ProcurementOrderStatus.DRAFT,
+        approvalRejectedBy: userId,
+        approvalRejectedAt: new Date(),
+        approvalRejectionReason: reason.trim(),
+      },
+      include,
+    });
+  }
+
+  /** Raises the order's money with finance (deposit first, then the balance) and moves it to finance approval. */
+  private async sendToFinance(id: number) {
+    const order = await this.findOne(id);
+    if (order.status !== ProcurementOrderStatus.PENDING_APPROVAL) {
+      throw new BadRequestException('Պատվերը հաստատման սպասման մեջ չէ');
+    }
+    const { total, prepayment } = this.payable(order as any);
 
     const financeUrl = requireFinanceUrl();
     // Was `process.env.INTERNAL_SECRET || ''`, which sent a blank credential

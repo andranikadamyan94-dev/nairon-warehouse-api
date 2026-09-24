@@ -34,6 +34,8 @@ const QUEUE_HIDDEN = ['DRAFT', 'PENDING_APPROVAL'];
 
 export const CREATE_PERMISSION = 'create_purchase_requisition';
 export const APPROVE_PERMISSION = 'approve_purchase_requisition';
+/** 2026-09-25: a rejection at either stage is only final once a holder of this right, in the requisition's organization, confirms it. */
+export const CONFIRM_REJECTION_PERMISSION = 'confirm_requisition_rejection';
 /** Orders whose lines still count as "coming" for the expected-quantity snapshot. */
 const OPEN_ORDER_STATUSES = ['PENDING_FINANCE_APPROVAL', 'FINANCE_APPROVED', 'ORDERED', 'PARTIALLY_RECEIVED'];
 
@@ -85,6 +87,7 @@ export class PurchaseRequisitionsService {
     if (this.isProcurement(c)) return;
     // The organization's approvers read what they are asked to decide on.
     if (req.entityId && (await this.holdsInEntity(userId, req.entityId, APPROVE_PERMISSION))) return;
+    if (req.entityId && (await this.holdsInEntity(userId, req.entityId, CONFIRM_REJECTION_PERMISSION))) return;
     throw new ForbiddenException('Դուք այս հայտի հասանելիություն չունեք');
   }
 
@@ -254,6 +257,8 @@ export class PurchaseRequisitionsService {
     const where: any = query.status && !QUEUE_HIDDEN.includes(query.status)
       ? { status: query.status }
       : { status: { notIn: QUEUE_HIDDEN } };
+    // A rejection still pending at the organization's stage is not procurement's business yet.
+    where.NOT = { status: 'REJECTION_PENDING', rejectionStage: 'ORG' };
     if (query.search?.trim()) {
       where.OR = [
         { title: { contains: query.search.trim(), mode: 'insensitive' } },
@@ -364,9 +369,10 @@ export class PurchaseRequisitionsService {
     if (!reason?.trim()) throw new BadRequestException('Մերժման պատճառը պարտադիր է');
     const req = await this.getOrThrow(id);
     await this.assertMayDecide(req, userId);
+    if (req.status !== 'PENDING_APPROVAL') throw new BadRequestException('Հայտը հաստատման սպասման մեջ չէ');
     await this.prisma.purchaseRequisition.update({
       where: { id },
-      data: { status: 'REJECTED', rejectionReason: reason.trim(), decidedBy: userId, decidedAt: new Date() },
+      data: this.pendingRejection(userId, reason, 'ORG', req.status),
     });
     return this.findOne(id, userId, { permissionNames: [APPROVE_PERMISSION] });
   }
@@ -389,9 +395,88 @@ export class PurchaseRequisitionsService {
     if (!REVIEWABLE.includes(req.status)) throw new BadRequestException('Հայտն այլևս մշակման մեջ չէ');
     await this.prisma.purchaseRequisition.update({
       where: { id },
-      data: { status: 'REJECTED', rejectionReason: reason.trim(), reviewedBy: userId, reviewedAt: new Date() },
+      data: this.pendingRejection(userId, reason, 'PROCUREMENT', req.status),
     });
     return this.findOne(id, userId, { permissionNames: ['manage_procurement'] });
+  }
+
+  // ── Rejection confirmation (2026-09-25) ──────────────────────────────────
+
+  /**
+   * Neither the organization nor procurement rejects outright any more: the
+   * requisition waits as REJECTION_PENDING with the reason, and remembers
+   * where it came from so a declined rejection puts it back there.
+   */
+  private pendingRejection(userId: number, reason: string, stage: 'ORG' | 'PROCUREMENT', returnStatus: string) {
+    return {
+      status: 'REJECTION_PENDING' as const,
+      rejectionReason: reason.trim(),
+      rejectionRequestedBy: userId,
+      rejectionRequestedAt: new Date(),
+      rejectionStage: stage,
+      rejectionReturnStatus: returnStatus as any,
+      rejectionConfirmedBy: null,
+      rejectionConfirmedAt: null,
+      rejectionDeclineNote: null,
+    };
+  }
+
+  private async assertMayConfirm(req: any, userId: number) {
+    if (!req.entityId || !(await this.holdsInEntity(userId, req.entityId, CONFIRM_REJECTION_PERMISSION))) {
+      throw new ForbiddenException('Դուք այս կազմակերպության գնման հայտերի մերժումը հաստատելու թույլտվություն չունեք');
+    }
+    if (req.status !== 'REJECTION_PENDING') throw new BadRequestException('Հայտի մերժումը հաստատման սպասման մեջ չէ');
+  }
+
+  /** The confirmer's desk: the active organization's rejections awaiting them, plus the ones already decided. */
+  async findRejections(userId: number, entityId: number | null, query: { status?: string; page?: string; limit?: string; search?: string }) {
+    if (!entityId || !(await this.holdsInEntity(userId, entityId, CONFIRM_REJECTION_PERMISSION))) {
+      throw new ForbiddenException('Դուք այս կազմակերպության գնման հայտերի մերժումը հաստատելու թույլտվություն չունեք');
+    }
+    const where: any = { entityId, status: query.status ? query.status : 'REJECTION_PENDING' };
+    if (query.status === 'REJECTED') where.rejectionConfirmedBy = { not: null };
+    if (query.search?.trim()) {
+      where.OR = [
+        { title: { contains: query.search.trim(), mode: 'insensitive' } },
+        { lines: { some: { itemName: { contains: query.search.trim(), mode: 'insensitive' } } } },
+      ];
+    }
+    return this.page(where, query);
+  }
+
+  /** The rejection stands: the requisition is REJECTED, credited to whoever asked for it at that stage. */
+  async confirmRejection(id: number, userId: number) {
+    const req = await this.getOrThrow(id);
+    await this.assertMayConfirm(req, userId);
+    const stamp = { rejectionConfirmedBy: userId, rejectionConfirmedAt: new Date() };
+    const by = req.rejectionRequestedBy ?? userId;
+    const at = req.rejectionRequestedAt ?? new Date();
+    await this.prisma.purchaseRequisition.update({
+      where: { id },
+      data: req.rejectionStage === 'PROCUREMENT'
+        ? { status: 'REJECTED', reviewedBy: by, reviewedAt: at, ...stamp }
+        : { status: 'REJECTED', decidedBy: by, decidedAt: at, ...stamp },
+    });
+    return this.findOne(id, userId, { permissionNames: [CONFIRM_REJECTION_PERMISSION] });
+  }
+
+  /** The rejection is declined: back to where it was, with the confirmer's note for the reviewer. */
+  async declineRejection(id: number, userId: number, note?: string) {
+    const req = await this.getOrThrow(id);
+    await this.assertMayConfirm(req, userId);
+    await this.prisma.purchaseRequisition.update({
+      where: { id },
+      data: {
+        status: (req.rejectionReturnStatus ?? (req.rejectionStage === 'PROCUREMENT' ? 'SUBMITTED' : 'PENDING_APPROVAL')) as any,
+        rejectionReason: null,
+        rejectionStage: null,
+        rejectionReturnStatus: null,
+        rejectionConfirmedBy: userId,
+        rejectionConfirmedAt: new Date(),
+        rejectionDeclineNote: note?.trim() || null,
+      },
+    });
+    return this.findOne(id, userId, { permissionNames: [CONFIRM_REJECTION_PERMISSION] });
   }
 
   /** Procurement maps a free-text line onto a catalog item before approval. */
@@ -511,7 +596,7 @@ export class PurchaseRequisitionsService {
   }
 
   private async decorate(rows: any[]) {
-    const ids = [...new Set(rows.flatMap((r) => [r.createdBy, r.reviewedBy, r.decidedBy, ...(r.comments ?? []).map((c: any) => c.userId)]).filter((x): x is number => x != null))];
+    const ids = [...new Set(rows.flatMap((r) => [r.createdBy, r.reviewedBy, r.decidedBy, r.rejectionRequestedBy, r.rejectionConfirmedBy, ...(r.comments ?? []).map((c: any) => c.userId)]).filter((x): x is number => x != null))];
     const users = ids.length ? await this.usersPrisma.getUsersByIds(ids) : [];
     const nameOf = new Map(users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
     return rows.map((r) => ({
@@ -519,6 +604,8 @@ export class PurchaseRequisitionsService {
       createdByName: nameOf.get(r.createdBy) ?? null,
       reviewedByName: r.reviewedBy ? nameOf.get(r.reviewedBy) ?? null : null,
       decidedByName: r.decidedBy ? nameOf.get(r.decidedBy) ?? null : null,
+      rejectionRequestedByName: r.rejectionRequestedBy ? nameOf.get(r.rejectionRequestedBy) ?? null : null,
+      rejectionConfirmedByName: r.rejectionConfirmedBy ? nameOf.get(r.rejectionConfirmedBy) ?? null : null,
       comments: (r.comments ?? []).map((c: any) => ({ ...c, authorName: nameOf.get(c.userId) ?? null })),
     }));
   }

@@ -39,6 +39,8 @@ export class ProcurementController {
     'view_procurement',
     'manage_procurement',
     'receive_procurement_alerts',
+    // 2026-09-25: the people who approve orders before finance read them here.
+    'approve_purchase_order',
   )
   @Get()
   @ApiOperation({ summary: 'Get all procurement orders' })
@@ -66,6 +68,8 @@ export class ProcurementController {
     'view_procurement',
     'manage_procurement',
     'receive_procurement_alerts',
+    // 2026-09-25: the people who approve orders before finance read them here.
+    'approve_purchase_order',
   )
   @Get(':id')
   @ApiOperation({ summary: 'Get procurement order by id' })
@@ -224,9 +228,25 @@ export class ProcurementController {
   @UseGuards(PermissionGuard)
   @Permissions('manage_procurement')
   @Post(':id/finalize')
-  @ApiOperation({ summary: 'Finalize order — sends to finance for approval' })
-  finalize(@Param('id', ParseIntPipe) id: number) {
-    return this.procurementService.finalize(id);
+  @ApiOperation({ summary: 'Send a draft order for approval (approve_purchase_order) — finance hears of it once approved' })
+  finalize(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.procurementService.finalize(id, req.user?.id);
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('approve_purchase_order')
+  @Post(':id/approve')
+  @ApiOperation({ summary: 'Approve a pending order — raises it with finance' })
+  approve(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.procurementService.approve(id, req.user?.id);
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('approve_purchase_order')
+  @Post(':id/reject-approval')
+  @ApiOperation({ summary: 'Send a pending order back to draft with a reason' })
+  rejectApproval(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any) {
+    return this.procurementService.rejectApproval(id, req.user?.id, body?.reason);
   }
 
   @UseGuards(PermissionGuard)
