@@ -67,6 +67,14 @@ export class PurchaseRequisitionsController {
   }
 
   @UseGuards(PermissionGuard)
+  @Permissions('confirm_requisition_rejection')
+  @Get('rejections')
+  @ApiOperation({ summary: 'Rejections of the active organization awaiting confirmation (or already decided)' })
+  rejections(@Query() query: any, @Req() req: any) {
+    return this.service.findRejections(req.user?.id, entityOf(req), query ?? {});
+  }
+
+  @UseGuards(PermissionGuard)
   @Permissions('view_procurement', 'manage_procurement')
   @Get()
   @ApiOperation({ summary: 'Procurement queue (all requisitions except drafts)' })
@@ -118,6 +126,24 @@ export class PurchaseRequisitionsController {
   @ApiOperation({ summary: 'Organization rejection, with a reason for the requester' })
   orgReject(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any) {
     return this.service.orgReject(id, req.user?.id, body?.reason);
+  }
+
+  // ── Rejection confirmation (2026-09-25) ──────────────────────────────────
+
+  @UseGuards(PermissionGuard)
+  @Permissions('confirm_requisition_rejection')
+  @Patch(':id/confirm-rejection')
+  @ApiOperation({ summary: 'The rejection stands — the requisition becomes REJECTED' })
+  confirmRejection(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.service.confirmRejection(id, req.user?.id);
+  }
+
+  @UseGuards(PermissionGuard)
+  @Permissions('confirm_requisition_rejection')
+  @Patch(':id/decline-rejection')
+  @ApiOperation({ summary: 'The rejection is declined — the requisition returns to where it was' })
+  declineRejection(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any) {
+    return this.service.declineRejection(id, req.user?.id, body?.note);
   }
 
   // ── Procurement ───────────────────────────────────────────────────────────

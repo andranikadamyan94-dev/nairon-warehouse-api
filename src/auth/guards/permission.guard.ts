@@ -24,6 +24,9 @@ const PROCUREMENT_ONLY = new Set([
   // not warehouse ones.
   'create_purchase_requisition',
   'approve_purchase_requisition',
+  // 2026-09-25: confirming a rejection and approving an order before finance.
+  'confirm_requisition_rejection',
+  'approve_purchase_order',
 ]);
 
 /**

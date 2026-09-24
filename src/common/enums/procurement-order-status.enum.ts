@@ -1,5 +1,7 @@
 export enum ProcurementOrderStatus {
   DRAFT = 'DRAFT',
+  /** Waiting for approve_purchase_order before finance hears of it. */
+  PENDING_APPROVAL = 'PENDING_APPROVAL',
   ORDERED = 'ORDERED',
   PENDING_FINANCE_APPROVAL = 'PENDING_FINANCE_APPROVAL',
   FINANCE_APPROVED = 'FINANCE_APPROVED',

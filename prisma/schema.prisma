@@ -44,6 +44,9 @@ enum ReservationAllocationAction {
 
 enum ProcurementOrderStatus {
   DRAFT
+  /// Sent by procurement, waiting for approve_purchase_order before finance
+  /// hears of it (2026-09-25).
+  PENDING_APPROVAL
   ORDERED
   PENDING_FINANCE_APPROVAL
   FINANCE_APPROVED
@@ -747,6 +750,16 @@ model ProcurementOrder {
 
   status ProcurementOrderStatus @default(DRAFT)
 
+  /// Order approval before finance (2026-09-25): who sent it, who approved
+  /// it, or who sent it back to draft and why.
+  submittedForApprovalBy  Int?
+  submittedForApprovalAt  DateTime?
+  approvedBy              Int?
+  approvedAt              DateTime?
+  approvalRejectedBy      Int?
+  approvalRejectedAt      DateTime?
+  approvalRejectionReason String?
+
   supplierId Int?
   supplier   Supplier? @relation(fields: [supplierId], references: [id])
 
@@ -806,6 +819,9 @@ enum PurchaseRequisitionStatus {
   SUBMITTED
   IN_REVIEW
   APPROVED
+  /// A rejection (by the organization or by procurement) waiting for
+  /// confirm_requisition_rejection; declined, it returns where it was.
+  REJECTION_PENDING
   REJECTED
   CANCELLED
   FULFILLED
@@ -845,6 +861,17 @@ model PurchaseRequisition {
   /// who turned it down before procurement ever saw it.
   decidedBy Int?
   decidedAt DateTime?
+
+  /// Rejection confirmation (2026-09-25): who asked for the rejection and at
+  /// which stage (ORG | PROCUREMENT), where it returns to if declined, who
+  /// confirmed it, and the confirmer's note when it was declined.
+  rejectionRequestedBy  Int?
+  rejectionRequestedAt  DateTime?
+  rejectionStage        String?
+  rejectionReturnStatus PurchaseRequisitionStatus?
+  rejectionConfirmedBy  Int?
+  rejectionConfirmedAt  DateTime?
+  rejectionDeclineNote  String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
