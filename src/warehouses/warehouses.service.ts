@@ -87,29 +87,28 @@ export class WarehousesService {
     });
   }
 
-  /** CRM backlog list for the «Կապված նախագիծ» picker. */
-  async listBacklogs() {
-    const res = await fetch(`${this.crmUrl()}/api/backlogs/internal/all`, {
+  /**
+   * CRM project list for the «Կապված նախագծեր» picker (2026-09-29; the link
+   * used to be per backlog). `parentId` lets the client show a sub-project's path.
+   */
+  async listProjects() {
+    const res = await fetch(`${this.crmUrl()}/api/projects/internal`, {
       headers: { 'x-internal-secret': requireInternalSecret() },
     });
     if (!res.ok) {
       throw new BadRequestException('Նախագծերի ցանկը հասանելի չէ (CRM)');
     }
-    const backlogs = (await res.json()) as {
-      id: number; name: string; isDefault: boolean; projectId: number;
-      project?: { name?: string };
-    }[];
-    const links = await this.prisma.warehouseBacklog.findMany({
-      select: { backlogId: true, warehouseId: true },
+    const projects = (await res.json()) as { id: number; name: string; entityId: number | null; parentId?: number | null }[];
+    const links = await this.prisma.warehouseProject.findMany({
+      select: { projectId: true, warehouseId: true },
     });
-    const linked = new Map(links.map((l) => [l.backlogId, l.warehouseId]));
-    return backlogs.map((b) => ({
-      id: b.id,
-      name: b.name,
-      isDefault: b.isDefault,
-      projectId: b.projectId,
-      projectName: b.project?.name ?? null,
-      linkedWarehouseId: linked.get(b.id) ?? null,
+    const linked = new Map(links.map((l) => [l.projectId, l.warehouseId]));
+    return projects.map((p) => ({
+      id: p.id,
+      name: p.name,
+      entityId: p.entityId ?? null,
+      parentId: p.parentId ?? null,
+      linkedWarehouseId: linked.get(p.id) ?? null,
     }));
   }
 
@@ -129,7 +128,7 @@ export class WarehousesService {
       this.prisma.warehouse.findMany({
         where,
         include: {
-          backlogs: true,
+          projects: true,
           employees: true,
           _count: { select: { stock: true, transfersIn: true } },
         },
@@ -156,16 +155,14 @@ export class WarehousesService {
       await this.usersPrisma.filterActive(rows.flatMap((w) => w.employees.map((e) => e.userId))),
     );
 
-    // A client's backlog exists once per project, so links often share a name
-    // (six «Սյունար» tags) — attach the project name live for disambiguation,
-    // and prefer the LIVE backlog name over the link-time snapshot so CRM
-    // renames show through; snapshots remain the fallback when CRM is down.
-    let liveOf = new Map<number, { name: string; projectName: string | null }>();
+    // Prefer the LIVE project name over the link-time snapshot so CRM renames
+    // show through; snapshots remain the fallback when CRM is down.
+    let liveOf = new Map<number, { name: string }>();
     try {
-      const backlogs = await this.listBacklogs();
-      liveOf = new Map(backlogs.map((b) => [b.id, { name: b.name, projectName: b.projectName }]));
+      const projects = await this.listProjects();
+      liveOf = new Map(projects.map((p) => [p.id, { name: p.name }]));
     } catch {
-      /* names render from snapshots, without the suffix */
+      /* names render from snapshots */
     }
 
     return {
@@ -175,10 +172,9 @@ export class WarehousesService {
         employees: w.employees
           .filter((e) => activeIds.has(e.userId))
           .map((e) => ({ ...e, name: nameOf.get(e.userId) ?? null })),
-        backlogs: w.backlogs.map((b) => ({
-          ...b,
-          backlogName: liveOf.get(b.backlogId)?.name ?? b.backlogName,
-          projectName: liveOf.get(b.backlogId)?.projectName ?? null,
+        projects: w.projects.map((p) => ({
+          ...p,
+          projectName: liveOf.get(p.projectId)?.name ?? p.projectName,
         })),
       })),
       total,
@@ -207,7 +203,7 @@ export class WarehousesService {
       code: string;
       responsibleId?: number;
       location?: string;
-      backlogIds?: number[];
+      projectIds?: number[];
       employeeIds?: number[];
     },
     createdBy?: number,
@@ -215,8 +211,8 @@ export class WarehousesService {
     const dup = await this.prisma.warehouse.findUnique({ where: { code: dto.code.trim() } });
     if (dup) throw new BadRequestException('Այս կոդով պահեստ արդեն կա');
 
-    await this.assertBacklogsLinkable(dto.backlogIds ?? [], null);
-    const backlogNames = await this.backlogNames(dto.backlogIds ?? []);
+    await this.assertProjectsLinkable(dto.projectIds ?? [], null);
+    const projectNames = await this.projectNames(dto.projectIds ?? []);
 
     return this.prisma.warehouse.create({
       data: {
@@ -226,17 +222,17 @@ export class WarehousesService {
         responsibleId: dto.responsibleId ?? null,
         location: dto.location?.trim() || null,
         createdBy: createdBy ?? null,
-        backlogs: {
-          create: (dto.backlogIds ?? []).map((b) => ({
-            backlogId: b,
-            backlogName: backlogNames.get(b) ?? `#${b}`,
+        projects: {
+          create: (dto.projectIds ?? []).map((p) => ({
+            projectId: p,
+            projectName: projectNames.get(p) ?? `#${p}`,
           })),
         },
         employees: {
           create: [...new Set(dto.employeeIds ?? [])].map((userId) => ({ userId })),
         },
       },
-      include: { backlogs: true, employees: true },
+      include: { projects: true, employees: true },
     });
   }
 
@@ -248,11 +244,11 @@ export class WarehousesService {
       responsibleId?: number | null;
       location?: string | null;
       status?: 'ACTIVE' | 'INACTIVE';
-      backlogIds?: number[];
+      projectIds?: number[];
       employeeIds?: number[];
     },
   ) {
-    const wh = await this.prisma.warehouse.findUnique({ where: { id }, include: { backlogs: true } });
+    const wh = await this.prisma.warehouse.findUnique({ where: { id }, include: { projects: true } });
     if (!wh) throw new NotFoundException('Պահեստը չի գտնվել');
     // The main row's identity is fixed, but linking backlogs TO main is the
     // explicit way a «նախագիծ» opts into the main pool (unlinked = blocked).
@@ -271,16 +267,16 @@ export class WarehousesService {
       if (dup) throw new BadRequestException('Այս կոդով պահեստ արդեն կա');
     }
 
-    let backlogOps: any;
-    if (dto.backlogIds) {
-      await this.assertBacklogsLinkable(dto.backlogIds, id);
-      const names = await this.backlogNames(dto.backlogIds);
-      backlogOps = {
-        deleteMany: { backlogId: { notIn: dto.backlogIds } },
-        upsert: dto.backlogIds.map((b) => ({
-          where: { backlogId: b },
-          update: { backlogName: names.get(b) ?? `#${b}` },
-          create: { backlogId: b, backlogName: names.get(b) ?? `#${b}` },
+    let projectOps: any;
+    if (dto.projectIds) {
+      await this.assertProjectsLinkable(dto.projectIds, id);
+      const names = await this.projectNames(dto.projectIds);
+      projectOps = {
+        deleteMany: { projectId: { notIn: dto.projectIds } },
+        upsert: dto.projectIds.map((p) => ({
+          where: { projectId: p },
+          update: { projectName: names.get(p) ?? `#${p}` },
+          create: { projectId: p, projectName: names.get(p) ?? `#${p}` },
         })),
       };
     }
@@ -306,29 +302,29 @@ export class WarehousesService {
         ...(dto.responsibleId !== undefined ? { responsibleId: dto.responsibleId } : {}),
         ...(dto.location !== undefined ? { location: dto.location?.trim() || null } : {}),
         ...(dto.status !== undefined ? { status: dto.status } : {}),
-        ...(backlogOps ? { backlogs: backlogOps } : {}),
+        ...(projectOps ? { projects: projectOps } : {}),
         ...(employeeOps ? { employees: employeeOps } : {}),
       },
-      include: { backlogs: true, employees: true },
+      include: { projects: true, employees: true },
     });
   }
 
-  /** One warehouse per backlog: reject links already owned by ANOTHER warehouse. */
-  private async assertBacklogsLinkable(backlogIds: number[], selfId: number | null) {
-    if (!backlogIds.length) return;
-    const taken = await this.prisma.warehouseBacklog.findMany({
-      where: { backlogId: { in: backlogIds }, ...(selfId ? { warehouseId: { not: selfId } } : {}) },
+  /** One warehouse per project: reject links already owned by ANOTHER warehouse. */
+  private async assertProjectsLinkable(projectIds: number[], selfId: number | null) {
+    if (!projectIds.length) return;
+    const taken = await this.prisma.warehouseProject.findMany({
+      where: { projectId: { in: projectIds }, ...(selfId ? { warehouseId: { not: selfId } } : {}) },
     });
     if (taken.length) {
       throw new BadRequestException(
-        `Նախագիծն արդեն կապված է այլ պահեստի հետ՝ ${taken.map((t) => t.backlogName).join(', ')}`,
+        `Նախագիծն արդեն կապված է այլ պահեստի հետ՝ ${taken.map((t) => t.projectName).join(', ')}`,
       );
     }
   }
 
-  private async backlogNames(backlogIds: number[]): Promise<Map<number, string>> {
-    if (!backlogIds.length) return new Map();
-    const all = await this.listBacklogs();
-    return new Map(all.filter((b) => backlogIds.includes(b.id)).map((b) => [b.id, b.name]));
+  private async projectNames(projectIds: number[]): Promise<Map<number, string>> {
+    if (!projectIds.length) return new Map();
+    const all = await this.listProjects();
+    return new Map(all.filter((p) => projectIds.includes(p.id)).map((p) => [p.id, p.name]));
   }
 }

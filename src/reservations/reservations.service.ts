@@ -442,17 +442,15 @@ export class ReservationsService {
       this.logger.warn(`Task warehouse resolution failed for task ${taskId}: ${e?.message}`);
       throw new BadRequestException('Առաջադրանքի տվյալները հասանելի չեն (CRM) — փորձեք կրկին');
     }
-    const backlogId =
-      task?.backlogId ?? task?.sourceBacklogId ?? task?.backlog?.id ?? task?.sourceBacklog?.id ?? null;
-    if (!backlogId) {
+    // 2026-09-29: warehouses serve projects. A sub-project without a link of
+    // its own is served by its nearest linked ancestor.
+    const projectId = Number(task?.projectId ?? 0) || null;
+    if (!projectId) {
       throw new BadRequestException(
         'Առաջադրանքի նախագիծը որոշված չէ — պահեստային հայտն արգելափակված է',
       );
     }
-    const link = await this.prisma.warehouseBacklog.findUnique({
-      where: { backlogId },
-      include: { warehouse: true },
-    });
+    const link = await this.linkForProject(crmUrl, projectId);
     if (!link) {
       throw new BadRequestException(
         'Նախագիծը կապված չէ որևէ պահեստի հետ — դիմեք պահեստի պատասխանատուին',
@@ -515,6 +513,29 @@ export class ReservationsService {
       });
       return { frozen: false, updated: upd.count };
     });
+  }
+
+  /**
+   * The warehouse link serving a project: its own, else the nearest linked
+   * ancestor's (parents read from CRM; capped so a bad chain cannot loop).
+   */
+  private async linkForProject(crmUrl: string, projectId: number) {
+    let current: number | null = projectId;
+    for (let hops = 0; current && hops < 32; hops++) {
+      const link = await this.prisma.warehouseProject.findUnique({ where: { projectId: current }, include: { warehouse: true } });
+      if (link) return link;
+      try {
+        const res = await fetch(`${crmUrl}/api/projects/${current}/workspace/internal`, {
+          headers: { 'x-internal-secret': requireInternalSecret() },
+        });
+        if (!res.ok) return null;
+        const w = (await res.json()) as { parentId?: number | null };
+        current = w?.parentId ?? null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 
   private async currentTaskObjectId(taskId?: number | null): Promise<number | null | undefined> {

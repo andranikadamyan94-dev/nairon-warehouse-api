@@ -52,7 +52,8 @@ export class CreateWarehouseDto {
   @IsOptional()
   @IsArray()
   @IsInt({ each: true })
-  backlogIds?: number[];
+  /** CRM project ids this warehouse serves (2026-09-29; was backlogIds). */
+  projectIds?: number[];
 
   @ApiPropertyOptional({ type: [Number] })
   @IsOptional()

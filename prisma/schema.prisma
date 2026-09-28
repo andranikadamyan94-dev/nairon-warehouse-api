@@ -279,7 +279,7 @@ model Warehouse {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  backlogs      WarehouseBacklog[]
+  projects      WarehouseProject[]
   stock         WarehouseStock[]
   transfersIn   StockTransfer[]      @relation("TransferTo")
   movements     InventoryMovement[]
@@ -302,17 +302,19 @@ enum WarehouseStatus {
   INACTIVE
 }
 
-/// A CRM backlog («նախագիծ» in the team's language) is served by exactly one
-/// warehouse; a warehouse may serve many. Tasks resolve task→backlog→warehouse
-/// and are BLOCKED when their backlog is unlinked (user's call, 2026-09-03).
-model WarehouseBacklog {
+/// A CRM project («նախագիծ») is served by exactly one warehouse; a warehouse
+/// may serve many (2026-09-29 — the link was per backlog until the projects
+/// restructure, #2596-98). A task resolves task → project → warehouse; a
+/// sub-project without a link of its own uses its nearest linked ancestor's.
+/// Tasks are BLOCKED when neither is linked (user's call, 2026-09-03).
+model WarehouseProject {
   id Int @id @default(autoincrement())
 
   warehouseId Int
-  /// CRM Backlog id — cross-service reference, validated at link time.
-  backlogId   Int    @unique
+  /// CRM Project id — cross-service reference, validated at link time.
+  projectId   Int    @unique
   /// Name snapshot so lists don't need a CRM round-trip.
-  backlogName String
+  projectName String
 
   createdAt DateTime @default(now())
 

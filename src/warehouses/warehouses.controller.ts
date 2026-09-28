@@ -45,10 +45,19 @@ export class WarehousesController {
   // Declared before ':id' — Nest matches in order.
   @UseGuards(PermissionGuard)
   @Permissions('manage_warehouses')
+  @Get('projects')
+  @ApiOperation({ summary: 'CRM projects for the linked-project picker' })
+  listProjects() {
+    return this.warehousesService.listProjects();
+  }
+
+  /** Alias for one release (2026-09-29): clients still asking for backlogs get the projects. */
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_warehouses')
   @Get('backlogs')
-  @ApiOperation({ summary: 'CRM backlogs for the linked-project picker' })
+  @ApiOperation({ summary: 'Deprecated alias of GET warehouses/projects' })
   listBacklogs() {
-    return this.warehousesService.listBacklogs();
+    return this.warehousesService.listProjects();
   }
 
   @UseGuards(PermissionGuard)
