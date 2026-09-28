@@ -68,13 +68,40 @@ export class ObjectsService {
     return { movements, estimateLines };
   }
 
+  private taskIdsCache = new Map<number, { at: number; ids: number[] }>();
+
+  /**
+   * The movements that belong to an object (2026-09-29): those stamped with it
+   * at issue time, and every movement of the tasks its costs follow — its
+   * project's and sub-projects' tasks (CRM decides, cached a minute). History
+   * from before the object existed counts too. CRM unreachable → stamped only.
+   */
+  private async scopeOf(objectId: number): Promise<any> {
+    const hit = this.taskIdsCache.get(objectId);
+    let ids = hit && Date.now() - hit.at < 60_000 ? hit.ids : null;
+    if (!ids) {
+      try {
+        const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+        const res = await fetch(`${crmUrl}/api/construction-objects/internal/${objectId}/task-ids`, {
+          headers: { 'x-internal-secret': requireInternalSecret() },
+        });
+        ids = res.ok ? (((await res.json()) as any)?.taskIds ?? []) : [];
+      } catch {
+        ids = [];
+      }
+      this.taskIdsCache.set(objectId, { at: Date.now(), ids: ids ?? [] });
+    }
+    return ids && ids.length ? { OR: [{ objectId }, { taskId: { in: ids }, type: { in: ['OUT', 'IN'] } }] } : { objectId };
+  }
+
   /** Ledger rows of one object (raw view, newest first, paginated). */
   async movements(objectId: number, query?: { page?: string; limit?: string }) {
     const page = Number(query?.page ?? 1);
     const limit = Number(query?.limit ?? 20);
+    const scope = await this.scopeOf(objectId);
     const [rows, total] = await this.prisma.$transaction([
       this.prisma.inventoryMovement.findMany({
-        where: { objectId },
+        where: scope,
         include: {
           item: { select: { id: true, name: true, code: true, unit: true, category: { select: { name: true } } } },
           warehouse: { select: { id: true, name: true } },
@@ -83,7 +110,7 @@ export class ObjectsService {
         skip: (page - 1) * limit,
         take: limit,
       }),
-      this.prisma.inventoryMovement.count({ where: { objectId } }),
+      this.prisma.inventoryMovement.count({ where: scope }),
     ]);
     return { data: rows, total, page, limit };
   }
@@ -95,7 +122,7 @@ export class ObjectsService {
    */
   async materials(objectId: number) {
     const rows = await this.prisma.inventoryMovement.findMany({
-      where: { objectId },
+      where: await this.scopeOf(objectId),
       include: {
         item: { select: { id: true, name: true, code: true, unit: true, category: { select: { name: true } } } },
         warehouse: { select: { id: true, name: true } },
