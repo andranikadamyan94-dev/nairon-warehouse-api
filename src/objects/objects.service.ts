@@ -68,6 +68,41 @@ export class ObjectsService {
     return { movements, estimateLines };
   }
 
+  /**
+   * CRM attaches this object to a project (2026-09-29). Everything stamped
+   * with the project's automatic object (`fromObjectId`) moves here —
+   * movements, reservations, estimate lines, asset holds — and the project's
+   * own tasks' movements/reservations that were never stamped are stamped now.
+   * Rows stamped with some other object stay as they are (an explicit choice).
+   * Refused when both objects have estimate lines (they cannot be merged).
+   */
+  async adopt(objectId: number, body: { fromObjectId?: number | null; taskIds?: number[] }) {
+    const from = body?.fromObjectId ? Number(body.fromObjectId) : null;
+    const ids = (body?.taskIds ?? []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    if (from) {
+      const [mine, theirs] = await Promise.all([
+        this.prisma.objectEstimateLine.count({ where: { objectId } }),
+        this.prisma.objectEstimateLine.count({ where: { objectId: from } }),
+      ]);
+      if (mine && theirs) throw new BadRequestException('Երկու օբյեկտներն էլ ունեն նախահաշիվ․ միավորել հնարավոր չէ');
+    }
+    const cond: any[] = [...(from ? [{ objectId: from }] : []), ...(ids.length ? [{ objectId: null, taskId: { in: ids } }] : [])];
+    const result = await this.prisma.$transaction(async (tx) => {
+      const movements = cond.length ? (await tx.inventoryMovement.updateMany({ where: { OR: cond }, data: { objectId } })).count : 0;
+      const reservations = cond.length ? (await tx.resourceReservation.updateMany({ where: { OR: cond }, data: { objectId } })).count : 0;
+      let estimateLines = 0, custody = 0;
+      if (from) {
+        estimateLines = (await tx.objectEstimateLine.updateMany({ where: { objectId: from }, data: { objectId } })).count;
+        custody += (await tx.assetCustody.updateMany({ where: { holderObjectId: from }, data: { holderObjectId: objectId } })).count;
+        custody += (await tx.assetCustody.updateMany({ where: { originObjectId: from }, data: { originObjectId: objectId } })).count;
+      }
+      return { movements, reservations, estimateLines, custody };
+    });
+    this.taskIdsCache.delete(objectId);
+    if (from) this.taskIdsCache.delete(from);
+    return result;
+  }
+
   private taskIdsCache = new Map<number, { at: number; ids: number[] }>();
 
   /**

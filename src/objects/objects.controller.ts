@@ -39,6 +39,14 @@ export class ObjectsController {
     return this.objectsService.usage(objectId);
   }
 
+  // CRM attaches this object to a project (2026-09-29). Before ':objectId' routes.
+  @Public()
+  @UseGuards(InternalGuard)
+  @Post('internal/:objectId/adopt')
+  adopt(@Param('objectId', ParseIntPipe) objectId: number, @Body() body: { fromObjectId?: number | null; taskIds?: number[] }) {
+    return this.objectsService.adopt(objectId, body);
+  }
+
   @UseGuards(PermissionGuard)
   @Permissions(...VIEW_PERMS)
   @Get()
