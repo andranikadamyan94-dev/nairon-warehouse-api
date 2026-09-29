@@ -39,6 +39,14 @@ export class ObjectsController {
     return this.objectsService.usage(objectId);
   }
 
+  // CRM's objects tree: material cost of many objects at once (2026-09-29).
+  @Public()
+  @UseGuards(InternalGuard)
+  @Post('internal/material-costs')
+  materialCosts(@Body() body: { groups?: { objectId: number; taskIds?: number[] }[] }) {
+    return this.objectsService.materialCosts(body?.groups ?? []);
+  }
+
   // CRM attaches this object to a project (2026-09-29). Before ':objectId' routes.
   @Public()
   @UseGuards(InternalGuard)

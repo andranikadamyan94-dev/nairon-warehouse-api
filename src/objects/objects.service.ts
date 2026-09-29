@@ -129,6 +129,42 @@ export class ObjectsService {
     return ids && ids.length ? { OR: [{ objectId }, { taskId: { in: ids }, type: { in: ['OUT', 'IN'] } }] } : { objectId };
   }
 
+  /**
+   * Net material cost of many objects in one pass (2026-09-29, the CRM objects
+   * tree). CRM sends each object with the tasks its costs follow; the same rule
+   * as the object page applies: rows stamped with the object, plus OUT/IN rows
+   * of those tasks. Issues add, everything else (returns) subtracts, at frozen
+   * costs — exactly what the Materials tab totals.
+   */
+  async materialCosts(groups: { objectId: number; taskIds?: number[] }[]) {
+    const list = (Array.isArray(groups) ? groups : [])
+      .map((g) => ({ objectId: Number(g?.objectId), taskIds: (Array.isArray(g?.taskIds) ? g.taskIds : []).map(Number).filter(Number.isInteger) }))
+      .filter((g) => Number.isInteger(g.objectId) && g.objectId > 0);
+    const costs: Record<number, number> = {};
+    if (!list.length) return { costs };
+    const objectIds = [...new Set(list.map((g) => g.objectId))];
+    const taskIds = [...new Set(list.flatMap((g) => g.taskIds))];
+    const select = { id: true, objectId: true, taskId: true, type: true, totalCost: true } as const;
+    const byId = new Map<number, { objectId: number | null; taskId: number | null; type: string; totalCost: number | null }>();
+    const take = (rows: any[]) => rows.forEach((r) => byId.set(r.id, r));
+    take(await this.prisma.inventoryMovement.findMany({ where: { objectId: { in: objectIds } }, select }));
+    for (let i = 0; i < taskIds.length; i += 10000) {
+      take(await this.prisma.inventoryMovement.findMany({ where: { taskId: { in: taskIds.slice(i, i + 10000) }, type: { in: ['OUT', 'IN'] } }, select }));
+    }
+    const rows = [...byId.values()];
+    for (const g of list) {
+      const tasks = new Set(g.taskIds);
+      let sum = 0;
+      for (const r of rows) {
+        const mine = r.objectId === g.objectId || (r.taskId != null && tasks.has(r.taskId) && (r.type === 'OUT' || r.type === 'IN'));
+        if (!mine || r.totalCost == null) continue;
+        sum += r.type === 'OUT' ? r.totalCost : -r.totalCost;
+      }
+      costs[g.objectId] = Math.round(sum * 100) / 100;
+    }
+    return { costs };
+  }
+
   /** Ledger rows of one object (raw view, newest first, paginated). */
   async movements(objectId: number, query?: { page?: string; limit?: string }) {
     const page = Number(query?.page ?? 1);
