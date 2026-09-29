@@ -1159,9 +1159,13 @@ export class ProcurementService {
     });
   }
 
-  private async assertMayApprove(order: { entityId: number | null }, userId: number) {
-    // Held in the order's organization; an order without one needs the right anywhere.
-    const info = await this.usersPrisma.getUserAccessInfo(userId, order.entityId ?? undefined);
+  /**
+   * Owner's hotfix 2026-09-29: approve_purchase_order held in ANY organization
+   * lets its holder approve (or send back) orders of every organization. This
+   * one right only — every other procurement right stays per organization.
+   */
+  private async assertMayApprove(_order: { entityId: number | null }, userId: number) {
+    const info = await this.usersPrisma.getUserAccessInfo(userId, 0);
     if (!info.isSuperAdmin && !info.permissionNames.includes(APPROVE_ORDER_PERMISSION)) {
       throw new ForbiddenException('Դուք այս կազմակերպության գնման պատվերները հաստատելու թույլտվություն չունեք');
     }

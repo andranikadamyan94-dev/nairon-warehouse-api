@@ -233,16 +233,15 @@ export class ProcurementController {
     return this.procurementService.finalize(id, req.user?.id);
   }
 
-  @UseGuards(PermissionGuard)
-  @Permissions('approve_purchase_order')
+  // Hotfix 2026-09-29: no route guard — the right counts from ANY organization,
+  // which ProcurementService.assertMayApprove checks (the guard reads one).
   @Post(':id/approve')
   @ApiOperation({ summary: 'Approve a pending order — raises it with finance' })
   approve(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.procurementService.approve(id, req.user?.id);
   }
 
-  @UseGuards(PermissionGuard)
-  @Permissions('approve_purchase_order')
+  // Hotfix 2026-09-29: see approve — checked in the service, any organization.
   @Post(':id/reject-approval')
   @ApiOperation({ summary: 'Send a pending order back to draft with a reason' })
   rejectApproval(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any) {
