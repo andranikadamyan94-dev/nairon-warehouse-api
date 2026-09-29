@@ -1,3 +1,4 @@
+import { requireInternalSecret } from '../common/internal-headers';
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from 'prisma/prisma.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
@@ -220,6 +221,20 @@ export class AssetCustodyService {
     const isManager = object?.responsibleId != null && object.responsibleId === actor.userId;
     if (!isManager && !this.has(actor, PERM.issue)) throw new ForbiddenException('Վերաբաշխում է օբյեկտի պատասխանատուն կամ պահեստը');
     if (await this.usersPrisma.isDeactivated(dto.holderUserId)) throw new BadRequestException('Աշխատակիցն ապաակտիվացված է');
+    // 2026-09-29 (owner): only to someone who is or was on the object's tasks.
+    // CRM decides who that is; unreachable → refused (fail closed).
+    let people: number[];
+    try {
+      const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+      const res = await fetch(`${crmUrl}/api/construction-objects/internal/${c.holderObjectId}/people`, {
+        headers: { 'x-internal-secret': requireInternalSecret() },
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      people = ((await res.json()) as any)?.userIds ?? [];
+    } catch {
+      throw new BadRequestException('Օբյեկտի աշխատակիցների ցանկը հասանելի չէ — փորձեք կրկին');
+    }
+    if (!people.includes(dto.holderUserId)) throw new BadRequestException('Գույքը կարելի է տալ միայն նախագծի առաջադրանքներում աշխատած աշխատակցին');
     const row = await this.prisma.$transaction(async (tx) => {
       await tx.assetCustody.update({ where: { id }, data: { releasedAt: new Date(), releasedBy: actor.userId } });
       const next = await tx.assetCustody.create({
