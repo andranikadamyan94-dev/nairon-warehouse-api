@@ -43,6 +43,12 @@ export class ObjectsService {
   /** One object's catalog row. A freshly created object may postdate the
    *  cached catalog — a miss busts the cache and retries once, so a new
    *  object's summary is never served with null metadata for a TTL. */
+  /** The same row, read past the cache — for decisions (who may act), not labels. */
+  async crmObjectFresh(objectId: number) {
+    this.objectsCache = null;
+    return this.crmObject(objectId);
+  }
+
   async crmObject(objectId: number) {
     let all = await this.crmObjects();
     let row = all.find((o) => o.id === objectId);

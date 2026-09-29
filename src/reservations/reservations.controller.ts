@@ -206,8 +206,42 @@ export class ReservationsController {
     return this.reservationsService.reclaim(+id, userId, Number(body?.quantity), !!body?.damaged, body?.reason);
   }
 
+  // ── construction objects (2026-09-29) ─────────────────────────────────────
+
+  /** An object's own requests. The object's page reads them; the service answers who may act. */
+  @Get('object/:objectId')
+  @ApiOperation({ summary: "An object's own warehouse requests" })
+  forObject(@Param('objectId') objectId: string) {
+    return this.reservationsService.forObject(+objectId);
+  }
+
+  /** The object's responsible person asks for goods (only they — checked against CRM). */
+  @Post('object/:objectId')
+  @ApiOperation({ summary: 'Request goods for a construction object' })
+  createForObject(
+    @Param('objectId') objectId: string,
+    @Body() body: { resources: { itemId: number; quantity: number }[]; note?: string },
+    @LoggedInUser('id') userId: number,
+  ) {
+    return this.reservationsService.createForObject(+objectId, body?.resources ?? [], userId, { note: body?.note });
+  }
+
+  /** The warehouse supplies an object directly, without a request. */
+  @Post('object/:objectId/supply')
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations')
+  @ApiOperation({ summary: 'Issue goods to a construction object directly' })
+  supplyObject(
+    @Param('objectId') objectId: string,
+    @Body() body: { resources: { itemId: number; quantity: number }[] },
+    @Actor() actor: WarehouseActor,
+    @LoggedInUser('id') userId: number,
+  ) {
+    return this.reservationsService.supplyObject(+objectId, body?.resources ?? [], userId, actor);
+  }
+
   // Any authenticated task participant may call; the service validates the
-  // caller against the task's role slots in CRM.
+  // caller against the task's role slots in CRM (an object's own row: its responsible person).
   @Patch(':id/accept')
   @ApiOperation({ summary: 'Task-side acceptance of issued goods (partial allowed with a comment)' })
   accept(

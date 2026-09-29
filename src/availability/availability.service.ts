@@ -72,7 +72,8 @@ export class AvailabilityService {
       warehouseId: warehouseId ?? null,
       ...reservationOverlapFilter,
       status: { notIn: INACTIVE_STATUSES },
-      ...(excludeTaskId ? { taskId: { not: excludeTaskId } } : {}),
+      // NULL-safe (2026-09-29): `not: X` alone also drops task-less rows — objects' own requests.
+      ...(excludeTaskId ? { AND: [{ OR: [{ taskId: null }, { taskId: { not: excludeTaskId } }] }] } : {}),
     };
 
     const [assetCount, underMaintenance, overlappingReservations, handedOut] = await Promise.all([

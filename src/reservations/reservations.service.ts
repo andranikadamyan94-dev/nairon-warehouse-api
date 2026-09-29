@@ -357,12 +357,18 @@ export class ReservationsService {
 
   /** Tell the requesting task's assignees what happened to their reservation. */
   private async notifyRequesters(
-    reservation: { taskId?: number | null; projectName?: string | null },
+    reservation: { taskId?: number | null; objectId?: number | null; projectName?: string | null },
     title: string,
     body: string,
     details: { label: string; value: string }[] = [],
   ): Promise<void> {
-    const userIds = await this.taskAssignees(reservation.taskId);
+    // 2026-09-29: an object's own request answers to the object's responsible person.
+    let userIds: number[] = [];
+    if (reservation.taskId) userIds = await this.taskAssignees(reservation.taskId);
+    else if (reservation.objectId) {
+      const card = await this.objectCard(reservation.objectId).catch(() => null);
+      if (card?.responsibleId) userIds = [card.responsibleId];
+    }
     if (!userIds.length) return;
     await this.notifications.sendToUsers(userIds, {
       title,
@@ -478,6 +484,8 @@ export class ReservationsService {
         itemId: args.itemId,
         taskId: args.taskId ?? null,
         warehouseId: args.warehouseId ?? null,
+        // 2026-09-29: a task-less row is an object's — mirror THAT object's issuance, not any task-less one.
+        ...(args.taskId == null && args.fallbackObjectId != null ? { objectId: args.fallbackObjectId } : {}),
       },
       orderBy: { id: 'desc' },
       select: { unitCost: true, objectId: true },
@@ -1370,7 +1378,8 @@ export class ReservationsService {
     // #2042: resolve the task's CURRENT object BEFORE the transaction — an
     // external HTTP call inside an interactive tx would hold a pooled
     // connection and abort the whole issuance on a slow CRM (~5s tx timeout).
-    const curObj = await this.currentTaskObjectId(reservation.taskId);
+    // 2026-09-29: a row without a task is an object's own request — its object is fixed.
+    const curObj = reservation.taskId ? await this.currentTaskObjectId(reservation.taskId) : undefined;
     const effObjectId = curObj === undefined ? ((reservation as any).objectId ?? null) : curObj;
 
     const result = await this.prisma.$transaction(async (tx) => {
@@ -1515,9 +1524,11 @@ export class ReservationsService {
     void this.notifyRequesters(
       reservation,
       'Ամրագրումը հաստատվել է',
-      toAllocate < outstanding
-        ? 'Ձեր առաջադրանքի համար կատարված ամրագրումը մասնակի տրամադրվել է։ Մնացորդը դեռ սպասվում է։'
-        : 'Ձեր առաջադրանքի համար կատարված ամրագրումը հաստատվել է և ռեսուրսը տրամադրվել է։',
+      reservation.taskId
+        ? toAllocate < outstanding
+          ? 'Ձեր առաջադրանքի համար կատարված ամրագրումը մասնակի տրամադրվել է։ Մնացորդը դեռ սպասվում է։'
+          : 'Ձեր առաջադրանքի համար կատարված ամրագրումը հաստատվել է և ռեսուրսը տրամադրվել է։'
+        : 'Պահեստը ռեսուրս է տրամադրել օբյեկտին — հաստատեք ստացումը օբյեկտի «Պահեստային հայտեր» բաժնում։',
       [
         { label: 'Ռեսուրս', value: reservation.item.name },
         { label: 'Տրամադրված', value: String(toAllocate) },
@@ -1554,7 +1565,8 @@ export class ReservationsService {
     if (INACTIVE_STATUSES.includes(reservation.status as ResourceReservationStatus)) {
       throw new BadRequestException(`Reservation is already ${reservation.status}`);
     }
-    if (!reservation.taskId) {
+    const objectOwn = !reservation.taskId && !!(reservation as any).objectId;
+    if (!reservation.taskId && !objectOwn) {
       throw new BadRequestException('Միայն առաջադրանքի ամրագրումները կարող են ընդունվել այս ձևով');
     }
     // Goods only. An asset reservation flipped COMPLETED while the asset is
@@ -1572,7 +1584,14 @@ export class ReservationsService {
 
     const { isSuperAdmin } = await this.usersPrisma.getUserAccessInfo(userId);
     if (!isSuperAdmin) {
-      await this.assertTaskRole(reservation.taskId, userId);
+      if (objectOwn) {
+        const card = await this.objectCard((reservation as any).objectId);
+        if (card.responsibleId !== userId) {
+          throw new ForbiddenException('Ստացումը հաստատում է օբյեկտի պատասխանատուն');
+        }
+      } else {
+        await this.assertTaskRole(reservation.taskId!, userId);
+      }
     }
 
     // Optimistic concurrency: two role-holders confirming at once must not
@@ -1638,7 +1657,7 @@ export class ReservationsService {
             reservationId,
             current.status as ResourceReservationStatus,
             ResourceReservationStatus.COMPLETED,
-            { performedBy: userId, reason: 'Ամբողջ քանակն ընդունվել է առաջադրանքի կողմից' },
+            { performedBy: userId, reason: objectOwn ? 'Ամբողջ քանակն ընդունվել է օբյեկտի պատասխանատուի կողմից' : 'Ամբողջ քանակն ընդունվել է առաջադրանքի կողմից' },
           );
         }
         return true;
@@ -2282,6 +2301,9 @@ export class ReservationsService {
       where.status = { not: ResourceReservationStatus.COMPLETED };
     }
 
+    // 2026-09-29: one object's own requests (no task).
+    if (query.objectId) { where.objectId = Number(query.objectId); where.taskId = null; }
+
     // #1989 workspaces: scope the list to the selected warehouse.
     if (query.warehouseId === 'main') where.warehouseId = null;
     else if (query.warehouseId) where.warehouseId = Number(query.warehouseId);
@@ -2447,7 +2469,13 @@ export class ReservationsService {
       // from item.quantity, so counting them again in reservedByOthers would double-subtract.
       const reservedByOthers = activeReservations
         .filter((r) => {
-          if (r.taskId === reservation.taskId || !overlapping(r)) return false;
+          // Task-less rows (objects' own requests) are each their own owner (2026-09-29).
+          const sameOwner = reservation.taskId != null ? r.taskId === reservation.taskId : r.id === reservation.id;
+          if (sameOwner || !overlapping(r)) return false;
+          // First come, first served (2026-09-29): a LATER request still waiting (PENDING) does not
+          // eat into an earlier one's share — else a short request filed after a covered one
+          // made the covered one look short too.
+          if ((r as any).status === ResourceReservationStatus.PENDING && r.id > reservation.id) return false;
           if (reservation.item?.type === ItemType.CONSUMABLE) {
             return (r as any).status !== ResourceReservationStatus.ALLOCATED;
           }
@@ -2469,8 +2497,9 @@ export class ReservationsService {
     });
 
     const requisitions = await this.requisitionsFor(enriched.map((r: any) => r.id));
+    const objects = await this.objectLabels(enriched.filter((r: any) => !r.taskId && r.objectId).map((r: any) => r.objectId));
     return {
-      data: enriched.map((r: any) => ({ ...r, requisition: requisitions.get(r.id) ?? null })),
+      data: enriched.map((r: any) => ({ ...r, requisition: requisitions.get(r.id) ?? null, object: !r.taskId && r.objectId ? objects.get(r.objectId) ?? { id: r.objectId, code: null, name: null } : null })),
       total,
       page,
       limit,
@@ -2494,6 +2523,213 @@ export class ReservationsService {
       if (!map.has(l.reservationId)) map.set(l.reservationId, { id: l.requisition.id, lineId: l.id, status: l.requisition.status });
     }
     return map;
+  }
+
+  // ─── construction-object requests (2026-09-29) ────────────────────────────────
+
+  /** The object as CRM knows it now (responsible person, project) — never cached: it decides who may ask. */
+  async objectCard(objectId: number): Promise<{
+    id: number; code: string; name: string; projectId: number | null; projectName: string | null; entityId: number | null; responsibleId: number | null;
+  }> {
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    let res: Response;
+    try {
+      res = await fetch(`${crmUrl}/api/construction-objects/internal/${objectId}/card`, {
+        headers: { 'x-internal-secret': requireInternalSecret() },
+      });
+    } catch {
+      throw new BadRequestException('Օբյեկտի տվյալները հասանելի չեն (CRM) — փորձեք կրկին');
+    }
+    if (res.status === 404) throw new NotFoundException('Օբյեկտը չի գտնվել');
+    if (!res.ok) throw new BadRequestException('Օբյեկտի տվյալները հասանելի չեն (CRM) — փորձեք կրկին');
+    return (await res.json()) as any;
+  }
+
+  /** Code + name of objects for the Reservations list. CRM down → empty labels, the list still works. */
+  private async objectLabels(ids: number[]): Promise<Map<number, { id: number; code: string | null; name: string | null }>> {
+    const map = new Map<number, { id: number; code: string | null; name: string | null }>();
+    if (!ids.length) return map;
+    try {
+      const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+      const res = await fetch(`${crmUrl}/api/construction-objects/internal/all`, { headers: { 'x-internal-secret': requireInternalSecret() } });
+      if (res.ok) {
+        const want = new Set(ids);
+        for (const o of (await res.json()) as any[]) if (want.has(o.id)) map.set(o.id, { id: o.id, code: o.code, name: o.name });
+      }
+    } catch { /* labels are cosmetic */ }
+    return map;
+  }
+
+  /** Owner 2026-09-29: the project's warehouse (nearest linked ancestor), else the main one. */
+  private async objectWarehouse(card: { projectId: number | null }): Promise<number | null> {
+    if (!card.projectId) return null;
+    const link = await this.linkForProject(process.env.CRM_API_URL || 'http://localhost:3003', card.projectId);
+    if (!link || link.warehouse.type === 'MAIN' || link.warehouse.status !== 'ACTIVE') return null;
+    return link.warehouseId;
+  }
+
+  /**
+   * An object asks the warehouse for goods (owner 2026-09-29). Only the
+   * object's responsible person asks (`asWarehouse`: the warehouse supplying
+   * the object directly, see supplyObject). Goods only — assets go through an
+   * asset request for the object. Rows carry the object and no task, draw on
+   * the project's warehouse (else main), and land APPROVED when the shelf
+   * covers them or PENDING for the warehouse to decide — short lines are what
+   * a purchase requisition is filed for, from the Reservations page.
+   */
+  async createForObject(
+    objectId: number,
+    resources: { itemId: number; quantity: number }[],
+    performedBy: number | undefined,
+    opts: { asWarehouse?: boolean; note?: string } = {},
+  ) {
+    const card = await this.objectCard(objectId);
+    if (!card.responsibleId) {
+      throw new BadRequestException('Օբյեկտը պատասխանատու չունի — նախ նշանակեք պատասխանատու, որը կհաստատի ստացումը');
+    }
+    if (!opts.asWarehouse && card.responsibleId !== performedBy) {
+      throw new ForbiddenException('Օբյեկտի համար պահեստային հայտ ներկայացնում է միայն օբյեկտի պատասխանատուն');
+    }
+    const lines = (Array.isArray(resources) ? resources : []).map((r) => ({ itemId: Number(r?.itemId), quantity: Number(r?.quantity) }));
+    if (!lines.length || lines.some((l) => !Number.isInteger(l.itemId))) throw new BadRequestException('Նշեք առնվազն մեկ ռեսուրս');
+    const items = await this.prisma.item.findMany({ where: { id: { in: lines.map((l) => l.itemId) } }, select: { id: true, type: true, name: true } });
+    const byId = new Map(items.map((i) => [i.id, i]));
+    for (const l of lines) {
+      const it = byId.get(l.itemId);
+      if (!it) throw new NotFoundException(`Ռեսուրս #${l.itemId}-ը չի գտնվել`);
+      if (it.type !== ItemType.CONSUMABLE) {
+        throw new BadRequestException(`«${it.name}»-ը գույք է — գույքի համար ներկայացրեք գույքի հայտ`);
+      }
+    }
+    this.normalizeQuantities(lines, new Map(items.map((i) => [i.id, i.type])));
+    const warehouseId = await this.objectWarehouse(card);
+    const requesterWorkspaceId = (await this.requesters.forRequest({ projectId: card.projectId })) ?? card.entityId ?? null;
+    if (requesterWorkspaceId === null) throw new BadRequestException('Պարզ չէ, թե որ կազմակերպությանն է օբյեկտը');
+    const startDate = new Date();
+    // Bounded, so an object's claim never trips the one-open-ended-row rule of task requests.
+    const endDate = new Date(startDate.getTime() + 365 * 86400000);
+
+    const created: any[] = [];
+    await this.prisma.$transaction(async (tx) => {
+      for (const l of lines) {
+        const free = await this.stillReservable(tx, l.itemId, l.quantity, startDate, endDate, warehouseId);
+        const status = free ? ResourceReservationStatus.APPROVED : ResourceReservationStatus.PENDING;
+        const row = await tx.resourceReservation.create({
+          data: {
+            itemId: l.itemId,
+            quantity: l.quantity,
+            taskId: null,
+            projectId: card.projectId,
+            projectName: card.projectName,
+            entityId: card.entityId,
+            entityName: null,
+            requesterWorkspaceId,
+            warehouseId,
+            objectId: card.id,
+            startDate,
+            endDate,
+            status,
+          },
+        });
+        await this.writeStatusHistory(tx, row.id, null, status, {
+          performedBy,
+          reason: opts.asWarehouse ? 'Պահեստը տրամադրում է օբյեկտին' : `Օբյեկտի հայտ${opts.note?.trim() ? ` — ${opts.note.trim()}` : ''}`,
+        });
+        created.push({ ...row, itemName: byId.get(l.itemId)?.name });
+      }
+    });
+
+    if (!opts.asWarehouse) {
+      const short = created.filter((c) => c.status === ResourceReservationStatus.PENDING);
+      void this.notifications.send({
+        permissions: ['receive_reservation_alerts', 'manage_warehouse'],
+        title: short.length ? 'Օբյեկտի հայտ՝ սպասում է որոշման' : 'Նոր հայտ օբյեկտից',
+        body: `${card.code} ${card.name}՝ ${created.map((c) => `${c.itemName} × ${c.quantity}`).join(', ')}`,
+        path: '/reservations',
+        details: [
+          { label: 'Օբյեկտ', value: `${card.code} ${card.name}` },
+          ...(short.length ? [{ label: 'Պաշարը չի բավարարում', value: short.map((c) => c.itemName).join(', ') }] : []),
+          ...(opts.note?.trim() ? [{ label: 'Նշում', value: opts.note.trim() }] : []),
+        ],
+      });
+    }
+    return { created, warehouseId };
+  }
+
+  /**
+   * The warehouse supplies an object directly, without a request (owner
+   * 2026-09-29): the same object rows, issued at once from the object's pool
+   * at frozen cost; the object's responsible person still confirms receipt.
+   * Refused as a whole, before anything is written, when the shelf is short.
+   */
+  async supplyObject(
+    objectId: number,
+    resources: { itemId: number; quantity: number }[],
+    performedBy: number | undefined,
+    actor?: WarehouseActor,
+  ) {
+    const card = await this.objectCard(objectId);
+    const warehouseId = await this.objectWarehouse(card);
+    const wanted = new Map<number, number>();
+    for (const r of Array.isArray(resources) ? resources : []) wanted.set(Number(r.itemId), roundQty((wanted.get(Number(r.itemId)) ?? 0) + Number(r.quantity)));
+    for (const [itemId, qty] of wanted) {
+      const item = await this.prisma.item.findUnique({ where: { id: itemId }, select: { name: true, quantity: true } });
+      if (!item) continue; // createForObject names it
+      const onShelf = warehouseId
+        ? (await this.prisma.warehouseStock.findUnique({ where: { warehouseId_itemId: { warehouseId, itemId } }, select: { quantity: true } }))?.quantity ?? 0
+        : item.quantity;
+      if (onShelf < qty) {
+        throw new BadRequestException(`«${item.name}» — ${warehouseId ? 'նախագծային պահեստում' : 'պահեստում'} առկա է ${onShelf}, տրամադրվում է ${qty}`);
+      }
+    }
+    const { created } = await this.createForObject(objectId, resources, performedBy, { asWarehouse: true });
+    const issued: number[] = [];
+    try {
+      for (const row of created) {
+        await this.approveConsumable(row.id, performedBy, undefined, actor);
+        issued.push(row.id);
+      }
+    } catch (e) {
+      // Stock moved under us: whatever was not issued is withdrawn, nothing half-made stays open.
+      for (const row of created.filter((r) => !issued.includes(r.id))) {
+        await this.prisma.resourceReservation.update({ where: { id: row.id }, data: { status: ResourceReservationStatus.CANCELLED } }).catch(() => {});
+      }
+      throw e;
+    }
+    return { issued: issued.length, reservationIds: issued };
+  }
+
+  /**
+   * An object's own requests for its page (2026-09-29): what was asked, issued,
+   * accepted, and any purchase requisition filed for a short line.
+   */
+  async forObject(objectId: number) {
+    const rows = await this.prisma.resourceReservation.findMany({
+      where: { objectId, taskId: null },
+      include: {
+        item: { select: { id: true, name: true, unit: true, code: true } },
+        warehouse: { select: { id: true, name: true } },
+        allocations: { where: { releasedAt: null }, select: { quantity: true } },
+        statusHistory: { orderBy: { performedAt: 'asc' as const }, take: 1, select: { reason: true, performedBy: true } },
+      },
+      orderBy: { id: 'desc' },
+    });
+    const requisitions = await this.requisitionsFor(rows.map((r) => r.id));
+    return rows.map((r: any) => ({
+      id: r.id,
+      item: r.item,
+      quantity: r.quantity,
+      status: r.status,
+      issued: roundQty(r.allocations.reduce((s: number, a: any) => s + (a.quantity ?? 0), 0)),
+      accepted: r.acceptedQuantity ?? 0,
+      acceptanceComment: r.acceptanceComment ?? null,
+      warehouse: r.warehouse ?? null,
+      direct: r.statusHistory[0]?.reason === 'Պահեստը տրամադրում է օբյեկտին',
+      note: r.statusHistory[0]?.reason ?? null,
+      requestedBy: r.statusHistory[0]?.performedBy ?? null,
+      createdAt: r.createdAt,
+      requisition: requisitions.get(r.id) ?? null,
+    }));
   }
 
   // ─── getOne ──────────────────────────────────────────────────────────────────

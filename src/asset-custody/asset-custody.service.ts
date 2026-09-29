@@ -55,6 +55,12 @@ export class AssetCustodyService {
   async createRequest(dto: CreateAssetRequestDto, actor: Actor, entityId: number | null) {
     const forObject = dto.forObjectId ? await this.objects.crmObject(dto.forObjectId) : null;
     if (dto.forObjectId && !forObject) throw new NotFoundException('Օբյեկտը չի գտնվել');
+    // Owner 2026-09-29: only the object's responsible person asks on its behalf (fresh from CRM, not the cache).
+    if (forObject) {
+      const fresh = await this.objects.crmObjectFresh(forObject.id);
+      if (!fresh?.responsibleId) throw new BadRequestException('Օբյեկտը պատասխանատու չունի');
+      if (fresh.responsibleId !== actor.userId) throw new ForbiddenException('Օբյեկտի համար հայտ ներկայացնում է միայն օբյեկտի պատասխանատուն');
+    }
     const forUserId: number | null = forObject ? null : dto.forUserId ?? actor.userId;
     // Asking for yourself needs the request permission; asking on someone
     // else's behalf (HR at onboarding, a head) needs approve or issue rights.
@@ -90,10 +96,19 @@ export class AssetCustodyService {
     return request;
   }
 
-  async listRequests(query: { status?: string; forUserId?: number; mine?: boolean }, actor: Actor) {
+  async listRequests(query: { status?: string; forUserId?: number; forObjectId?: number; mine?: boolean }, actor: Actor) {
     const where: any = {};
     if (query.status) where.status = query.status;
     if (query.forUserId) where.forUserId = query.forUserId;
+    if (query.forObjectId) {
+      // An object's requests: its page shows them to anyone who may see the object's page.
+      where.forObjectId = Number(query.forObjectId);
+      return this.prisma.assetRequest.findMany({
+        where,
+        include: { item: true, custodies: { include: { asset: true } } },
+        orderBy: { createdAt: 'desc' },
+      });
+    }
     if (query.mine || !this.has(actor, PERM.approve, PERM.issue, PERM.view)) {
       where.OR = [{ requestedBy: actor.userId }, { forUserId: actor.userId }];
     }
@@ -197,8 +212,8 @@ export class AssetCustodyService {
           via: opts.requestId ? 'PERSONAL_REQUEST' : 'DIRECT_ISSUE',
           requestId: opts.requestId ?? null,
           assignedBy,
-          // Objects cannot click "received": the hand-over is the acceptance.
-          acceptedAt: new Date(),
+          // Owner 2026-09-29: the object's responsible person confirms receipt (see accept()).
+          acceptedAt: null,
           notes: opts.notes?.trim() || null,
         },
         include: custodyInclude,
@@ -344,7 +359,11 @@ export class AssetCustodyService {
   async accept(id: number, actor: Actor) {
     const c = await this.prisma.assetCustody.findUnique({ where: { id }, include: custodyInclude });
     if (!c) throw new NotFoundException('Գրառումը չի գտնվել');
-    if (c.holderUserId !== actor.userId) throw new ForbiddenException('Ստացումը հաստատում է միայն ստացողը');
+    if (c.holderType === 'OBJECT' && c.holderObjectId) {
+      // An object's asset: its responsible person confirms (fresh from CRM).
+      const o = await this.objects.crmObjectFresh(c.holderObjectId);
+      if (!actor.isSuperAdmin && o?.responsibleId !== actor.userId) throw new ForbiddenException('Ստացումը հաստատում է օբյեկտի պատասխանատուն');
+    } else if (c.holderUserId !== actor.userId) throw new ForbiddenException('Ստացումը հաստատում է միայն ստացողը');
     if (c.releasedAt) throw new BadRequestException('Գույքն արդեն վերադարձված է');
     if (c.acceptedAt) return c;
     return this.prisma.assetCustody.update({ where: { id }, data: { acceptedAt: new Date() }, include: custodyInclude });

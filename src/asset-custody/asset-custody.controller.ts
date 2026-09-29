@@ -30,6 +30,13 @@ export class AssetCustodyController {
   }
 
   // ── requests ──
+  /** 2026-09-29: an object asks for assets — only its responsible person (the service checks CRM), no request permission needed. */
+  @Post('asset-requests/object/:objectId')
+  @ApiOperation({ summary: 'Ask for assets for a construction object (its responsible person)' })
+  async createObjectRequest(@Param('objectId', ParseIntPipe) objectId: number, @Body() dto: CreateAssetRequestDto, @Req() req: any) {
+    return this.service.createRequest({ ...dto, forObjectId: objectId, forUserId: undefined }, await this.actor(req), this.entityOf(req));
+  }
+
   @Post('asset-requests')
   @UseGuards(PermissionGuard)
   @Permissions(PERM.request, PERM.approve, PERM.issue)
@@ -41,7 +48,7 @@ export class AssetCustodyController {
   @Get('asset-requests')
   @ApiOperation({ summary: 'Requests: the queue for approvers/issuers, your own otherwise' })
   async listRequests(@Query() q: any, @Req() req: any) {
-    return this.service.listRequests({ status: q.status, forUserId: q.forUserId ? Number(q.forUserId) : undefined, mine: q.mine === '1' || q.mine === 'true' }, await this.actor(req));
+    return this.service.listRequests({ status: q.status, forUserId: q.forUserId ? Number(q.forUserId) : undefined, forObjectId: q.forObjectId ? Number(q.forObjectId) : undefined, mine: q.mine === '1' || q.mine === 'true' }, await this.actor(req));
   }
 
   @Patch('asset-requests/:id/approve')

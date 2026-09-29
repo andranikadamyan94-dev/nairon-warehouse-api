@@ -53,4 +53,10 @@ export class PaginationQueryDto {
   @IsOptional()
   @IsString()
   warehouseId?: string;
+
+  /** 2026-09-29: one construction object's own requests (Reservations list). */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  objectId?: string;
 }
