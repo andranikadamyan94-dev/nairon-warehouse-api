@@ -7,6 +7,7 @@ import { jwtConstants } from '../auth/constants';
 import { UsersPrismaService } from '../common/users-prisma.service';
 import { FileRequester, requestToken, sendStoredFile } from '../common/stored-files';
 import { FilesService } from './files.service';
+import { isDelegatedToken } from '../auth/delegated-token.policy';
 
 /**
  * Receipts, answered by asking.
@@ -45,6 +46,9 @@ export class FilesController {
       const payload: { id?: unknown } = await this.jwt.verifyAsync(token, {
         secret: jwtConstants.secret,
       });
+      // A delegated AI token (carrying `act`) is not a person at a browser:
+      // it opens no file by link or cookie.
+      if (isDelegatedToken(payload)) return null;
       const userId = Number(payload?.id);
       if (!Number.isInteger(userId) || userId <= 0) return null;
       if (await this.usersPrisma.isDeactivated(userId)) return null;

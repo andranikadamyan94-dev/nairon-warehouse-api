@@ -11,6 +11,7 @@ import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { jwtConstants } from '../constants';
 import { UsersPrismaService } from '../../common/users-prisma.service';
 import { WarehouseActorService } from '../actor.service';
+import { NOT_FOR_DELEGATED_KEY, delegatedForbidden, delegatedRefusal } from '../delegated-token.policy';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -48,6 +49,22 @@ export class AuthGuard implements CanActivate {
     if (await this.usersPrisma.isDeactivated(request['user'].id)) {
       throw new UnauthorizedException('Այս հաշիվը ապաակտիվացված է');
     }
+
+    // Delegated AI tokens (carrying `act`): GET only, with X-Entity-ID equal
+    // to the token's organisation — required here, because without it the
+    // actor counts the person's grants from every organisation — and never on
+    // a GET that writes. Always null for a normal token. See
+    // delegated-token.policy.ts. ai-api calls this service directly, so the
+    // gateway's copy of the rule does not bind it.
+    const refusal = delegatedRefusal(request['user'], {
+      method: request.method,
+      entityHeader: request.headers?.['x-entity-id'],
+      routeRefused: !!this.reflector.getAllAndOverride<boolean>(NOT_FOR_DELEGATED_KEY, [
+        context.getHandler(),
+        context.getClass(),
+      ]),
+    });
+    if (refusal) throw delegatedForbidden(refusal);
 
     // Who they are and where they are acting, resolved once, from the users
     // database rather than from anything the caller sent. Done here because
