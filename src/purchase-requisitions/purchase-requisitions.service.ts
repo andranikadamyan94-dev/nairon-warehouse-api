@@ -24,6 +24,16 @@ export type LineInput = {
   reservationId?: number | null;
 };
 
+export type CreateRequisitionInput = {
+  title?: string;
+  comment?: string;
+  periodStart?: string;
+  periodEnd?: string;
+  lines: LineInput[];
+  draft?: boolean;
+  taskId?: number;
+};
+
 // A requester may still change the lines while the organization is deciding;
 // once approved, what procurement receives is what was approved.
 const EDITABLE = ['DRAFT', 'PENDING_APPROVAL'];
@@ -176,22 +186,20 @@ export class PurchaseRequisitionsService {
 
   // ── CRUD ──────────────────────────────────────────────────────────────────
 
-  async create(
-    dto: {
-      title?: string;
-      comment?: string;
-      periodStart?: string;
-      periodEnd?: string;
-      lines: LineInput[];
-      draft?: boolean;
-      taskId?: number;
-    },
-    userId: number,
-    entityId: number | null,
-  ) {
+  /**
+   * Everything create() checks before it writes, in the order it checks it:
+   * the right to file in this organization, the lines, the period. Shared with
+   * previewCreate() so the preflight cannot drift from the mutation.
+   */
+  private async assertMayCreate(dto: CreateRequisitionInput, userId: number, entityId: number | null) {
     await this.assertMayFile(userId, entityId);
-    const lines = await this.buildLines(dto.lines);
-    this.assertPeriod(dto.periodStart, dto.periodEnd);
+    const lines = await this.buildLines(dto?.lines);
+    this.assertPeriod(dto?.periodStart, dto?.periodEnd);
+    return lines;
+  }
+
+  async create(dto: CreateRequisitionInput, userId: number, entityId: number | null) {
+    const lines = await this.assertMayCreate(dto, userId, entityId);
     const created = await this.prisma.purchaseRequisition.create({
       data: {
         status: dto.draft ? 'DRAFT' : 'PENDING_APPROVAL',
@@ -206,6 +214,34 @@ export class PurchaseRequisitionsService {
       },
     });
     return this.findOne(created.id, userId);
+  }
+
+  /**
+   * Preflight for create: the same checks, nothing written. Answers what the
+   * requisition would be — each line as the catalogue resolves it — so a
+   * confirmation card can show item names and units the service vouches for.
+   * See src/common/preflight/preflight.ts: UX validation, never permission.
+   */
+  async previewCreate(dto: CreateRequisitionInput, userId: number, entityId: number | null) {
+    const lines = await this.assertMayCreate(dto, userId, entityId);
+    return {
+      entityId,
+      status: dto.draft ? 'DRAFT' : 'PENDING_APPROVAL',
+      title: dto.title?.trim() || null,
+      periodStart: dto.periodStart ?? null,
+      periodEnd: dto.periodEnd ?? null,
+      lines: lines.map((l) => ({
+        itemId: l.itemId,
+        itemName: l.itemName,
+        code: l.code,
+        unit: l.unit,
+        quantity: l.quantity,
+        note: l.note,
+        reservationId: l.reservationId,
+        stockQuantity: l.stockQuantity,
+        expectedQuantity: l.expectedQuantity,
+      })),
+    };
   }
 
   async update(

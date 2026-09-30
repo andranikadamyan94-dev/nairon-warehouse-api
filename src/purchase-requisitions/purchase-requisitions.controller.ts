@@ -18,6 +18,7 @@ import { ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { PurchaseRequisitionsService } from './purchase-requisitions.service';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
+import { PREFLIGHT_OK } from '../common/preflight/preflight';
 
 // Routes without PermissionGuard don't carry req.permissionNames — the
 // service resolves access itself for those (same pattern as stock requests).
@@ -40,6 +41,18 @@ export class PurchaseRequisitionsController {
   @ApiOperation({ summary: 'File a purchase requisition (draft or submitted)' })
   create(@Body() dto: any, @Req() req: any) {
     return this.service.create(dto, req.user?.id, entityOf(req));
+  }
+
+  /**
+   * Would this requisition be accepted? Same route, same service checks as
+   * create — create_purchase_requisition in the active organization, the
+   * lines, the period — and nothing written. Answers the lines as the
+   * catalogue resolves them. See src/common/preflight/preflight.ts.
+   */
+  @Post('preflight/create')
+  @ApiOperation({ summary: 'Preflight: may this person file this requisition, and what would it be?' })
+  async preflightCreate(@Body() dto: any, @Req() req: any) {
+    return { ...PREFLIGHT_OK, request: await this.service.previewCreate(dto, req.user?.id, entityOf(req)) };
   }
 
   @Get('mine')

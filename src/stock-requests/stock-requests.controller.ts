@@ -15,6 +15,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 
 import { StockRequestsService } from './stock-requests.service';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
+import { PREFLIGHT_OK } from '../common/preflight/preflight';
 
 // When PermissionGuard didn't run, pass undefined so the service resolves
 // access info itself instead of trusting an empty permission list.
@@ -40,6 +41,17 @@ export class StockRequestsController {
   @ApiOperation({ summary: 'File a resource request to main' })
   create(@Body() dto: any, @Req() req: any) {
     return this.stockRequestsService.create(dto, req.user?.id, ctxOf(req));
+  }
+
+  /**
+   * Would this request be accepted? Same gate as create — a PROJECT warehouse
+   * the caller belongs to, active, valid lines — and nothing written.
+   * See src/common/preflight/preflight.ts.
+   */
+  @Post('preflight/create')
+  @ApiOperation({ summary: 'Preflight: may this person file this resource request, and what would it be?' })
+  async preflightCreate(@Body() dto: any, @Req() req: any) {
+    return { ...PREFLIGHT_OK, request: await this.stockRequestsService.previewCreate(dto, req.user?.id, ctxOf(req)) };
   }
 
   // Requester or main-side staff edit a pending request (guarded in the

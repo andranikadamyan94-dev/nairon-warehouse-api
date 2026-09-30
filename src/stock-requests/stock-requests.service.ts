@@ -14,6 +14,12 @@ import { UsersPrismaService } from '../common/users-prisma.service';
 
 type Ctx = { isSuperAdmin?: boolean; permissionNames?: string[] };
 
+export type CreateStockRequestInput = {
+  warehouseId: number;
+  items: { itemId: number; quantity: number }[];
+  comment?: string;
+};
+
 /**
  * Sub → main resource requests (#1989 wave 2): warehouse members file a
  * request for their sub; main staff (manage_stock_transfers) approve — which
@@ -30,15 +36,12 @@ export class StockRequestsService {
     private readonly usersPrisma: UsersPrismaService,
   ) {}
 
-  async create(
-    dto: {
-      warehouseId: number;
-      items: { itemId: number; quantity: number }[];
-      comment?: string;
-    },
-    userId: number,
-    ctx?: Ctx,
-  ) {
+  /**
+   * Everything create() checks before it writes: the warehouse exists, is a
+   * PROJECT warehouse, is active, the caller belongs to it, and the lines hold.
+   * Shared with previewCreate() so the preflight cannot drift from the mutation.
+   */
+  private async assertMayCreate(dto: CreateStockRequestInput, userId: number, ctx?: Ctx) {
     const wh = await this.prisma.warehouse.findUnique({ where: { id: dto.warehouseId } });
     if (!wh) throw new NotFoundException('Պահեստը չի գտնվել');
     if (wh.type !== 'PROJECT') {
@@ -49,7 +52,12 @@ export class StockRequestsService {
     }
     await this.warehousesService.assertWarehouseAccess(userId, wh.id, ctx);
 
-    const lines = await this.validateLines(dto.items);
+    const { lines, items } = await this.checkLines(dto.items);
+    return { wh, lines, items };
+  }
+
+  async create(dto: CreateStockRequestInput, userId: number, ctx?: Ctx) {
+    const { wh, lines } = await this.assertMayCreate(dto, userId, ctx);
 
     return this.prisma.stockRequest.create({
       data: {
@@ -62,7 +70,32 @@ export class StockRequestsService {
     });
   }
 
+  /**
+   * Preflight for create: the same checks, nothing written. Answers the
+   * request as it would be filed — the warehouse and each line with the
+   * catalogue's name and unit — for a confirmation card to show.
+   * See src/common/preflight/preflight.ts: UX validation, never permission.
+   */
+  async previewCreate(dto: CreateStockRequestInput, userId: number, ctx?: Ctx) {
+    const { wh, lines, items } = await this.assertMayCreate(dto, userId, ctx);
+    const itemOf = new Map(items.map((i) => [i.id, i]));
+    return {
+      warehouse: { id: wh.id, name: wh.name, code: wh.code },
+      comment: dto.comment?.trim() || null,
+      items: lines.map((l) => ({
+        itemId: l.itemId,
+        itemName: itemOf.get(l.itemId)?.name ?? null,
+        unit: itemOf.get(l.itemId)?.unit ?? null,
+        quantity: l.quantity,
+      })),
+    };
+  }
+
   private async validateLines(items: { itemId: number; quantity: number }[]) {
+    return (await this.checkLines(items)).lines;
+  }
+
+  private async checkLines(items: { itemId: number; quantity: number }[]) {
     // Fractional since 2026-09-15 (three decimals); assets stay whole units.
     const lines = (items ?? []).map((l) => ({ itemId: Number(l.itemId), quantity: roundQty(Number(l.quantity)) }));
     if (!lines.length) throw new BadRequestException('Ավելացրեք գոնե մեկ ապրանք');
@@ -76,14 +109,14 @@ export class StockRequestsService {
     }
     const found = await this.prisma.item.findMany({
       where: { id: { in: lines.map((l) => l.itemId) } },
-      select: { id: true, type: true },
+      select: { id: true, type: true, name: true, unit: true },
     });
     if (found.length !== lines.length) throw new NotFoundException('Ապրանքը չի գտնվել');
     const assetIds = new Set(found.filter((i) => i.type === 'ASSET').map((i) => i.id));
     if (lines.some((l) => assetIds.has(l.itemId) && !Number.isInteger(l.quantity))) {
       throw new BadRequestException('Ակտիվների քանակը պետք է լինի ամբողջ թիվ');
     }
-    return lines;
+    return { lines, items: found };
   }
 
   /**
