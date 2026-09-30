@@ -10,6 +10,7 @@ import { PrismaService } from 'prisma/prisma.service';
 
 import { UsersPrismaService } from '../common/users-prisma.service';
 import { FileService } from '../common/file.service';
+import { TxClient } from '../common/operations/operations.service';
 
 type Ctx = { isSuperAdmin?: boolean; permissionNames?: string[] };
 
@@ -198,9 +199,20 @@ export class PurchaseRequisitionsService {
     return lines;
   }
 
-  async create(dto: CreateRequisitionInput, userId: number, entityId: number | null) {
+  /**
+   * `tx` lets a caller run the write inside a transaction it also records its
+   * own bookkeeping in — see OperationsService, which commits "this was filed"
+   * together with the requisition itself. Absent, it is an ordinary call.
+   *
+   * The row is read back through the same client that wrote it: inside a
+   * transaction nothing else can see it yet, so findOne() — which reads through
+   * the service — would answer "not found" for a requisition that exists. The
+   * visibility check findOne() would make is moot here: the filer is the
+   * creator, and a creator always sees their own.
+   */
+  async create(dto: CreateRequisitionInput, userId: number, entityId: number | null, tx?: TxClient) {
     const lines = await this.assertMayCreate(dto, userId, entityId);
-    const created = await this.prisma.purchaseRequisition.create({
+    const created = await (tx ?? this.prisma).purchaseRequisition.create({
       data: {
         status: dto.draft ? 'DRAFT' : 'PENDING_APPROVAL',
         title: dto.title?.trim() || null,
@@ -212,8 +224,9 @@ export class PurchaseRequisitionsService {
         ...(dto.taskId ? { taskId: Number(dto.taskId), taskOrigin: 'ATTACHED' } : {}),
         lines: { create: lines },
       },
+      include: this.include,
     });
-    return this.findOne(created.id, userId);
+    return (await this.decorate([created]))[0];
   }
 
   /**

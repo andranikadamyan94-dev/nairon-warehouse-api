@@ -21,6 +21,15 @@ import { StockRequestsService } from './stock-requests.service';
 const MEMBER = 39;
 const OUTSIDER = 40;
 
+/**
+ * No key is sent here, so OperationsService would only open a transaction
+ * around the call — and this stand-in database refuses transactions. Run the
+ * work directly; what keys do is pinned in idempotency.spec.ts.
+ */
+const direct = (prisma: any): any => ({
+  runOnce: async (_input: unknown, work: (tx: any) => Promise<unknown>) => ({ result: await work(prisma), replayed: false }),
+});
+
 function world(opts: { permissionNames?: string[] } = {}) {
   const writes: string[] = [];
   const refuse = (what: string) =>
@@ -63,7 +72,7 @@ function world(opts: { permissionNames?: string[] } = {}) {
   };
   const warehousesService = new WarehousesService(prisma, usersPrisma);
   const svc = new StockRequestsService(prisma, warehousesService, {} as any, usersPrisma);
-  const controller = new StockRequestsController(svc);
+  const controller = new StockRequestsController(svc, direct(prisma));
   return { svc, controller, writes };
 }
 

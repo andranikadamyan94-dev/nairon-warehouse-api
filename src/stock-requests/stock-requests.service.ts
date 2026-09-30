@@ -11,6 +11,7 @@ import { PrismaService } from 'prisma/prisma.service';
 import { WarehousesService } from '../warehouses/warehouses.service';
 import { StockTransfersService } from '../stock-transfers/stock-transfers.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
+import { TxClient } from '../common/operations/operations.service';
 
 type Ctx = { isSuperAdmin?: boolean; permissionNames?: string[] };
 
@@ -56,10 +57,15 @@ export class StockRequestsService {
     return { wh, lines, items };
   }
 
-  async create(dto: CreateStockRequestInput, userId: number, ctx?: Ctx) {
+  /**
+   * `tx` lets a caller run the write inside a transaction it also records its
+   * own bookkeeping in — see OperationsService, which commits "this was filed"
+   * together with the request itself. Absent, it is an ordinary call.
+   */
+  async create(dto: CreateStockRequestInput, userId: number, ctx?: Ctx, tx?: TxClient) {
     const { wh, lines } = await this.assertMayCreate(dto, userId, ctx);
 
-    return this.prisma.stockRequest.create({
+    return (tx ?? this.prisma).stockRequest.create({
       data: {
         warehouseId: wh.id,
         comment: dto.comment?.trim() || null,

@@ -20,6 +20,15 @@ import { CREATE_PERMISSION, PurchaseRequisitionsService } from './purchase-requi
 const REQUESTER = 39;
 const ENTITY = 3;
 
+/**
+ * No key is sent here, so OperationsService would only open a transaction
+ * around the call — and this stand-in database refuses transactions. Run the
+ * work directly; what keys do is pinned in idempotency.spec.ts.
+ */
+const direct = (prisma: any): any => ({
+  runOnce: async (_input: unknown, work: (tx: any) => Promise<unknown>) => ({ result: await work(prisma), replayed: false }),
+});
+
 function world(opts: { grants?: Record<number, string[]>; superAdmin?: boolean } = {}) {
   const grants = opts.grants ?? { [ENTITY]: [CREATE_PERMISSION] };
   const writes: string[] = [];
@@ -48,7 +57,7 @@ function world(opts: { grants?: Record<number, string[]>; superAdmin?: boolean }
     })),
   };
   const svc = new PurchaseRequisitionsService(prisma, usersPrisma, {} as any);
-  const controller = new PurchaseRequisitionsController(svc);
+  const controller = new PurchaseRequisitionsController(svc, direct(prisma));
   return { svc, controller, prisma, usersPrisma, writes };
 }
 

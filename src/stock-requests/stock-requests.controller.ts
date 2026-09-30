@@ -16,6 +16,8 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { StockRequestsService } from './stock-requests.service';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { PREFLIGHT_OK } from '../common/preflight/preflight';
+import { OperationsService } from '../common/operations/operations.service';
+import { OperationKey } from '../common/operations/operation-key.decorator';
 
 // When PermissionGuard didn't run, pass undefined so the service resolves
 // access info itself instead of trusting an empty permission list.
@@ -27,7 +29,10 @@ const ctxOf = (req: any) =>
 @ApiTags('Stock requests')
 @Controller('stock-requests')
 export class StockRequestsController {
-  constructor(private readonly stockRequestsService: StockRequestsService) {}
+  constructor(
+    private readonly stockRequestsService: StockRequestsService,
+    private readonly operations: OperationsService,
+  ) {}
 
   // Membership is the gate here, enforced in the service — a sub's staff may
   // file/see THEIR warehouse's requests regardless of stock permissions.
@@ -37,10 +42,19 @@ export class StockRequestsController {
     return this.stockRequestsService.findAll(query, req.user?.id, ctxOf(req));
   }
 
+  /**
+   * Asking twice asks main for twice the stock. With an `Idempotency-Key` a
+   * repeated attempt replays the first instead of filing again — see
+   * OperationsService. `req.actor` is the one AuthGuard resolved.
+   */
   @Post()
   @ApiOperation({ summary: 'File a resource request to main' })
-  create(@Body() dto: any, @Req() req: any) {
-    return this.stockRequestsService.create(dto, req.user?.id, ctxOf(req));
+  async create(@Body() dto: any, @Req() req: any, @OperationKey() operationKey?: string) {
+    const { result } = await this.operations.runOnce(
+      { key: operationKey, actor: req.actor, route: 'POST /stock-requests', body: dto },
+      (tx) => this.stockRequestsService.create(dto, req.user?.id, ctxOf(req), tx),
+    );
+    return result;
   }
 
   /**

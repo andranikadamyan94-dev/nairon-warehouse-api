@@ -19,6 +19,8 @@ import { ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { PurchaseRequisitionsService } from './purchase-requisitions.service';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { PREFLIGHT_OK } from '../common/preflight/preflight';
+import { OperationsService } from '../common/operations/operations.service';
+import { OperationKey } from '../common/operations/operation-key.decorator';
 
 // Routes without PermissionGuard don't carry req.permissionNames — the
 // service resolves access itself for those (same pattern as stock requests).
@@ -34,13 +36,32 @@ const entityOf = (req: any): number | null => {
 @ApiTags('Purchase requisitions')
 @Controller('purchase-requisitions')
 export class PurchaseRequisitionsController {
-  constructor(private readonly service: PurchaseRequisitionsService) {}
+  constructor(
+    private readonly service: PurchaseRequisitionsService,
+    private readonly operations: OperationsService,
+  ) {}
 
-  /** Filing needs create_purchase_requisition in the active organization (the service checks). */
+  /**
+   * Filing needs create_purchase_requisition in the active organization (the
+   * service checks).
+   *
+   * Filing twice files two requisitions, and a caller whose answer went missing
+   * cannot tell which happened. With an `Idempotency-Key` the second attempt
+   * replays the first instead — see OperationsService. The organization is
+   * part of the intent even though it arrives as a header rather than in the
+   * body, so it is fingerprinted with the body: the same key sent for another
+   * organization is a conflict, never a replay of a requisition filed
+   * somewhere else. `req.actor` is the one AuthGuard resolved.
+   */
   @Post()
   @ApiOperation({ summary: 'File a purchase requisition (draft or submitted)' })
-  create(@Body() dto: any, @Req() req: any) {
-    return this.service.create(dto, req.user?.id, entityOf(req));
+  async create(@Body() dto: any, @Req() req: any, @OperationKey() operationKey?: string) {
+    const entityId = entityOf(req);
+    const { result } = await this.operations.runOnce(
+      { key: operationKey, actor: req.actor, route: 'POST /purchase-requisitions', body: { entityId, dto } },
+      (tx) => this.service.create(dto, req.user?.id, entityId, tx),
+    );
+    return result;
   }
 
   /**
