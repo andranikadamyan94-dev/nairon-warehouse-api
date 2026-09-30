@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Headers, Body, UseGuards } from '@nestjs/common';
+import { Controller, Get, Patch, Headers, Body, UseGuards, Logger } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
@@ -7,6 +7,7 @@ import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 @ApiBearerAuth()
 @Controller('entities')
 export class EntitiesController {
+  private readonly logger = new Logger(EntitiesController.name);
   private readonly hrUrl: string;
 
   constructor(config: ConfigService) {
@@ -41,9 +42,17 @@ export class EntitiesController {
   @Permissions('view_procurement', 'manage_procurement')
   @ApiOperation({ summary: 'All organizations (id + name) for the procurement form' })
   async findAllUnscoped(): Promise<{ id: number; name: string }[]> {
+    // Was a fallback to the literal 'nairon-internal' — a string from this
+    // repository, sent as a credential whenever the variable was unset. Unset
+    // now means HR is not asked and the list is empty, as when HR is down.
+    const secret = process.env.INTERNAL_SECRET;
+    if (typeof secret !== 'string' || secret.trim() === '') {
+      this.logger.warn('INTERNAL_SECRET is not set; HR organization directory not requested');
+      return [];
+    }
     try {
       const res = await fetch(`${this.hrUrl}/api/entities/internal/all`, {
-        headers: { 'x-internal-secret': process.env.INTERNAL_SECRET || 'nairon-internal' },
+        headers: { 'x-internal-secret': secret },
       });
       if (!res.ok) return [];
       const rows = (await res.json()) as { id: number; name: string }[];

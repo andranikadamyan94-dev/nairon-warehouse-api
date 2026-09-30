@@ -29,7 +29,13 @@ import { execFileSync } from 'node:child_process';
 
 const APPLY = process.argv.includes('--apply');
 const CRM = process.env.CRM_API_URL ?? 'http://127.0.0.1:3003';
-const SECRET = process.env.INTERNAL_SECRET ?? 'nairon-internal';
+// No literal fallback: without the secret CRM cannot be asked, and every row
+// would be reported as "no project" — so refuse to run instead.
+const SECRET = process.env.INTERNAL_SECRET;
+if (typeof SECRET !== 'string' || SECRET.trim() === '') {
+  console.error('INTERNAL_SECRET is not set; set it to the local crm-api value and run again.');
+  process.exit(1);
+}
 
 const SEP = String.fromCharCode(31);
 const psql = (db, sql) =>

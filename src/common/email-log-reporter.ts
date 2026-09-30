@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+
 /**
  * Email audit reporter (2026-09-15): every send attempt, and the startup
  * transport status, goes to HR's EmailLog through the internal route — the
@@ -14,9 +16,19 @@ export interface EmailLogReport {
   messageId?: string | null;
 }
 
+const logger = new Logger('EmailLogReporter');
+
 export async function reportEmail(entry: EmailLogReport): Promise<void> {
   const hrUrl = process.env.HR_SERVICE_URL || 'http://localhost:3001';
-  const secret = process.env.INTERNAL_SECRET || 'nairon-internal';
+  // Was a fallback to the literal 'nairon-internal' — a string from this
+  // repository, sent as a credential whenever the variable was unset. An
+  // unconfigured service now sends nothing: the report is lost exactly as it
+  // would be if HR were unreachable.
+  const secret = process.env.INTERNAL_SECRET;
+  if (typeof secret !== 'string' || secret.trim() === '') {
+    logger.warn('INTERNAL_SECRET is not set; email audit entry not sent');
+    return;
+  }
   try {
     await fetch(`${hrUrl}/api/email-log/internal`, {
       method: 'POST',
