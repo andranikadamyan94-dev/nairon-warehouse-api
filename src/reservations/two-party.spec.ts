@@ -124,8 +124,29 @@ describe('the warehouse permission each warehouse act needs is the one its route
     ['return.cancel', ResourceReturnsController.prototype, 'cancel'],
   ];
 
+  /*
+   * view_warehouse on a route is the REQUESTER's pass, not warehouse authority
+   * (owner's decision 2026-09-20: it asks for goods and files and calls off its
+   * own returns). The service decides the requester side by standing, so the
+   * warehouse side of an operation is its route's permissions without it.
+   */
+  const REQUESTER_PASS = 'view_warehouse';
+  const warehouseSideOf = (required: string[]) => required.filter((p) => p !== REQUESTER_PASS);
+
   it.each(routes)('%s', (operation, controller, method) => {
-    expect(WAREHOUSE_OPERATION_PERMISSIONS[operation]).toEqual(permissionsOf(controller, method));
+    const required = permissionsOf(controller, method);
+    expect(warehouseSideOf(required).length).toBeGreaterThan(0);
+    expect(WAREHOUSE_OPERATION_PERMISSIONS[operation]).toEqual(warehouseSideOf(required));
+  });
+
+  it('the requester pass appears only on an operation the requester side may also do', () => {
+    for (const [operation, controller, method] of routes) {
+      if (permissionsOf(controller, method).includes(REQUESTER_PASS)) expect(OPERATION_SIDE[operation]).toBe('both');
+    }
+  });
+
+  it('never counts view_warehouse as warehouse authority', () => {
+    for (const needed of Object.values(WAREHOUSE_OPERATION_PERMISSIONS)) expect(needed).not.toContain(REQUESTER_PASS);
   });
 
   it('names a permission for every warehouse and either-side operation, and for nothing else', () => {

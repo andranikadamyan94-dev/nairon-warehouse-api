@@ -11,6 +11,14 @@ import { AssetsController } from '../assets/assets.controller';
 /**
  * A viewing permission must not open a route that changes anything.
  *
+ * With one deliberate exception (owner's decision, 2026-09-20): asking for
+ * goods and filing or calling off one's own return are the requester's acts,
+ * and `view_warehouse` — which opens no warehouse page; it is the CRM task
+ * panel's right — is the requester's pass on exactly those routes. The
+ * requester rule in the services binds who may ask for whose work;
+ * approving, allocating, rejecting, receiving and cancelling reservations
+ * stay behind manage rights. See the requester-route block below.
+ *
  * `@Permissions` is ANY-OF. That is right for a read — `view_assets` OR
  * `manage_assets` both mean "may look at assets", and a manager who was never
  * given a separate view grant should not be locked out of the screen they
@@ -49,11 +57,7 @@ function guardWith(permissionNames: string[], isSuperAdmin = false) {
 
 describe('warehouse write routes · no mutation behind a viewing permission', () => {
   const mutations: [string, object, string][] = [
-    ['POST /reservations', ReservationsController.prototype, 'create'],
-    ['PATCH /reservations/task/:taskId', ReservationsController.prototype, 'updateTaskReservations'],
-    ['POST /resource-returns', ResourceReturnsController.prototype, 'create'],
     ['PATCH /resource-returns/:id/receive', ResourceReturnsController.prototype, 'receive'],
-    ['PATCH /resource-returns/:id/cancel', ResourceReturnsController.prototype, 'cancel'],
     ['POST /reservations/allocate', ReservationsController.prototype, 'allocate'],
     ['POST /reservations/reallocate', ReservationsController.prototype, 'reallocate'],
     ['PATCH /reservations/:id/approve', ReservationsController.prototype, 'approveConsumable'],
@@ -70,18 +74,32 @@ describe('warehouse write routes · no mutation behind a viewing permission', ()
     expect(required.filter((p) => VIEWING.test(p))).toEqual([]);
   });
 
+  /*
+   * The requester's routes (owner's decision, 2026-09-20): view_warehouse asks
+   * and files, the manage right keeps them for warehouse staff — and nothing
+   * else opens them.
+   */
   it.each([
     ['POST /reservations', ReservationsController.prototype, 'create'],
     ['PATCH /reservations/task/:taskId', ReservationsController.prototype, 'updateTaskReservations'],
-  ])('%s requires manage_reservations exactly', (_route, controller, method) => {
-    expect(permissionsOf(controller, method)).toEqual(['manage_reservations']);
+  ])('%s requires view_warehouse or manage_reservations exactly', (_route, controller, method) => {
+    expect(permissionsOf(controller, method)).toEqual(['view_warehouse', 'manage_reservations']);
   });
 
   it.each([
     ['POST /resource-returns', ResourceReturnsController.prototype, 'create'],
     ['PATCH /resource-returns/:id/cancel', ResourceReturnsController.prototype, 'cancel'],
-  ])('%s requires manage_resource_returns exactly', (_route, controller, method) => {
-    expect(permissionsOf(controller, method)).toEqual(['manage_resource_returns']);
+  ])('%s requires view_warehouse or manage_resource_returns exactly', (_route, controller, method) => {
+    expect(permissionsOf(controller, method)).toEqual(['view_warehouse', 'manage_resource_returns']);
+  });
+
+  it.each([
+    ['POST /reservations', ReservationsController.prototype, 'create'],
+    ['PATCH /reservations/task/:taskId', ReservationsController.prototype, 'updateTaskReservations'],
+    ['POST /resource-returns', ResourceReturnsController.prototype, 'create'],
+    ['PATCH /resource-returns/:id/cancel', ResourceReturnsController.prototype, 'cancel'],
+  ])('%s admits no viewing permission but view_warehouse', (_route, controller, method) => {
+    expect(permissionsOf(controller, method).filter((p) => VIEWING.test(p))).toEqual(['view_warehouse']);
   });
 
   /**

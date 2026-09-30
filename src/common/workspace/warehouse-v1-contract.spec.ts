@@ -533,18 +533,23 @@ describe('H · the super admin continues to work', () => {
 
 describe('service-level standing does not open an HTTP route the guard still closes', () => {
   // E and F above are decided in the SERVICES. Over HTTP every reservation and
-  // return mutation also passes PermissionGuard first, unchanged by this
-  // release: company 3's person with no warehouse permission holds requester
-  // standing in the service and is still refused at the route.
+  // return mutation also passes PermissionGuard first: company 3's person with
+  // no warehouse permission holds requester standing in the service and is
+  // still refused at the route. (Since the owner's decision of 2026-09-20 the
+  // asking routes also admit view_warehouse — the CRM task panel's right — so
+  // the route needs a warehouse permission, not necessarily the manage one;
+  // the exact lists are pinned in auth/write-route-permissions.spec.ts.)
   it.each([
     ['POST /reservations', ReservationsController.prototype, 'create', 'manage_reservations'],
     ['POST /reservations/preflight/create', ReservationsController.prototype, 'preflightCreate', 'manage_reservations'],
     ['PATCH /reservations/task/:taskId', ReservationsController.prototype, 'updateTaskReservations', 'manage_reservations'],
     ['POST /resource-returns', ResourceReturnsController.prototype, 'create', 'manage_resource_returns'],
     ['POST /resource-returns/preflight/create', ResourceReturnsController.prototype, 'preflightCreate', 'manage_resource_returns'],
-  ])('%s still requires its manage permission at the route', async (_route, controller, method, permission) => {
-    const required = metadata(PERMISSIONS_KEY, controller, method);
-    expect(required).toEqual([permission]);
+  ])('%s still requires a warehouse permission at the route', async (_route, controller, method, permission) => {
+    const required: string[] = metadata(PERMISSIONS_KEY, controller, method);
+    expect(required).toContain(permission);
+    expect(required.every((p) => ['view_warehouse', permission].includes(p))).toBe(true);
+    expect(required.some((p) => ordinary3.permissionNames.includes(p))).toBe(false);
     await expect(guardFor(ordinary3)(required)).rejects.toBeInstanceOf(ForbiddenException);
     // …while the same person passes the service's requester check for company 3.
     await passed(reservations({ parties: { requester: 3, stockOwner: 1 } }).svc.previewCreate(emptyRequest(), ordinary3));

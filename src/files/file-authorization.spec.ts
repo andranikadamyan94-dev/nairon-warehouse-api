@@ -25,6 +25,7 @@ const NAME = 'nairon-test-receipt.png';
 function service(options: {
   orders?: { receiptUrl: string | null }[];
   deliveries?: { receiptUrl: string | null }[];
+  attachments?: { url: string | null }[];
   access?: { isSuperAdmin: boolean; permissionNames: string[] };
 }) {
   const prisma = {
@@ -35,6 +36,11 @@ function service(options: {
     procurementDelivery: {
       findMany: async ({ where }: any) =>
         (options.deliveries ?? []).filter((r) => r.receiptUrl?.endsWith(where.receiptUrl.endsWith)),
+    },
+    // A purchase requisition's attachment is a stored file of its own (2026-09-20).
+    purchaseRequisitionAttachment: {
+      findMany: async ({ where }: any) =>
+        (options.attachments ?? []).filter((r) => r.url?.endsWith(where.url.endsWith)),
     },
   };
   const usersPrisma = {
@@ -99,15 +105,23 @@ describe('who may read a warehouse receipt', () => {
     await expect(files.upload(NAME, REQUESTER)).resolves.toBe(fs.realpathSync(file));
   });
 
-  it('refuses a signed-in person with no procurement rights', async () => {
-    // manage_warehouse is the warehouse super-permission for routes, but
-    // procurement is deliberately its own domain since the 2026-09-01 split.
+  it('refuses a signed-in person with no procurement or receiving rights', async () => {
+    // view_warehouse is the CRM task panel's right; it receives nothing.
     const files = service({
       orders,
-      access: { isSuperAdmin: false, permissionNames: ['view_warehouse', 'manage_warehouse'] },
+      access: { isSuperAdmin: false, permissionNames: ['view_warehouse', 'view_reservations', 'create_purchase_requisition'] },
     });
     await expect(files.upload(NAME, REQUESTER)).resolves.toBeNull();
   });
+
+  it.each([['manage_inventory'], ['manage_warehouse']])(
+    'serves it to the people who receive the goods against it (%s, since 2026-09-20)',
+    async (permission) => {
+      // The Receiving page shows the receipt link to these holders; the receipt is what they check the delivery against.
+      const files = service({ orders, access: { isSuperAdmin: false, permissionNames: [permission] } });
+      await expect(files.upload(NAME, REQUESTER)).resolves.toBe(fs.realpathSync(file));
+    },
+  );
 
   it('serves it to a super admin', async () => {
     const files = service({ orders, access: { isSuperAdmin: true, permissionNames: [] } });
@@ -128,6 +142,17 @@ describe('who may read a warehouse receipt', () => {
     await expect(files.upload(NAME, REQUESTER)).resolves.toBeNull();
   });
 
+  it('serves a requisition attachment to whoever may see requisitions, and to nobody else', async () => {
+    const attachments = [{ url: `/uploads/${NAME}` }];
+    for (const permission of ['create_purchase_requisition', 'approve_purchase_requisition', 'view_procurement']) {
+      const files = service({ attachments, access: { isSuperAdmin: false, permissionNames: [permission] } });
+      await expect(files.upload(NAME, REQUESTER)).resolves.toBe(fs.realpathSync(file));
+    }
+    // Receiving rights open receipts, not requisitions.
+    const receiver = service({ attachments, access: { isSuperAdmin: false, permissionNames: ['manage_inventory', 'manage_warehouse'] } });
+    await expect(receiver.upload(NAME, REQUESTER)).resolves.toBeNull();
+  });
+
   it('refuses a malformed name without reading anything', async () => {
     let read = false;
     const prisma = {
@@ -138,6 +163,12 @@ describe('who may read a warehouse receipt', () => {
         },
       },
       procurementDelivery: { findMany: async () => [] },
+      purchaseRequisitionAttachment: {
+        findMany: async () => {
+          read = true;
+          return [];
+        },
+      },
     };
     const files = new FilesService(prisma as never, { getUserAccessInfo: async () => ({}) } as never);
     await expect(files.upload('../../etc/passwd', REQUESTER)).resolves.toBeNull();

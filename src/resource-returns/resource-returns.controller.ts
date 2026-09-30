@@ -52,7 +52,7 @@ export class ResourceReturnsController {
    */
   @Post('preflight/create')
   @UseGuards(PermissionGuard)
-  @Permissions('manage_resource_returns')
+  @Permissions('view_warehouse', 'manage_resource_returns')
   async preflightCreate(@Body() dto: CreateReturnDto, @Actor() actor: WarehouseActor) {
     return { ...PREFLIGHT_OK, request: await this.service.previewCreate(dto, actor) };
   }
