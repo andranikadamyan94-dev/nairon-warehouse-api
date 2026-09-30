@@ -72,6 +72,12 @@ export type ReservationRequestPreview = {
   requesterWorkspaceId: number;
   startDate: string;
   endDate: string | null;
+  /**
+   * The warehouse the request would draw on — the one create() resolves for
+   * the task (a frozen binding, else the project's link). `id: null` is the
+   * main warehouse, as everywhere in this service.
+   */
+  warehouse: { id: number | null; name: string; type: 'MAIN' | 'PROJECT' };
   lines: {
     itemId: number;
     itemName: string;
@@ -546,6 +552,22 @@ export class ReservationsService {
     return null;
   }
 
+  /** A resolved warehouse id as a person reads it; null is the main warehouse. */
+  private async describeWarehouse(
+    warehouseId: number | null,
+  ): Promise<ReservationRequestPreview['warehouse']> {
+    if (warehouseId === null) return { id: null, name: 'Հիմնական պահեստ', type: 'MAIN' };
+    const row = await this.prisma.warehouse.findUnique({
+      where: { id: warehouseId },
+      select: { id: true, name: true, type: true },
+    });
+    return {
+      id: warehouseId,
+      name: row?.name ?? `Պահեստ #${warehouseId}`,
+      type: row?.type === 'MAIN' ? 'MAIN' : 'PROJECT',
+    };
+  }
+
   private async currentTaskObjectId(taskId?: number | null): Promise<number | null | undefined> {
     if (!taskId) return null;
     const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
@@ -1004,7 +1026,16 @@ export class ReservationsService {
       throw new BadRequestException('Ամրագրման հայտը պետք է պարունակի գոնե մեկ ռեսուրս');
     }
 
-    const availability = await this.availabilityService.checkAvailability(dto);
+    /*
+     * The same resolver create() calls, so the preflight names the warehouse
+     * the rows will be stamped with — and refuses whatever create would refuse
+     * here (an unlinked project, an inactive project warehouse, CRM down)
+     * instead of passing a request the confirmation is bound to fail.
+     */
+    const { warehouseId } = await this.resolveTaskWarehouse(dto.taskId);
+    const warehouse = await this.describeWarehouse(warehouseId);
+
+    const availability = await this.availabilityService.checkAvailability({ ...dto, warehouseId });
     const unavailableItemIds = new Set(availability.unavailableResources.map((r: any) => r.itemId));
 
     const lines: ReservationRequestPreview['lines'] = [];
@@ -1054,6 +1085,7 @@ export class ReservationsService {
       requesterWorkspaceId,
       startDate: new Date(dto.startDate).toISOString(),
       endDate: dto.endDate ? new Date(dto.endDate).toISOString() : null,
+      warehouse,
       lines,
       rowsToCreate: lines.reduce((n, l) => n + l.rows, 0),
       /* Some of it may need a person on the other side to hand it over. */
