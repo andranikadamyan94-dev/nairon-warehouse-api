@@ -6,7 +6,7 @@ export class InternalGuard implements CanActivate {
     const request = context.switchToHttp().getRequest();
     const key = request.headers['x-internal-secret'];
     if (!key || key !== process.env.INTERNAL_SECRET) {
-      throw new ForbiddenException('Invalid internal service key');
+      throw new ForbiddenException('Ներքին ծառայության բանալին անվավեր է');
     }
     return true;
   }

@@ -15,7 +15,7 @@ export class ResponsibilitiesService {
     });
 
     if (!asset) {
-      throw new NotFoundException('Asset not found');
+      throw new NotFoundException('Ակտիվը չի գտնվել');
     }
 
     await this.prisma.assetResponsibility.updateMany({
@@ -51,7 +51,7 @@ export class ResponsibilitiesService {
 
   async release(id: number) {
     const r = await this.prisma.assetResponsibility.findUnique({ where: { id } });
-    if (!r) throw new NotFoundException('Responsibility not found');
+    if (!r) throw new NotFoundException('Պատասխանատվության գրառումը չի գտնվել');
 
     await this.prisma.assetResponsibility.updateMany({
       where: { assetId: r.assetId, releasedAt: null },

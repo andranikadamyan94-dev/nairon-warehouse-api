@@ -35,12 +35,12 @@ export class InventoryService {
     });
 
     if (!item) {
-      throw new NotFoundException('Item not found');
+      throw new NotFoundException('Ռեսուրսը չի գտնվել');
     }
 
     if (item.type !== ItemType.CONSUMABLE) {
       throw new BadRequestException(
-        'Inventory movements only supported for consumables',
+        'Պաշարի շարժումները հնարավոր են միայն ծախսվող ռեսուրսների համար',
       );
     }
 

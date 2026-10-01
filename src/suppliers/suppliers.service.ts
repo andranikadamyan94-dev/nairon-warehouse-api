@@ -62,7 +62,7 @@ export class SuppliersService {
 
   async findOne(id: number) {
     const supplier = await this.prisma.supplier.findUnique({ where: { id }, include });
-    if (!supplier) throw new NotFoundException('Supplier not found');
+    if (!supplier) throw new NotFoundException('Մատակարարը չի գտնվել');
     return supplier;
   }
 

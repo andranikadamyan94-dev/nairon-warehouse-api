@@ -152,7 +152,7 @@ export class ResourceReturnsService {
       where: { id: dto.reservationId },
       include: { item: { include: { category: { select: { entityId: true, name: true } } } } },
     });
-    if (!reservation) throw new NotFoundException('Reservation not found');
+    if (!reservation) throw new NotFoundException('Ամրագրումը չի գտնվել');
 
     const parties = await this.workspaces.partiesOfReservation(dto.reservationId);
     const verdict = decideOperation(actor, parties, 'return.create', {
@@ -205,7 +205,7 @@ export class ResourceReturnsService {
       include: { item: true },
     });
 
-    if (!reservation) throw new NotFoundException('Reservation not found');
+    if (!reservation) throw new NotFoundException('Ամրագրումը չի գտնվել');
 
     // You can only give back what you hold: issued minus what's already on
     // its way back. Applies to assets too — the old code had no asset cap.
@@ -315,7 +315,7 @@ export class ResourceReturnsService {
       ),
     );
     if (!onTheTask && rows.length > 0 && visible.length === 0) {
-      throw new NotFoundException('Task not found');
+      throw new NotFoundException('Առաջադրանքը չի գտնվել');
     }
     return visible;
   }
@@ -326,7 +326,7 @@ export class ResourceReturnsService {
       include: { reservation: { include: { item: true } } },
     });
 
-    if (!ret) throw new NotFoundException('Return not found');
+    if (!ret) throw new NotFoundException('Վերադարձը չի գտնվել');
 
     // Taking goods back onto a shelf is the warehouse's act: its permission,
     // whichever company asked and wherever the item is filed.
@@ -482,7 +482,7 @@ export class ResourceReturnsService {
   /** What cancel() checks before it writes. Shared with the assistant's preflight. */
   private async cancellable(id: number, actor?: WarehouseActor) {
     const ret = await this.prisma.resourceReturn.findUnique({ where: { id } });
-    if (!ret) throw new NotFoundException('Return not found');
+    if (!ret) throw new NotFoundException('Վերադարձը չի գտնվել');
 
     // Either party may call off a return that has not happened yet.
     if (actor) {
@@ -522,9 +522,9 @@ export class ResourceReturnsService {
       where: { id },
       include: { reservation: { include: { item: { select: { id: true, name: true, unit: true } } } } },
     });
-    if (!row) throw new NotFoundException('Return not found');
+    if (!row) throw new NotFoundException('Վերադարձը չի գտնվել');
     const requester = row.reservation.requesterWorkspaceId ?? null;
-    if (actor.declared && requester !== null && requester !== actor.declared) throw new NotFoundException('Return not found');
+    if (actor.declared && requester !== null && requester !== actor.declared) throw new NotFoundException('Վերադարձը չի գտնվել');
     if (row.requestedBy !== actor.userId) {
       throw new ForbiddenException('Օգնականի միջոցով կարելի է չեղարկել միայն Ձեր ներկայացրած վերադարձը');
     }

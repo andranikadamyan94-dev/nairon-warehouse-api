@@ -178,7 +178,7 @@ export class ProcurementController {
       try {
         lines = JSON.parse(body.lines);
       } catch {
-        throw new BadRequestException('`lines` must be valid JSON');
+        throw new BadRequestException('«lines» դաշտը պետք է լինի վավեր JSON');
       }
     } else if (Array.isArray(body?.lines)) {
       lines = body.lines;

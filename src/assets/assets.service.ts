@@ -87,7 +87,7 @@ export class AssetsService {
 
     if (!asset) {
       throw new NotFoundException({
-        message: 'Asset not found',
+        message: 'Ակտիվը չի գտնվել',
         assetId: id,
       });
     }

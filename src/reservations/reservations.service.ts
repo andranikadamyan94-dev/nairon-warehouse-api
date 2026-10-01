@@ -13,6 +13,7 @@ import { AvailabilityService } from '../availability/availability.service';
 
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
+import { RESERVATION_STATUS_LABELS, reservationStatusLabel } from '../common/status-labels';
 import { WarehouseActor } from '../auth/actor';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 import { RequesterWorkspaceService } from '../common/workspace/requester-workspace.service';
@@ -628,7 +629,7 @@ export class ReservationsService {
     if (mayRead(actor, parties, { onTheTask, warehouseViewer: isReservationReader(actor) })) return;
     // Not found rather than forbidden: somebody with no standing learns nothing
     // about which ids are taken.
-    throw new NotFoundException('Reservation not found');
+    throw new NotFoundException('Ամրագրումը չի գտնվել');
   }
 
   /** Whether this person holds one of the task's three role slots, per CRM. */
@@ -760,7 +761,7 @@ export class ReservationsService {
             });
             if (existingOpenEnded > 0) {
               throw new BadRequestException(
-                `Item ${resource.itemId} already has an active open-ended reservation`,
+                `Ռեսուրս #${resource.itemId}-ն արդեն ունի գործող անժամկետ ամրագրում`,
               );
             }
           }
@@ -921,13 +922,13 @@ export class ReservationsService {
      * yes. Locking the item makes the second one wait and then count again with
      * the first one's row in view. See common/operations/row-lock.ts.
      */
-    if (!(await lockItem(tx, itemId))) throw new NotFoundException(`Item ${itemId} not found`);
+    if (!(await lockItem(tx, itemId))) throw new NotFoundException(`Ռեսուրսը չի գտնվել (#${itemId})`);
 
     const item = await tx.item.findUnique({
       where: { id: itemId },
       select: { id: true, name: true, type: true, quantity: true },
     });
-    if (!item) throw new NotFoundException(`Item ${itemId} not found`);
+    if (!item) throw new NotFoundException(`Ռեսուրսը չի գտնվել (#${itemId})`);
 
     const overlapping = endDate
       ? {
@@ -1053,7 +1054,7 @@ export class ReservationsService {
           category: { select: { entityId: true, name: true } },
         },
       });
-      if (!item) throw new NotFoundException(`Item ${resource.itemId} not found`);
+      if (!item) throw new NotFoundException(`Ռեսուրսը չի գտնվել (#${resource.itemId})`);
 
       /*
        * An hourly item becomes one row per working day, and a person agreeing to
@@ -1151,7 +1152,7 @@ export class ReservationsService {
         where: { id: resource.itemId },
         select: { id: true, name: true, unit: true, type: true, category: { select: { entityId: true } } },
       });
-      if (!item) throw new NotFoundException(`Item ${resource.itemId} not found`);
+      if (!item) throw new NotFoundException(`Ռեսուրսը չի գտնվել (#${resource.itemId})`);
       const before = beforeByItem.get(resource.itemId);
 
       /*
@@ -1214,25 +1215,25 @@ export class ReservationsService {
           where: { id: allocation.reservationId },
         });
 
-        if (!reservation) throw new NotFoundException('Reservation not found');
+        if (!reservation) throw new NotFoundException('Ամրագրումը չի գտնվել');
 
         if (!ALLOCATABLE_STATUSES.includes(reservation.status as ResourceReservationStatus)) {
           throw new BadRequestException(
-            `Reservation ${reservation.id} has status ${reservation.status} and cannot be allocated`,
+            `Ամրագրում #${reservation.id}-ը «${reservationStatusLabel(reservation.status)}» կարգավիճակում է և չի կարող հատկացվել`,
           );
         }
 
         const asset = await tx.asset.findUnique({ where: { id: allocation.assetId } });
-        if (!asset) throw new NotFoundException('Asset not found');
+        if (!asset) throw new NotFoundException('Ակտիվը չի գտնվել');
         if (asset.status !== AssetStatus.AVAILABLE)
-          throw new BadRequestException(`Asset ${asset.id} unavailable`);
+          throw new BadRequestException(`Ակտիվ #${asset.id}-ը հասանելի չէ`);
         // Asset custody (2026-09-23): a task only takes an asset that already has
         // a responsible person — the truck comes with its driver. The warehouse
         // assigns that person in the custody register first; the allocation
         // leaves the custody as it is.
         await this.assertHasResponsiblePerson(tx, asset.id);
         if (asset.itemId !== reservation.itemId)
-          throw new BadRequestException(`Asset ${asset.id} does not belong to requested item type`);
+          throw new BadRequestException(`Ակտիվ #${asset.id}-ը ամրագրման ռեսուրսից չէ`);
         // #1989 workspaces: the asset must be homed in the reservation's pool.
         if (((asset as any).warehouseId ?? null) !== ((reservation as any).warehouseId ?? null))
           throw new BadRequestException('Ակտիվը այս ամրագրման պահեստում չէ');
@@ -1241,7 +1242,7 @@ export class ReservationsService {
           where: { reservationId: allocation.reservationId, releasedAt: null },
         });
         if (activeAllocationCount >= reservation.quantity)
-          throw new BadRequestException('Reservation already fully allocated');
+          throw new BadRequestException('Ամրագրումն արդեն ամբողջությամբ հատկացված է');
 
         const allocationOverlapFilter = reservation.endDate
           ? {
@@ -1256,7 +1257,7 @@ export class ReservationsService {
           where: { assetId: allocation.assetId, releasedAt: null, ...allocationOverlapFilter },
         });
         if (overlappingAllocation)
-          throw new BadRequestException(`Asset ${asset.id} already allocated`);
+          throw new BadRequestException(`Ակտիվ #${asset.id}-ն արդեն հատկացված է`);
 
         const maintenanceOverlapFilter = reservation.endDate
           ? { startDate: { lte: reservation.endDate }, endDate: { gte: reservation.startDate } }
@@ -1266,7 +1267,7 @@ export class ReservationsService {
           where: { assetId: allocation.assetId, ...maintenanceOverlapFilter },
         });
         if (overlappingMaintenance)
-          throw new BadRequestException(`Asset ${asset.id} under maintenance`);
+          throw new BadRequestException(`Ակտիվ #${asset.id}-ը սպասարկման մեջ է`);
 
         await tx.reservationAllocation.create({
           data: { reservationId: allocation.reservationId, assetId: allocation.assetId, allocatedBy },
@@ -1346,9 +1347,9 @@ export class ReservationsService {
       include: { item: true },
     });
 
-    if (!reservation) throw new NotFoundException('Reservation not found');
+    if (!reservation) throw new NotFoundException('Ամրագրումը չի գտնվել');
     if (reservation.item.type !== ItemType.CONSUMABLE) {
-      throw new BadRequestException('Only consumable reservations can be approved this way');
+      throw new BadRequestException('Այս եղանակով հաստատվում են միայն ծախսվող ռեսուրսների ամրագրումները');
     }
     const approvableStatuses = [
       ResourceReservationStatus.PENDING,
@@ -1357,7 +1358,7 @@ export class ReservationsService {
     ];
     if (!approvableStatuses.includes(reservation.status as ResourceReservationStatus)) {
       throw new BadRequestException(
-        `Reservation ${reservationId} has status ${reservation.status} and cannot be approved`,
+        `Ամրագրում #${reservationId}-ը «${reservationStatusLabel(reservation.status)}» կարգավիճակում է և չի կարող հաստատվել`,
       );
     }
 
@@ -1369,7 +1370,7 @@ export class ReservationsService {
     // the same units again.
     const { outstandingToIssue: outstanding } = await quantitiesOf(this.prisma, reservationId);    if (outstanding <= 0) {
       throw new BadRequestException(
-        `Reservation ${reservationId} is already fully allocated`,
+        `Ամրագրում #${reservationId}-ն արդեն ամբողջությամբ հատկացված է`,
       );
     }
 
@@ -1593,9 +1594,9 @@ export class ReservationsService {
       where: { id: reservationId },
       include: { item: true },
     });
-    if (!reservation) throw new NotFoundException('Reservation not found');
+    if (!reservation) throw new NotFoundException('Ամրագրումը չի գտնվել');
     if (INACTIVE_STATUSES.includes(reservation.status as ResourceReservationStatus)) {
-      throw new BadRequestException(`Reservation is already ${reservation.status}`);
+      throw new BadRequestException(`Ամրագրումն արդեն «${reservationStatusLabel(reservation.status)}» կարգավիճակում է`);
     }
     const objectOwn = !reservation.taskId && !!(reservation as any).objectId;
     if (!reservation.taskId && !objectOwn) {
@@ -1634,7 +1635,7 @@ export class ReservationsService {
         where: { id: reservationId },
         select: { quantity: true, status: true, acceptedQuantity: true, acceptanceComment: true },
       });
-      if (!current) throw new NotFoundException('Reservation not found');
+      if (!current) throw new NotFoundException('Ամրագրումը չի գտնվել');
 
       const issued = isAsset
         ? await this.prisma.reservationAllocation.count({
@@ -1722,9 +1723,9 @@ export class ReservationsService {
       where: { id: reservationId },
       include: { item: true },
     });
-    if (!reservation) throw new NotFoundException('Reservation not found');
+    if (!reservation) throw new NotFoundException('Ամրագրումը չի գտնվել');
     if (INACTIVE_STATUSES.includes(reservation.status as ResourceReservationStatus)) {
-      throw new BadRequestException(`Reservation is already ${reservation.status}`);
+      throw new BadRequestException(`Ամրագրումն արդեն «${reservationStatusLabel(reservation.status)}» կարգավիճակում է`);
     }
     if (reservation.item.type !== ItemType.CONSUMABLE) {
       throw new BadRequestException('Հետ վերցնելը կիրառելի է միայն ապրանքային ամրագրումների համար');
@@ -1881,9 +1882,9 @@ export class ReservationsService {
       where: { id: reservationId },
     });
 
-    if (!reservation) throw new NotFoundException('Reservation not found');
+    if (!reservation) throw new NotFoundException('Ամրագրումը չի գտնվել');
     if (INACTIVE_STATUSES.includes(reservation.status as ResourceReservationStatus)) {
-      throw new BadRequestException(`Reservation is already ${reservation.status}`);
+      throw new BadRequestException(`Ամրագրումն արդեն «${reservationStatusLabel(reservation.status)}» կարգավիճակում է`);
     }
     return { reservation, parties };
   }
@@ -2021,9 +2022,9 @@ export class ReservationsService {
       where: { id: reservationId },
     });
 
-    if (!reservation) throw new NotFoundException('Reservation not found');
+    if (!reservation) throw new NotFoundException('Ամրագրումը չի գտնվել');
     if (reservation.status !== ResourceReservationStatus.CANCELLED) {
-      throw new BadRequestException('Only CANCELLED reservations can be reactivated');
+      throw new BadRequestException(`Վերաակտիվացնել կարելի է միայն «${RESERVATION_STATUS_LABELS.CANCELLED}» կարգավիճակի ամրագրումները`);
     }
 
     return this.prisma.$transaction(async (tx) => {
@@ -2051,9 +2052,9 @@ export class ReservationsService {
       where: { id: reservationId },
     });
 
-    if (!reservation) throw new NotFoundException('Reservation not found');
+    if (!reservation) throw new NotFoundException('Ամրագրումը չի գտնվել');
     if (INACTIVE_STATUSES.includes(reservation.status as ResourceReservationStatus)) {
-      throw new BadRequestException(`Reservation is already ${reservation.status}`);
+      throw new BadRequestException(`Ամրագրումն արդեն «${reservationStatusLabel(reservation.status)}» կարգավիճակում է`);
     }
 
     const result = await this.prisma.$transaction(async (tx) => {
@@ -2109,7 +2110,7 @@ export class ReservationsService {
       include: { reservation: { include: { item: true } } },
     });
 
-    if (!allocation) throw new NotFoundException('Allocation not found');
+    if (!allocation) throw new NotFoundException('Հատկացումը չի գտնվել');
 
     const isConsumable = allocation.reservation.item.type === ItemType.CONSUMABLE;
 
@@ -2224,14 +2225,14 @@ export class ReservationsService {
       include: { reservation: true },
     });
 
-    if (!allocation) throw new NotFoundException('Allocation not found');
+    if (!allocation) throw new NotFoundException('Հատկացումը չի գտնվել');
 
     const newAsset = await this.prisma.asset.findUnique({ where: { id: dto.newAssetId } });
-    if (!newAsset) throw new NotFoundException('New asset not found');
-    if (newAsset.status !== AssetStatus.AVAILABLE) throw new BadRequestException('Asset unavailable');
+    if (!newAsset) throw new NotFoundException('Նոր ակտիվը չի գտնվել');
+    if (newAsset.status !== AssetStatus.AVAILABLE) throw new BadRequestException('Ակտիվը հասանելի չէ');
     await this.assertHasResponsiblePerson(this.prisma, newAsset.id);
     if (newAsset.itemId !== allocation.reservation.itemId)
-      throw new BadRequestException('Asset item type mismatch');
+      throw new BadRequestException('Ակտիվը ամրագրման ռեսուրսից չէ');
 
     const resEndDate = allocation.reservation.endDate;
     const resStartDate = allocation.reservation.startDate;
@@ -2248,7 +2249,7 @@ export class ReservationsService {
     const overlappingAllocation = await this.prisma.reservationAllocation.findFirst({
       where: { assetId: dto.newAssetId, releasedAt: null, ...reallocOverlapFilter },
     });
-    if (overlappingAllocation) throw new BadRequestException('Asset already allocated');
+    if (overlappingAllocation) throw new BadRequestException('Ակտիվն արդեն հատկացված է');
 
     const reallocMaintenanceFilter = resEndDate
       ? { startDate: { lte: resEndDate }, endDate: { gte: resStartDate } }
@@ -2257,7 +2258,7 @@ export class ReservationsService {
     const overlappingMaintenance = await this.prisma.maintenanceRecord.findFirst({
       where: { assetId: dto.newAssetId, ...reallocMaintenanceFilter },
     });
-    if (overlappingMaintenance) throw new BadRequestException('Asset under maintenance');
+    if (overlappingMaintenance) throw new BadRequestException('Ակտիվը սպասարկման մեջ է');
 
     return this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.update({
@@ -2772,7 +2773,7 @@ export class ReservationsService {
         where: { id },
         select: { taskId: true },
       });
-      if (!row) throw new NotFoundException('Reservation not found');
+      if (!row) throw new NotFoundException('Ամրագրումը չի գտնվել');
       await this.assertMayRead(actor, id, await this.isOnTask(row.taskId, actor.userId));
     }
     const reservation = await this.prisma.resourceReservation.findUnique({
@@ -2886,7 +2887,7 @@ export class ReservationsService {
         )
       : reservations0;
     if (actor && !onTheTask && reservations0.length > 0 && reservations.length === 0) {
-      throw new NotFoundException('Task not found');
+      throw new NotFoundException('Առաջադրանքը չի գտնվել');
     }
 
     // Group by itemId — HOUR items have one DB row per working day. COMPLETED

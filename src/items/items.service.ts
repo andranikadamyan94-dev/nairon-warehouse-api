@@ -188,7 +188,7 @@ export class ItemsService {
 
     if (!item) {
       throw new NotFoundException({
-        message: 'Item not found',
+        message: 'Ռեսուրսը չի գտնվել',
         itemId: id,
       });
     }

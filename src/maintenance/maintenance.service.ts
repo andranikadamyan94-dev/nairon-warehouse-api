@@ -6,6 +6,7 @@ import {
 import { PrismaService } from 'prisma/prisma.service';
 import { AssetStatus } from '../common/enums/asset-status.enum';
 import { MaintenanceStatus } from '../common/enums/maintenance-status.enum';
+import { maintenanceStatusLabel } from '../common/status-labels';
 import { CreateMaintenanceRecordDto } from './dto/create-maintenance-record.dto';
 import { UpdateMaintenanceRecordDto } from './dto/update-maintenance-record.dto';
 import { WarehouseActor } from '../auth/actor';
@@ -72,10 +73,10 @@ export class MaintenanceService {
     const asset = await db.asset.findUnique({
       where: { id: dto.assetId },
     });
-    if (!asset) throw new NotFoundException('Asset not found');
+    if (!asset) throw new NotFoundException('Ակտիվը չի գտնվել');
     await this.assertMayMaintain(actor, dto.assetId);
     if (asset.status === AssetStatus.RETIRED)
-      throw new BadRequestException('Cannot maintain retired asset');
+      throw new BadRequestException('Հանված ակտիվը հնարավոր չէ սպասարկման ուղարկել');
 
     return db.maintenanceRecord.create({
       data: {
@@ -196,7 +197,7 @@ export class MaintenanceService {
       const detail = e?.message?.startsWith('finance-api')
         ? e.message
         : `network error reaching ${financeUrl}: ${e?.message ?? e}`;
-      throw new BadRequestException(`Finance notification failed — ${detail}`);
+      throw new BadRequestException(`Ֆինանսական ծանուցումը չհաջողվեց — ${detail}`);
     }
 
     return this.prisma.maintenanceRecord.update({
@@ -221,14 +222,14 @@ export class MaintenanceService {
     const record = await this.prisma.maintenanceRecord.findUnique({
       where: { id },
     });
-    if (!record) throw new NotFoundException('Maintenance record not found');
+    if (!record) throw new NotFoundException('Սպասարկման գրառումը չի գտնվել');
 
     const target = status === 'APPROVED' ? 'FINANCE_APPROVED' : 'FINANCE_REJECTED';
     if (record.status === target) return record;
 
     if (record.status !== 'PENDING_FINANCE')
       throw new BadRequestException(
-        `Maintenance record #${id} is ${record.status}, not awaiting finance approval`,
+        `Սպասարկման գրառում #${id}-ը «${maintenanceStatusLabel(record.status)}» կարգավիճակում է, ոչ թե ֆինանսական հաստատման սպասման`,
       );
 
     return this.prisma.maintenanceRecord.update({
@@ -249,11 +250,11 @@ export class MaintenanceService {
     const record = await this.prisma.maintenanceRecord.findUnique({
       where: { id },
     });
-    if (!record) throw new NotFoundException('Maintenance record not found');
+    if (!record) throw new NotFoundException('Սպասարկման գրառումը չի գտնվել');
     if (record.status === 'COMPLETED')
-      throw new BadRequestException('Maintenance is already completed');
+      throw new BadRequestException('Սպասարկումն արդեն ավարտված է');
     if (record.status === 'DRAFT')
-      throw new BadRequestException('Cannot complete a draft record');
+      throw new BadRequestException('Չներկայացված (սևագիր) գրառումը հնարավոր չէ ավարտել');
 
     return this.prisma.maintenanceRecord.update({
       where: { id },
@@ -341,7 +342,7 @@ export class MaintenanceService {
       where: { id },
       include,
     });
-    if (!record) throw new NotFoundException('Maintenance record not found');
+    if (!record) throw new NotFoundException('Սպասարկման գրառումը չի գտնվել');
     return record;
   }
 
@@ -349,7 +350,7 @@ export class MaintenanceService {
     const record = await this.prisma.maintenanceRecord.findUnique({
       where: { id },
     });
-    if (!record) throw new NotFoundException('Maintenance record not found');
+    if (!record) throw new NotFoundException('Սպասարկման գրառումը չի գտնվել');
     await this.assertMayEdit(actor, id);
     this.assertEditableState(record.status);
     if (dto.assetId !== undefined && Number(dto.assetId) !== record.assetId) {
@@ -389,7 +390,7 @@ export class MaintenanceService {
     const record = await this.prisma.maintenanceRecord.findUnique({
       where: { id },
     });
-    if (!record) throw new NotFoundException('Maintenance record not found');
+    if (!record) throw new NotFoundException('Սպասարկման գրառումը չի գտնվել');
     await this.assertMayEdit(actor, id);
     return this.prisma.maintenanceRecord.delete({ where: { id } });
   }

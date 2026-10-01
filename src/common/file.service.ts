@@ -32,14 +32,14 @@ const UPLOADS_PATH = '/uploads';
 export class FileService {
   upload(file: Express.Multer.File): string {
     if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
-      throw new BadRequestException(`File type not allowed: ${file.mimetype}`);
+      throw new BadRequestException(`Ֆայլի տեսակը թույլատրված չէ՝ ${file.mimetype}`);
     }
     if (file.size > MAX_FILE_SIZE) {
-      throw new BadRequestException(`File too large (max ${MAX_FILE_SIZE / 1024 / 1024} MB)`);
+      throw new BadRequestException(`Ֆայլը չափազանց մեծ է (առավելագույնը ${MAX_FILE_SIZE / 1024 / 1024} ՄԲ)`);
     }
     const ext = path.extname(file.originalname).toLowerCase();
     if (ext && !SAFE_EXT_RE.test(ext)) {
-      throw new BadRequestException('Invalid file extension');
+      throw new BadRequestException('Ֆայլի ընդլայնումն անթույլատրելի է');
     }
     if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
     const filename = `${crypto.randomUUID()}${ext}`;

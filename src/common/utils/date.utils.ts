@@ -67,14 +67,14 @@ export function splitIntoWorkingDaySlots(
     if (start.hasTime) {
       if (start.hour < WORKING_HOUR_START || start.hour >= WORKING_HOUR_END) {
         throw new BadRequestException(
-          `Start time must be between ${WORKING_HOUR_START}:00 and ${WORKING_HOUR_END}:00 Yerevan time`,
+          `Սկզբի ժամը պետք է լինի ${WORKING_HOUR_START}:00–${WORKING_HOUR_END}:00 միջակայքում (Երևանի ժամանակով)`,
         );
       }
     }
     if (end.hasTime) {
       if (end.hour > WORKING_HOUR_END || (end.hour === WORKING_HOUR_END && end.minute > 0)) {
         throw new BadRequestException(
-          `End time cannot exceed ${WORKING_HOUR_END}:00 Yerevan time`,
+          `Ավարտի ժամը չի կարող գերազանցել ${WORKING_HOUR_END}:00-ն (Երևանի ժամանակով)`,
         );
       }
     }
@@ -82,7 +82,7 @@ export function splitIntoWorkingDaySlots(
       const startMin = start.hour * 60 + start.minute;
       const endMin = end.hour * 60 + end.minute;
       if (startMin >= endMin) {
-        throw new BadRequestException('Start time must be before end time');
+        throw new BadRequestException('Սկզբի ժամը պետք է լինի ավարտի ժամից առաջ');
       }
     }
   }

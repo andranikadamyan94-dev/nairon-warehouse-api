@@ -64,7 +64,7 @@ export class ResourceWorkspaceService {
       where: { id: categoryId },
       select: { entityId: true },
     });
-    if (!row) throw new NotFoundException('Category not found');
+    if (!row) throw new NotFoundException('Կատեգորիան չի գտնվել');
     return { workspace: row.entityId, origin: 'own' };
   }
 
@@ -78,7 +78,7 @@ export class ResourceWorkspaceService {
       where: { id: itemId },
       select: { category: { select: { entityId: true } } },
     });
-    if (!row) throw new NotFoundException('Item not found');
+    if (!row) throw new NotFoundException('Ռեսուրսը չի գտնվել');
     return row.category
       ? { workspace: row.category.entityId, origin: 'category' }
       : UNKNOWN('none');
@@ -90,7 +90,7 @@ export class ResourceWorkspaceService {
       where: { id: assetId },
       select: { item: { select: { category: { select: { entityId: true } } } } },
     });
-    if (!row) throw new NotFoundException('Asset not found');
+    if (!row) throw new NotFoundException('Ակտիվը չի գտնվել');
     return row.item.category
       ? { workspace: row.item.category.entityId, origin: 'item.category' }
       : UNKNOWN('none');
@@ -102,7 +102,7 @@ export class ResourceWorkspaceService {
       where: { id: recordId },
       select: { asset: { select: { item: { select: { category: { select: { entityId: true } } } } } } },
     });
-    if (!row) throw new NotFoundException('Maintenance record not found');
+    if (!row) throw new NotFoundException('Սպասարկման գրառումը չի գտնվել');
     return row.asset.item.category
       ? { workspace: row.asset.item.category.entityId, origin: 'asset.item.category' }
       : UNKNOWN('none');
@@ -117,7 +117,7 @@ export class ResourceWorkspaceService {
       where: { id: reservationId },
       select: { item: { select: { category: { select: { entityId: true } } } } },
     });
-    if (!row) throw new NotFoundException('Reservation not found');
+    if (!row) throw new NotFoundException('Ամրագրումը չի գտնվել');
     return row.item.category
       ? { workspace: row.item.category.entityId, origin: 'item.category' }
       : UNKNOWN('none');
@@ -143,7 +143,7 @@ export class ResourceWorkspaceService {
         item: { select: { category: { select: { entityId: true } } } },
       },
     });
-    if (!row) throw new NotFoundException('Reservation not found');
+    if (!row) throw new NotFoundException('Ամրագրումը չի գտնվել');
     return {
       requester: row.requesterWorkspaceId ?? null,
       stockOwner: row.item.category ? row.item.category.entityId : null,
@@ -163,7 +163,7 @@ export class ResourceWorkspaceService {
         },
       },
     });
-    if (!row) throw new NotFoundException('Return not found');
+    if (!row) throw new NotFoundException('Վերադարձը չի գտնվել');
     return {
       requester: row.reservation.requesterWorkspaceId ?? null,
       stockOwner: row.reservation.item.category ? row.reservation.item.category.entityId : null,

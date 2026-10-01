@@ -13,7 +13,7 @@ export class MaintainersService {
 
   async findOne(id: number) {
     const m = await this.prisma.maintainer.findUnique({ where: { id } });
-    if (!m) throw new NotFoundException('Maintainer not found');
+    if (!m) throw new NotFoundException('Սպասարկողը չի գտնվել');
     return m;
   }
 

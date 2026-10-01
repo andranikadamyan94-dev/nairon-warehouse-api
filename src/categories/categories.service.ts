@@ -62,7 +62,7 @@ export class CategoriesService {
       });
 
       if (!parent) {
-        throw new NotFoundException('Parent category not found');
+        throw new NotFoundException('Ծնող կատեգորիան չի գտնվել');
       }
       // The parent has to exist; which company it is filed under is bookkeeping.
       await this.assertMayEdit(actor, dto.parentId);
@@ -77,17 +77,17 @@ export class CategoriesService {
         select: { id: true },
       });
       if (children.length !== childIds.length) {
-        throw new NotFoundException('Child category not found');
+        throw new NotFoundException('Ենթակատեգորիան չի գտնվել');
       }
       if (dto.parentId) {
         if (childIds.includes(dto.parentId)) {
-          throw new BadRequestException('Circular hierarchy detected');
+          throw new BadRequestException('Կատեգորիաների շրջանաձև հիերարխիա');
         }
         // a chosen child must not be an ancestor of the chosen parent
         let cur: number | null | undefined = dto.parentId;
         while (cur) {
           if (childIds.includes(cur)) {
-            throw new BadRequestException('Circular hierarchy detected');
+            throw new BadRequestException('Կատեգորիաների շրջանաձև հիերարխիա');
           }
           const node = await this.prisma.itemCategory.findUnique({
             where: { id: cur },
@@ -172,7 +172,7 @@ export class CategoriesService {
     });
 
     if (!existing) {
-      throw new NotFoundException('Category not found');
+      throw new NotFoundException('Կատեգորիան չի գտնվել');
     }
 
     await this.assertMayEdit(actor, id);
@@ -183,7 +183,7 @@ export class CategoriesService {
     if (dto.parentId) await this.assertMayEdit(actor, dto.parentId);
 
     if (dto.parentId === id) {
-      throw new BadRequestException('Category cannot be its own parent');
+      throw new BadRequestException('Կատեգորիան չի կարող լինել ինքն իր ծնողը');
     }
 
     if (dto.parentId) {
@@ -191,7 +191,7 @@ export class CategoriesService {
 
       while (currentParentId) {
         if (currentParentId === id) {
-          throw new BadRequestException('Circular hierarchy detected');
+          throw new BadRequestException('Կատեգորիաների շրջանաձև հիերարխիա');
         }
 
         const parent = await this.prisma.itemCategory.findUnique({
@@ -221,7 +221,7 @@ export class CategoriesService {
     });
 
     if (children > 0) {
-      throw new BadRequestException('Cannot delete category with children');
+      throw new BadRequestException('Ենթակատեգորիաներ ունեցող կատեգորիան հնարավոր չէ ջնջել');
     }
 
     const items = await this.prisma.item.count({
@@ -231,7 +231,7 @@ export class CategoriesService {
     });
 
     if (items > 0) {
-      throw new BadRequestException('Cannot delete category with items');
+      throw new BadRequestException('Ռեսուրսներ ունեցող կատեգորիան հնարավոր չէ ջնջել');
     }
 
     return this.prisma.itemCategory.delete({

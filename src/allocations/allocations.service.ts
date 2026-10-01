@@ -92,7 +92,7 @@ export class AllocationsService {
 
         if (entry.quantity !== undefined && entry.quantity > allocation.quantity) {
           throw new BadRequestException(
-            `Cannot return ${entry.quantity} units — allocation only contains ${allocation.quantity}`,
+            `Հնարավոր չէ վերադարձնել ${entry.quantity} միավոր․ հատկացումը պարունակում է միայն ${allocation.quantity}`,
           );
         }
 
@@ -188,7 +188,7 @@ export class AllocationsService {
       include: { reservation: { include: { item: true } } },
     });
 
-    if (!allocation) throw new NotFoundException('Allocation not found');
+    if (!allocation) throw new NotFoundException('Հատկացումը չի գտնվել');
 
     const isConsumable = allocation.reservation.item.type === ItemType.CONSUMABLE;
 

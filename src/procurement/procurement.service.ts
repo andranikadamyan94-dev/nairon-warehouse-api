@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from 'prisma/prisma.service';
 import { ProcurementOrderStatus } from '../common/enums/procurement-order-status.enum';
+import { PROCUREMENT_STATUS_LABELS, procurementStatusLabel } from '../common/status-labels';
 import { CreateProcurementDto } from './dto/create-procurement.dto';
 import { UpdateProcurementDto } from './dto/update-procurement.dto';
 import { FileService } from '../common/file.service';
@@ -33,6 +34,16 @@ const include = {
   },
   // Money raised for the order, corrections included (2026-09-22).
   payments: { orderBy: { createdAt: 'asc' as const } },
+};
+
+/** The human-readable message out of a finance-api error body, if it has one. */
+const financeMessageOf = (body: string): string | null => {
+  try {
+    const m = JSON.parse(body)?.message;
+    return Array.isArray(m) ? m.join(', ') : typeof m === 'string' && m ? m : null;
+  } catch {
+    return null;
+  }
 };
 
 @Injectable()
@@ -410,19 +421,19 @@ export class ProcurementService {
       const line = byId.get(entry.orderItemId);
       if (!line) {
         throw new BadRequestException(
-          `Line ${entry.orderItemId} is not on order #${id}`,
+          `Տող #${entry.orderItemId}-ը #${id} պատվերի մաս չէ`,
         );
       }
       if (entry.quantity <= 0) {
         throw new BadRequestException(
-          `Delivered quantity must be greater than 0`,
+          'Ստացված քանակը պետք է լինի 0-ից մեծ',
         );
       }
       // Over-delivery is rejected: silently absorbing extra stock would break
       // reconciliation against what finance was billed.
       if (entry.quantity > remaining(line) + 1e-9) {
         throw new BadRequestException(
-          `Cannot receive ${entry.quantity} of "${line.item.name}" — only ${remaining(line)} outstanding`,
+          `«${line.item.name}»՝ հնարավոր չէ ստանալ ${entry.quantity}, չստացված մնացորդը ${remaining(line)} է`,
         );
       }
       if (entry.unitPrice != null && !(entry.unitPrice >= 0)) {
@@ -672,7 +683,7 @@ export class ProcurementService {
       financeUrl = requireFinanceUrl();
       internalKey = requireInternalSecret();
     } catch (e: any) {
-      return fail(e?.message ?? 'finance is not configured');
+      return fail(`ֆինանսական ծառայությունը կարգավորված չէ (${e?.message ?? e})`);
     }
     const headers = {
       'Content-Type': 'application/json',
@@ -694,7 +705,7 @@ export class ProcurementService {
           },
         );
       } catch (e: any) {
-        return fail(`network error reaching finance: ${e?.message ?? e}`);
+        return fail(`ֆինանսական ծառայությունն անհասանելի է (${e?.message ?? e})`);
       }
       if (res.ok) {
         await this.prisma.procurementPayment.update({
@@ -762,11 +773,12 @@ export class ProcurementService {
         }),
       });
       const body = await res.text();
-      if (!res.ok) return fail(`finance-api ${res.status}: ${body}`);
+      // Finance answers in Armenian: show its message, not the raw JSON body.
+      if (!res.ok) return fail(financeMessageOf(body) ?? `finance-api ${res.status}: ${body}`);
       transferId = JSON.parse(body).id;
     } catch (e: any) {
       if (e instanceof BadRequestException) throw e;
-      return fail(`network error reaching finance: ${e?.message ?? e}`);
+      return fail(`ֆինանսական ծառայությունն անհասանելի է (${e?.message ?? e})`);
     }
     await this.prisma.procurementPayment.create({
       data: {
@@ -903,7 +915,7 @@ export class ProcurementService {
       const item = byId.get(line.orderItemId);
       if (!item)
         throw new BadRequestException(
-          `Line ${line.orderItemId} is not on order #${id}`,
+          `Տող #${line.orderItemId}-ը #${id} պատվերի մաս չէ`,
         );
       if (!(line.unitPrice >= 0))
         throw new BadRequestException('Գինը պետք է լինի զրո կամ ավելի');
@@ -1060,7 +1072,7 @@ export class ProcurementService {
       ].includes(order.status as ProcurementOrderStatus)
     ) {
       throw new BadRequestException(
-        `An order with status ${order.status} cannot be closed short`,
+        `«${procurementStatusLabel(order.status)}» կարգավիճակով պատվերը հնարավոր չէ փակել թերի`,
       );
     }
 
@@ -1135,7 +1147,7 @@ export class ProcurementService {
     const order = await this.findOne(id);
     if (order.status !== ProcurementOrderStatus.FINANCE_REJECTED) {
       throw new BadRequestException(
-        'Only FINANCE_REJECTED orders can be resubmitted',
+        `Կրկին ներկայացնել կարելի է միայն «${PROCUREMENT_STATUS_LABELS.FINANCE_REJECTED}» կարգավիճակով պատվերները`,
       );
     }
     return this.prisma.procurementOrder.update({
@@ -1348,7 +1360,7 @@ export class ProcurementService {
         : `network error reaching ${financeUrl}: ${e?.message ?? e}`;
       console.error(`[procurement:finalize] ${financeError}`);
       throw new BadRequestException(
-        `Finance notification failed — ${financeError}`,
+        `Ֆինանսական ծանուցումը չհաջողվեց — ${financeError}`,
       );
     }
 
@@ -1438,7 +1450,7 @@ export class ProcurementService {
     }
     if (order.status !== ProcurementOrderStatus.PENDING_FINANCE_APPROVAL) {
       throw new BadRequestException(
-        `Order #${id} is ${order.status}, not awaiting finance approval`,
+        `Պատվեր #${id}-ը «${procurementStatusLabel(order.status)}» կարգավիճակում է, ոչ թե ֆինանսական հաստատման սպասման`,
       );
     }
     return this.prisma.procurementOrder.update({
