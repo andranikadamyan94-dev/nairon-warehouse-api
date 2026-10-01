@@ -27,6 +27,24 @@ export type LineInput = {
   reservationId?: number | null;
 };
 
+export type UpdateRequisitionInput = {
+  title?: string;
+  comment?: string;
+  periodStart?: string | null;
+  periodEnd?: string | null;
+  lines?: LineInput[];
+};
+
+/** One line as a confirmation card names it — the catalogue's name and unit, the quantity, the note. */
+const lineView = (l: { itemId?: number | null; itemName: string; code?: string | null; unit?: string | null; quantity: number; note?: string | null }) => ({
+  itemId: l.itemId ?? null,
+  itemName: l.itemName,
+  code: l.code ?? null,
+  unit: l.unit ?? null,
+  quantity: l.quantity,
+  note: l.note ?? null,
+});
+
 export type CreateRequisitionInput = {
   title?: string;
   comment?: string;
@@ -259,11 +277,12 @@ export class PurchaseRequisitionsService {
     };
   }
 
-  async update(
-    id: number,
-    dto: { title?: string; comment?: string; periodStart?: string | null; periodEnd?: string | null; lines?: LineInput[] },
-    userId: number,
-  ) {
+  /**
+   * Everything update() checks before it writes, in its order: the requester,
+   * a state that may still change, the lines as the catalogue resolves them,
+   * the period. Shared with previewUpdate() so the preflight cannot drift.
+   */
+  private async updatable(id: number, dto: UpdateRequisitionInput, userId: number) {
     const req = await this.getOrThrow(id);
     if (req.createdBy !== userId) throw new ForbiddenException('Հայտը կարող է խմբագրել միայն ներկայացնողը');
     if (!EDITABLE.includes(req.status)) throw new BadRequestException('Հայտն այլևս խմբագրելի չէ');
@@ -274,6 +293,11 @@ export class PurchaseRequisitionsService {
       periodStart === undefined ? (req.periodStart?.toISOString() ?? undefined) : periodStart ?? undefined,
       periodEnd === undefined ? (req.periodEnd?.toISOString() ?? undefined) : periodEnd ?? undefined,
     );
+    return { req, lines, periodStart, periodEnd };
+  }
+
+  async update(id: number, dto: UpdateRequisitionInput, userId: number) {
+    const { lines, periodStart, periodEnd } = await this.updatable(id, dto, userId);
     await this.prisma.purchaseRequisition.update({
       where: { id },
       data: {
@@ -420,21 +444,124 @@ export class PurchaseRequisitionsService {
 
   // ── Requester actions ─────────────────────────────────────────────────────
 
-  async submit(id: number, userId: number) {
+  /** The requester's own draft, and the right to file it in its organization. Shared by submit and its preflight. */
+  private async submittable(id: number, userId: number) {
     const req = await this.getOrThrow(id);
     if (req.createdBy !== userId) throw new ForbiddenException('Հայտը կարող է ուղարկել միայն ներկայացնողը');
     if (req.status !== 'DRAFT') throw new BadRequestException('Հայտն արդեն ուղարկված է');
     await this.assertMayFile(userId, req.entityId);
+    return req;
+  }
+
+  async submit(id: number, userId: number) {
+    await this.submittable(id, userId);
     await this.prisma.purchaseRequisition.update({ where: { id }, data: { status: 'PENDING_APPROVAL' } });
     return this.findOne(id, userId);
   }
 
-  async cancel(id: number, userId: number, isSuperAdmin: boolean) {
+  /** Whose, and whether it may still be withdrawn. Shared by cancel and its preflight. */
+  private async cancellable(id: number, userId: number, isSuperAdmin: boolean) {
     const req = await this.getOrThrow(id);
     if (!isSuperAdmin && req.createdBy !== userId) throw new ForbiddenException('Հայտը կարող է չեղարկել միայն ներկայացնողը');
     if (!CANCELLABLE.includes(req.status)) throw new BadRequestException('Հայտն այլևս հնարավոր չէ չեղարկել');
+    return req;
+  }
+
+  async cancel(id: number, userId: number, isSuperAdmin: boolean) {
+    await this.cancellable(id, userId, isSuperAdmin);
     await this.prisma.purchaseRequisition.update({ where: { id }, data: { status: 'CANCELLED' } });
     return this.findOne(id, userId, { isSuperAdmin });
+  }
+
+  // ── The assistant's preflights (2026-10-01) ───────────────────────────────
+  //
+  // The requester's own acts on their own requisition, as the screen offers
+  // them («Ուղարկել», «Խմբագրել», «Չեղարկել», a comment) — each the mutation's
+  // own check function, nothing written. Two rules more than the mutations,
+  // both the owner's for AI writes: the requisition must be the caller's own
+  // (a super-admin cancelling somebody else's stays on the screen), and the
+  // right to file is read literally — a super-admin flag does not stand in
+  // for create_purchase_requisition. And one workspace: a requisition filed
+  // for another organization than the one being worked in reads as not found.
+  //
+  // Each answers what a confirmation card needs, with `material` — the state
+  // an agreement is pinned to: any edit, status change or decision moves
+  // `updatedAt`, so a card drawn before it goes stale instead of acting on a
+  // requisition the person has not seen.
+
+  /** Own, in this organization — or not found / refused, before any other rule. */
+  private async ownInEntity(id: number, userId: number, entityId: number | null, refusal: string) {
+    const req = await this.getOrThrow(id);
+    if (entityId && req.entityId && req.entityId !== entityId) throw new NotFoundException('Հայտը չի գտնվել');
+    if (req.createdBy !== userId) throw new ForbiddenException(refusal);
+    return req;
+  }
+
+  async previewSubmit(id: number, userId: number, entityId: number | null) {
+    await this.ownInEntity(id, userId, entityId, 'Հայտը կարող է ուղարկել միայն ներկայացնողը');
+    const req = await this.submittable(id, userId);
+    const literal = await this.usersPrisma.getUserAccessInfo(userId, req.entityId!);
+    if (!literal.permissionNames.includes(CREATE_PERMISSION)) {
+      throw new ForbiddenException('Դուք այս կազմակերպությունում գնման հայտ ներկայացնելու թույլտվություն չունեք');
+    }
+    return { from: req.status, to: 'PENDING_APPROVAL', requisition: await this.snapshotOf(id) };
+  }
+
+  async previewUpdate(id: number, dto: UpdateRequisitionInput, userId: number, entityId: number | null) {
+    await this.ownInEntity(id, userId, entityId, 'Հայտը կարող է խմբագրել միայն ներկայացնողը');
+    const { lines, periodStart, periodEnd } = await this.updatable(id, dto ?? {}, userId);
+    const before = await this.snapshotOf(id);
+    const text = (v: string | undefined | null) => v?.trim() || null;
+    const day = (v: string | null | undefined) => (v ? new Date(v).toISOString().slice(0, 10) : null);
+    return {
+      requisition: before,
+      after: {
+        title: dto.title !== undefined ? text(dto.title) : before.title,
+        comment: dto.comment !== undefined ? text(dto.comment) : before.comment,
+        periodStart: periodStart !== undefined ? day(periodStart) : before.periodStart,
+        periodEnd: periodEnd !== undefined ? day(periodEnd) : before.periodEnd,
+        lines: lines ? lines.map(lineView) : before.lines,
+        linesReplaced: !!lines,
+      },
+    };
+  }
+
+  async previewCancel(id: number, userId: number, entityId: number | null) {
+    await this.ownInEntity(id, userId, entityId, 'Հայտը կարող է չեղարկել միայն ներկայացնողը');
+    const req = await this.cancellable(id, userId, false);
+    return { from: req.status, to: 'CANCELLED', requisition: await this.snapshotOf(id) };
+  }
+
+  async previewComment(id: number, userId: number, text: string, entityId: number | null) {
+    if (!text?.trim()) throw new BadRequestException('Մեկնաբանությունը դատարկ է');
+    await this.ownInEntity(id, userId, entityId, 'Այս կերպ կարելի է մեկնաբանել միայն Ձեր սեփական գնման հայտը');
+    const req = await this.commentable(id, userId, text);
+    return { text: text.trim(), requisition: await this.snapshotOf(req.id) };
+  }
+
+  /** The requisition as a card shows it, and the state an agreement is pinned to. */
+  private async snapshotOf(id: number) {
+    const req = await this.prisma.purchaseRequisition.findUnique({ where: { id }, include: this.include });
+    if (!req) throw new NotFoundException('Հայտը չի գտնվել');
+    const day = (d: Date | null | undefined) => (d ? d.toISOString().slice(0, 10) : null);
+    return {
+      id: req.id,
+      title: req.title,
+      comment: req.comment,
+      status: req.status,
+      entityId: req.entityId,
+      periodStart: day(req.periodStart),
+      periodEnd: day(req.periodEnd),
+      createdAt: req.createdAt.toISOString(),
+      lines: (req.lines ?? []).map(lineView),
+      material: {
+        requisitionId: req.id,
+        status: req.status,
+        createdBy: req.createdBy,
+        entityId: req.entityId ?? null,
+        updatedAt: req.updatedAt.toISOString(),
+      },
+    };
   }
 
   /** #1893/#1894: bind the requisition to a task (created from it, or attached). */
@@ -641,10 +768,16 @@ export class PurchaseRequisitionsService {
 
   // ── Comments + attachments ────────────────────────────────────────────────
 
-  async addComment(id: number, userId: number, text: string, ctx?: Ctx) {
+  /** Something to say, and somebody who may see the requisition. Shared by addComment and its preflight. */
+  private async commentable(id: number, userId: number, text: string, ctx?: Ctx) {
     if (!text?.trim()) throw new BadRequestException('Մեկնաբանությունը դատարկ է');
     const req = await this.getOrThrow(id);
     await this.assertCanSee(req, userId, ctx);
+    return req;
+  }
+
+  async addComment(id: number, userId: number, text: string, ctx?: Ctx) {
+    await this.commentable(id, userId, text, ctx);
     await this.prisma.purchaseRequisitionComment.create({ data: { requisitionId: id, userId, text: text.trim() } });
     return this.findOne(id, userId, ctx);
   }

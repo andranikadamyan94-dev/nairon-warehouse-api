@@ -118,6 +118,38 @@ export class PurchaseRequisitionsController {
     return this.service.findAll(req.user?.id, query ?? {}, ctxOf(req));
   }
 
+  /*
+   * The assistant's preflights for the requester's own acts (2026-10-01) — see
+   * src/common/preflight/preflight.ts and the service's previewSubmit /
+   * previewUpdate / previewCancel / previewComment. Each sits beside its
+   * mutation on the same unguarded route shape (the service is the gate for
+   * both), takes the mutation's own body, writes nothing, and answers what a
+   * confirmation card needs. Declared before ':id' so no GET shadows them.
+   */
+  @Post(':id/preflight/submit')
+  @ApiOperation({ summary: 'Preflight: may this person send their draft for approval?' })
+  async preflightSubmit(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return { ...PREFLIGHT_OK, ...(await this.service.previewSubmit(id, req.user?.id, entityOf(req))) };
+  }
+
+  @Post(':id/preflight/update')
+  @ApiOperation({ summary: 'Preflight: may this person change their requisition, and to what?' })
+  async preflightUpdate(@Param('id', ParseIntPipe) id: number, @Body() dto: any, @Req() req: any) {
+    return { ...PREFLIGHT_OK, ...(await this.service.previewUpdate(id, dto ?? {}, req.user?.id, entityOf(req))) };
+  }
+
+  @Post(':id/preflight/cancel')
+  @ApiOperation({ summary: 'Preflight: may this person withdraw their requisition?' })
+  async preflightCancel(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return { ...PREFLIGHT_OK, ...(await this.service.previewCancel(id, req.user?.id, entityOf(req))) };
+  }
+
+  @Post(':id/preflight/comment')
+  @ApiOperation({ summary: 'Preflight: may this person comment on their requisition?' })
+  async preflightComment(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any) {
+    return { ...PREFLIGHT_OK, ...(await this.service.previewComment(id, req.user?.id, body?.text ?? '', entityOf(req))) };
+  }
+
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.service.findOne(id, req.user?.id, ctxOf(req));
