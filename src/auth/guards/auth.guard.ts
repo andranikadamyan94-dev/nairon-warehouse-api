@@ -115,6 +115,8 @@ export class AuthGuard implements CanActivate {
       method: request.method,
       entityHeader: request.headers?.['x-entity-id'],
       route,
+      params: request.params,
+      body: request.body,
     });
     if (typeof grant === 'string') throw delegatedWriteForbidden(grant);
 

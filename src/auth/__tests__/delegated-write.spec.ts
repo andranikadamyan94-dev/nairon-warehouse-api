@@ -96,6 +96,9 @@ const guards = () => {
 const RESERVE = 'warehouse.reservations.create';
 const CHAT = 'chat.messages.send';
 
+const TARGETS: Record<string, Record<string, number>> = { [CHAT]: { chatId: 31 }, [RESERVE]: { taskId: 2462, itemId: 31, quantity: 2 } };
+const BODY = { taskId: 2462, startDate: '2026-10-02', resources: [{ itemId: 31, quantity: 2 }] };
+
 let n = 0;
 const writeToken = (tool = RESERVE, approvalId = 'appr-9c1e', overrides: Record<string, unknown> = {}, expiresIn = 120) =>
   jwt.sign(
@@ -106,6 +109,7 @@ const writeToken = (tool = RESERVE, approvalId = 'appr-9c1e', overrides: Record<
       entityId: 4,
       scope: `goal:write:${tool}:${approvalId}`,
       act: { sub: 'ai-goal', goalId: 'goal-3f2a', runId: 'run-1', approvalId },
+      target: TARGETS[tool] ?? { taskId: 2462, itemId: 31, quantity: 2 },
       src: 'ai-delegated',
       ...overrides,
     },
@@ -121,9 +125,11 @@ const normalToken = () => jwt.sign({ id: 18, email: 'owner@example.test' }, { ex
 const CREATE = ReservationsController.prototype.create;
 const PREFLIGHT = ReservationsController.prototype.preflightCreate;
 
-async function outcome(opts: { method?: string; token?: string; entity?: string | null; handler?: Function }) {
+async function outcome(opts: { method?: string; token?: string; entity?: string | null; handler?: Function; body?: unknown }) {
   const request: any = {
     method: opts.method ?? 'POST',
+    params: {},
+    body: opts.body === undefined ? BODY : opts.body,
     headers: {
       ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}),
       ...(opts.entity === null ? {} : { 'x-entity-id': opts.entity ?? '4' }),
@@ -294,6 +300,38 @@ describe('DELEGATED_TOKENS_WRITE=true', () => {
   it('an act for another approval, or an unknown tool → 403', async () => {
     expect((await outcome({ token: writeToken(RESERVE, 'appr-9c1e', { act: { sub: 'ai-goal', goalId: 'g', approvalId: 'x' } }) })).body.reason).toBe('act_mismatch');
     expect((await outcome({ token: writeToken('warehouse.reservations.cancel', 'appr-9c1e') })).body.reason).toBe('unknown_write_tool');
+  });
+
+  it('target: a reservation token reserves only its own task, item and quantity', async () => {
+    const wrong: [string, unknown][] = [
+      ['another task', { ...BODY, taskId: 2463 }],
+      ['another item', { ...BODY, resources: [{ itemId: 32, quantity: 2 }] }],
+      ['another quantity', { ...BODY, resources: [{ itemId: 31, quantity: 3 }] }],
+      ['a second resource', { ...BODY, resources: [{ itemId: 31, quantity: 2 }, { itemId: 32, quantity: 1 }] }],
+      ['a project the approval did not freeze', { ...BODY, projectId: 9 }],
+      ['another requesting organisation', { ...BODY, entityId: 7 }],
+      ['an end date nobody froze', { ...BODY, endDate: '2027-01-01' }],
+      ['an hourly window nobody froze', { ...BODY, resources: [{ itemId: 31, quantity: 2, startTime: '08:00' }] }],
+      ['ids as strings', { ...BODY, taskId: '2462' }],
+      ['no body', null],
+      ['an array', [BODY]],
+    ];
+    for (const [label, body] of wrong) {
+      expect([label, (await outcome({ token: writeToken(), body })).body?.reason]).toEqual([label, 'target_mismatch']);
+      expect([label, (await outcome({ token: writeToken(), body, handler: PREFLIGHT })).body?.reason]).toEqual([label, 'target_mismatch']);
+    }
+    expect(state.calls.internal).toHaveLength(0);
+    // A frozen project must be sent, and be that one.
+    const withProject = writeToken(RESERVE, 'appr-9c1e', { target: { taskId: 2462, itemId: 31, quantity: 2, projectId: 9 } });
+    expect((await outcome({ token: withProject, body: { ...BODY, projectId: 9 } })).ok).toBe(true);
+    expect((await outcome({ token: writeToken(RESERVE, 'appr-9c1e', { target: { taskId: 2462, itemId: 31, quantity: 2, projectId: 9 } }), body: { ...BODY, projectId: 8 } })).body.reason).toBe('target_mismatch');
+    expect((await outcome({ token: writeToken(RESERVE, 'appr-9c1e', { target: { taskId: 2462, itemId: 31, quantity: 2, projectId: 9 } }) })).body.reason).toBe('target_mismatch');
+  });
+
+  it('a token without a well-formed target is refused', async () => {
+    for (const target of [undefined, {}, { chatId: 31 }, { taskId: 2462, itemId: 31 }, { taskId: 2462, itemId: 31, quantity: 0 }, { taskId: 2462, itemId: 31, quantity: 2, warehouseId: 1 }]) {
+      expect([target, (await outcome({ token: writeToken(RESERVE, 'appr-9c1e', { target }) })).body?.reason]).toEqual([target, 'malformed_write_target']);
+    }
   });
 
   it('normal tokens are untouched', async () => {

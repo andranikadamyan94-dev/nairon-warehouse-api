@@ -9,6 +9,8 @@ import { ForbiddenException, SetMetadata } from '@nestjs/common';
  *     act:      { sub: 'ai-goal', goalId, runId, approvalId }
  *     scope:    'goal:write:<tool>:<approvalId>'
  *     entityId: the one organisation the goal acts in
+ *     target:   the one record the approval froze — { chatId } for a message,
+ *               { taskId, itemId, quantity[, projectId] } for a reservation
  *     exp:      two minutes;  jti: unique
  *
  * ai-api calls this service directly, not through the gateway, so the rule
@@ -18,6 +20,10 @@ import { ForbiddenException, SetMetadata } from '@nestjs/common';
  *
  *   - the scope parses, names a tool in WRITE_TOOL_RIGHTS, and act names the
  *     same approval (act.sub 'ai-goal');
+ *   - the request is on the token's signed target and nothing else: the
+ *     chat's :id in the path; the reservation body's task, project (exactly
+ *     when frozen) and its one item and quantity, with only a start date
+ *     besides (targetMatches);
  *   - X-Entity-ID is present and equals the token's entityId;
  *   - HR says, now, over the internal channel (not the token), that the
  *     person belongs to that organisation;
@@ -76,10 +82,61 @@ export const WRITE_TOOL_RIGHTS: Readonly<Record<string, readonly string[]>> = Ob
   'chat.messages.send': Object.freeze([] as string[]),
 });
 
+/** Each tool's target fields: required, then optional. The same rule auth-api signs by. */
+export const WRITE_TARGETS: Readonly<Record<string, { required: readonly string[]; optional: readonly string[] }>> = Object.freeze({
+  'warehouse.reservations.create': Object.freeze({ required: ['taskId', 'itemId', 'quantity'], optional: ['projectId'] }),
+  'chat.messages.send': Object.freeze({ required: ['chatId'], optional: [] }),
+});
+
+export type WriteTarget = Readonly<Record<string, number>>;
+
+const positive = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
+
+/** The token's `target` claim, if it has exactly the tool's shape. */
+export function targetOf(tool: string, raw: unknown): WriteTarget | null {
+  const rule = Object.prototype.hasOwnProperty.call(WRITE_TARGETS, tool) ? WRITE_TARGETS[tool] : null;
+  if (!rule || !raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const t = raw as Record<string, unknown>;
+  const known = [...rule.required, ...rule.optional];
+  if (Object.keys(t).some((k) => !known.includes(k))) return null;
+  if (!rule.required.every((k) => positive(t[k]))) return null;
+  if (!rule.optional.every((k) => t[k] === undefined || positive(t[k]))) return null;
+  return t as WriteTarget;
+}
+
+/**
+ * Is this request on the token's target, and on nothing else?
+ *   chat.messages.send             the route's :id is target.chatId
+ *   warehouse.reservations.create  the body is the frozen taskId, projectId
+ *                                  (iff frozen), exactly one resource of the
+ *                                  frozen itemId and quantity, and a startDate
+ */
+export function targetMatches(tool: string, target: WriteTarget, request: { params?: unknown; body?: unknown }): boolean {
+  if (tool === 'chat.messages.send') {
+    const id = (request.params as Record<string, unknown> | undefined)?.id;
+    return typeof id === 'string' && /^[1-9][0-9]{0,9}$/.test(id) && Number(id) === target.chatId;
+  }
+  if (tool === 'warehouse.reservations.create') {
+    const b = request.body as Record<string, unknown> | null;
+    if (!b || typeof b !== 'object' || Array.isArray(b)) return false;
+    if (Object.keys(b).some((k) => !['taskId', 'projectId', 'startDate', 'resources'].includes(k))) return false;
+    if (b.taskId !== target.taskId) return false;
+    if (target.projectId === undefined ? b.projectId !== undefined : b.projectId !== target.projectId) return false;
+    if (typeof b.startDate !== 'string' || b.startDate.length > 40) return false;
+    if (!Array.isArray(b.resources) || b.resources.length !== 1) return false;
+    const r = b.resources[0] as Record<string, unknown> | null;
+    if (!r || typeof r !== 'object' || Object.keys(r).some((k) => k !== 'itemId' && k !== 'quantity')) return false;
+    return r.itemId === target.itemId && r.quantity === target.quantity;
+  }
+  return false;
+}
+
 export type DelegatedWriteRefusal =
   | 'malformed_write_scope'
   | 'unknown_write_tool'
   | 'act_mismatch'
+  | 'malformed_write_target'
+  | 'target_mismatch'
   | 'route_not_allowed'
   | 'entity_mismatch'
   | 'not_a_member'
@@ -114,6 +171,9 @@ export interface DelegatedWriteFacts {
   entityHeader: unknown;
   /** The handler's @DelegatedWriteRoute marker, if any. */
   route: DelegatedWriteRouteMeta | undefined;
+  /** Express route params and the parsed JSON body, as the handler will see them. */
+  params?: unknown;
+  body?: unknown;
 }
 
 export interface DelegatedWriteGrant {
@@ -122,6 +182,7 @@ export interface DelegatedWriteGrant {
   entityId: number;
   userId: number;
   kind: DelegatedWriteRouteKind;
+  target: WriteTarget;
 }
 
 /**
@@ -138,13 +199,16 @@ export function delegatedWriteCheck(payload: unknown, facts: DelegatedWriteFacts
   if (!act || typeof act !== 'object' || act.sub !== 'ai-goal' || act.approvalId !== scope.approvalId || typeof act.goalId !== 'string') {
     return 'act_mismatch';
   }
+  const target = targetOf(scope.tool, claims.target);
+  if (!target) return 'malformed_write_target';
   if (!facts.route || facts.route.tool !== scope.tool) return 'route_not_allowed';
+  if (!targetMatches(scope.tool, target, { params: facts.params, body: facts.body })) return 'target_mismatch';
   const entityId = claims.entityId;
   if (typeof entityId !== 'number' || !Number.isSafeInteger(entityId) || entityId <= 0) return 'entity_mismatch';
   if (typeof facts.entityHeader !== 'string' || facts.entityHeader.trim() !== String(entityId)) return 'entity_mismatch';
   const userId = Number(claims.id);
   if (!Number.isSafeInteger(userId) || userId <= 0) return 'act_mismatch';
-  return { tool: scope.tool, approvalId: scope.approvalId, entityId, userId, kind: facts.route.kind };
+  return { tool: scope.tool, approvalId: scope.approvalId, entityId, userId, kind: facts.route.kind, target };
 }
 
 /** Which required right is missing, literally, or null when all are held. */
@@ -187,12 +251,14 @@ export function delegatedWriteForbidden(reason: DelegatedWriteRefusal): Forbidde
     message:
       reason === 'route_not_allowed'
         ? 'A delegated write token may only call the one action it was issued for.'
-        : reason === 'entity_mismatch' || reason === 'not_a_member'
-          ? 'A delegated token may only be used in the organisation it was issued for.'
-          : reason === 'missing_permission'
-            ? 'The person no longer holds a right this action needs.'
-            : reason === 'token_already_used'
-              ? 'This delegated write token has already been used.'
-              : 'This delegated token is not accepted here.',
+        : reason === 'target_mismatch'
+          ? 'A delegated write token may only act on the one record it was issued for.'
+          : reason === 'entity_mismatch' || reason === 'not_a_member'
+            ? 'A delegated token may only be used in the organisation it was issued for.'
+            : reason === 'missing_permission'
+              ? 'The person no longer holds a right this action needs.'
+              : reason === 'token_already_used'
+                ? 'This delegated write token has already been used.'
+                : 'This delegated token is not accepted here.',
   });
 }
