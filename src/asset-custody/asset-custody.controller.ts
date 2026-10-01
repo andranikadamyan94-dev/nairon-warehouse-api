@@ -5,6 +5,9 @@ import { CreateAssetRequestDto, DecideAssetRequestDto, DirectIssueDto, IssueAsse
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { Public } from '../auth/decorators/public.decorator';
 import { UsersPrismaService } from '../common/users-prisma.service';
+import { OperationsService } from '../common/operations/operations.service';
+import { OperationKey } from '../common/operations/operation-key.decorator';
+import { PREFLIGHT_OK } from '../common/preflight/preflight';
 
 /**
  * Personal asset issue (no end date) and the custody register. Objects as
@@ -16,6 +19,7 @@ export class AssetCustodyController {
   constructor(
     private readonly service: AssetCustodyService,
     private readonly usersPrisma: UsersPrismaService,
+    private readonly operations: OperationsService,
   ) {}
 
   private async actor(req: any) {
@@ -41,8 +45,41 @@ export class AssetCustodyController {
   @UseGuards(PermissionGuard)
   @Permissions(PERM.request, PERM.approve, PERM.issue)
   @ApiOperation({ summary: 'Ask for an asset with no end date (for yourself, or for someone if you may approve/issue)' })
-  async createRequest(@Body() dto: CreateAssetRequestDto, @Req() req: any) {
-    return this.service.createRequest(dto, await this.actor(req), this.entityOf(req));
+  async createRequest(
+    @Body() dto: CreateAssetRequestDto,
+    @Req() req: any,
+    /* Asking twice files two requests. See OperationsService. */
+    @OperationKey() operationKey?: string,
+  ) {
+    const actor = await this.actor(req);
+    const { result, replayed } = await this.operations.runOnce(
+      { key: operationKey, actor: req.actor, route: 'POST /asset-requests', body: dto },
+      (tx) => this.service.fileRequest(dto, actor, this.entityOf(req), tx),
+    );
+    // Approvers hear of it once, after it committed — never again on a replay.
+    if (!replayed) this.service.announceRequest(result);
+    return result;
+  }
+
+  /*
+   * The assistant's preflights (2026-10-01, coverage gaps batch 4) — see
+   * src/common/preflight/preflight.ts and the service's previewRequest /
+   * previewCancelRequest. Each sits beside its mutation behind the same guard
+   * (create: the request rights; cancel: none, the service is the gate), takes
+   * the mutation's own body, writes nothing and notifies nobody.
+   */
+  @Post('asset-requests/preflight/create')
+  @UseGuards(PermissionGuard)
+  @Permissions(PERM.request, PERM.approve, PERM.issue)
+  @ApiOperation({ summary: 'Preflight: may this person ask for this asset for themselves, and what would it be?' })
+  async preflightCreateRequest(@Body() dto: CreateAssetRequestDto, @Req() req: any) {
+    return { ...PREFLIGHT_OK, ...(await this.service.previewRequest(dto, await this.actor(req), this.entityOf(req))) };
+  }
+
+  @Post('asset-requests/:id/preflight/cancel')
+  @ApiOperation({ summary: 'Preflight: may this person withdraw their own asset request?' })
+  async preflightCancelRequest(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return { ...PREFLIGHT_OK, ...(await this.service.previewCancelRequest(id, await this.actor(req), this.entityOf(req))) };
   }
 
   @Get('asset-requests')

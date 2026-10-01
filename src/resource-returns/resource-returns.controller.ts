@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { ResourceReturnsService } from './resource-returns.service';
 import { CreateReturnDto } from './dto/create-return.dto';
@@ -89,6 +89,18 @@ export class ResourceReturnsController {
    * view_warehouse passes here as it does on create and as it did in
    * production; manage_resource_returns keeps it for warehouse staff.
    */
+  /**
+   * The assistant's preflight for calling off one's own pending return
+   * (2026-10-01) — same guard as the mutation, the mutation's own check,
+   * nothing written. See src/common/preflight/preflight.ts.
+   */
+  @Post(':id/preflight/cancel')
+  @UseGuards(PermissionGuard)
+  @Permissions('view_warehouse', 'manage_resource_returns')
+  async preflightCancel(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    return { ...PREFLIGHT_OK, ...(await this.service.previewCancel(id, actor)) };
+  }
+
   @Patch(':id/cancel')
   @UseGuards(PermissionGuard)
   @Permissions('view_warehouse', 'manage_resource_returns')

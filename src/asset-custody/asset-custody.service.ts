@@ -5,6 +5,7 @@ import { UsersPrismaService } from '../common/users-prisma.service';
 import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
 import { CreateAssetRequestDto, DirectIssueDto, IssueAssetRequestDto, ObjectIssueDto, ReassignCustodyDto, ReleaseCondition, ReturnCustodyDto } from './dto/asset-custody.dto';
 import { ObjectsService } from '../objects/objects.service';
+import { TxClient } from '../common/operations/operations.service';
 
 /**
  * Asset custody (2026-09-23, owner's decisions in
@@ -52,7 +53,13 @@ export class AssetCustodyService {
 
   // ── Requests ──────────────────────────────────────────────────────────────
 
-  async createRequest(dto: CreateAssetRequestDto, actor: Actor, entityId: number | null) {
+  /**
+   * Everything createRequest() checks before it writes, in its order: the
+   * object (only its responsible person asks for it), who the asset is for, the
+   * item, the person. Shared with the assistant's preflight so the two cannot
+   * drift.
+   */
+  private async assertMayRequest(dto: CreateAssetRequestDto, actor: Actor) {
     const forObject = dto.forObjectId ? await this.objects.crmObject(dto.forObjectId) : null;
     if (dto.forObjectId && !forObject) throw new NotFoundException('Օբյեկտը չի գտնվել');
     // Owner 2026-09-29: only the object's responsible person asks on its behalf (fresh from CRM, not the cache).
@@ -71,8 +78,23 @@ export class AssetCustodyService {
     if (!item) throw new NotFoundException('Ռեսուրսը չի գտնվել');
     if (item.type !== 'ASSET') throw new BadRequestException('Հայտ կարելի է ներկայացնել միայն ակտիվների համար');
     if (forUserId && (await this.usersPrisma.isDeactivated(forUserId))) throw new BadRequestException('Աշխատակիցն ապաակտիվացված է');
+    return { forObject, forUserId, item };
+  }
 
-    const request = await this.prisma.assetRequest.create({
+  async createRequest(dto: CreateAssetRequestDto, actor: Actor, entityId: number | null) {
+    const request = await this.fileRequest(dto, actor, entityId);
+    this.announceRequest(request);
+    return request;
+  }
+
+  /**
+   * The checks and the row, nothing announced. `tx` lets a caller commit the
+   * row together with its own bookkeeping (OperationsService: one request per
+   * Idempotency-Key); announceRequest() is then called once, after the commit.
+   */
+  async fileRequest(dto: CreateAssetRequestDto, actor: Actor, entityId: number | null, tx?: TxClient) {
+    const { forObject, forUserId } = await this.assertMayRequest(dto, actor);
+    return (tx ?? this.prisma).assetRequest.create({
       data: {
         kind: forObject ? 'OBJECT' : 'PERSONAL',
         entityId: entityId ?? null,
@@ -85,15 +107,21 @@ export class AssetCustodyService {
       },
       include: { item: true },
     });
-    const who = forObject ? `${forObject.code} ${forObject.name}` : await this.person(forUserId!);
-    void this.notifications.send({
-      permissions: [PERM.approve],
-      title: 'Նոր գույքի հայտ',
-      body: `${who}՝ ${item.name} × ${request.quantity}${request.reason ? ` — ${request.reason}` : ''}`,
-      path: '/responsibilities?tab=requests',
-      details: [{ label: 'Հայտ', value: `#${request.id}` }],
-    });
-    return request;
+  }
+
+  /** Approvers hear of a new request (fire-and-forget, as before). */
+  announceRequest(request: { id: number; forObjectId: number | null; forUserId: number | null; quantity: number; reason: string | null; item: { name: string } }) {
+    void (async () => {
+      const object = request.forObjectId ? await this.objects.crmObject(request.forObjectId) : null;
+      const who = object ? `${object.code} ${object.name}` : await this.person(request.forUserId!);
+      await this.notifications.send({
+        permissions: [PERM.approve],
+        title: 'Նոր գույքի հայտ',
+        body: `${who}՝ ${request.item.name} × ${request.quantity}${request.reason ? ` — ${request.reason}` : ''}`,
+        path: '/responsibilities?tab=requests',
+        details: [{ label: 'Հայտ', value: `#${request.id}` }],
+      });
+    })().catch((e: any) => this.logger.warn(`asset request notification failed: ${e?.message ?? e}`));
   }
 
   async listRequests(query: { status?: string; forUserId?: number; forObjectId?: number; mine?: boolean }, actor: Actor) {
@@ -150,11 +178,89 @@ export class AssetCustodyService {
     return updated;
   }
 
-  async cancel(id: number, actor: Actor) {
+  /** What cancel() checks before it writes. Shared with the assistant's preflight. */
+  private async cancellable(id: number, actor: Actor) {
     const r = await this.requestOr404(id);
     if (r.requestedBy !== actor.userId && !actor.isSuperAdmin) throw new ForbiddenException();
     if (!['PENDING', 'APPROVED'].includes(r.status)) throw new BadRequestException('Հայտն այլևս հնարավոր չէ չեղարկել');
+    return r;
+  }
+
+  async cancel(id: number, actor: Actor) {
+    await this.cancellable(id, actor);
     return this.prisma.assetRequest.update({ where: { id }, data: { status: 'CANCELLED' } });
+  }
+
+  // ── The assistant's preflights (2026-10-01, coverage gaps batch 4) ──────────
+  //
+  // «Նոր հայտ» for oneself and «Չեղարկել» one's own request, as the screen
+  // offers them — each the mutation's own check, nothing written, nobody told.
+  // Narrower than the screen, on purpose (the owner's rules for AI writes):
+  //
+  //   for oneself     a request on somebody else's behalf, or for an object,
+  //                   stays on the screen;
+  //   literal right   a super-admin flag does not stand in for request_assets
+  //                   (or approve / issue, which the route also admits);
+  //   one workspace   a request is filed in the organization being worked in,
+  //                   and one filed in another reads as not found;
+  //   own only        only the person who filed a request withdraws it here.
+  //
+  // Each answers what a confirmation card needs; cancel also `material`, the
+  // state an agreement is pinned to (any decision or issue moves updatedAt).
+
+  async previewRequest(dto: CreateAssetRequestDto, actor: Actor, entityId: number | null) {
+    if (!entityId) throw new BadRequestException('Ընտրեք կազմակերպությունը');
+    if (dto.forObjectId || (dto.forUserId && dto.forUserId !== actor.userId)) {
+      throw new BadRequestException('Օգնականի միջոցով գույքի հայտը ներկայացվում է միայն Ձեզ համար. ուրիշի կամ օբյեկտի համար՝ «Հայտեր» էջից');
+    }
+    if (![PERM.request, PERM.approve, PERM.issue].some((p) => actor.permissions.includes(p))) {
+      throw new ForbiddenException('Դուք այս կազմակերպությունում գույքի հայտ ներկայացնելու թույլտվություն չունեք');
+    }
+    const { item, forUserId } = await this.assertMayRequest(dto, actor);
+    // The person's requests for the same item still open — a second one is often a mistake.
+    const open = await this.prisma.assetRequest.count({
+      where: { requestedBy: actor.userId, itemId: item.id, status: { in: ['PENDING', 'APPROVED'] } },
+    });
+    return {
+      request: {
+        kind: 'PERSONAL' as const,
+        item: { id: item.id, name: item.name, code: item.code ?? null, unit: item.unit ?? null },
+        quantity: dto.quantity ?? 1,
+        reason: dto.reason?.trim() || null,
+        forUser: { id: forUserId!, name: await this.person(forUserId!) },
+        entityId,
+        openForSameItem: open,
+      },
+    };
+  }
+
+  async previewCancelRequest(id: number, actor: Actor, entityId: number | null) {
+    const r = await this.requestOr404(id);
+    if (entityId && r.entityId && r.entityId !== entityId) throw new NotFoundException('Հայտը չի գտնվել');
+    if (r.requestedBy !== actor.userId) throw new ForbiddenException('Օգնականի միջոցով կարելի է չեղարկել միայն Ձեր ներկայացրած հայտը');
+    const req = await this.cancellable(id, actor);
+    return {
+      from: req.status,
+      to: 'CANCELLED' as const,
+      request: {
+        id: req.id,
+        item: { id: req.item.id, name: req.item.name, unit: req.item.unit ?? null },
+        quantity: req.quantity,
+        reason: req.reason,
+        status: req.status,
+        forUser: req.forUserId ? { id: req.forUserId, name: await this.person(req.forUserId) } : null,
+        // Already handed out against it: cancelling does not take them back.
+        issuedOpen: req.custodies.filter((c) => !c.releasedAt).length,
+        createdAt: req.createdAt.toISOString(),
+        material: {
+          requestId: req.id,
+          status: req.status,
+          requestedBy: req.requestedBy,
+          entityId: req.entityId ?? null,
+          updatedAt: req.updatedAt.toISOString(),
+        },
+      },
+    };
   }
 
   /** The warehouse hands out concrete assets against an approved request. */

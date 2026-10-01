@@ -479,7 +479,8 @@ export class ResourceReturnsService {
     return result;
   }
 
-  async cancel(id: number, actor?: WarehouseActor) {
+  /** What cancel() checks before it writes. Shared with the assistant's preflight. */
+  private async cancellable(id: number, actor?: WarehouseActor) {
     const ret = await this.prisma.resourceReturn.findUnique({ where: { id } });
     if (!ret) throw new NotFoundException('Return not found');
 
@@ -494,12 +495,60 @@ export class ResourceReturnsService {
     if (ret.status !== ResourceReturnStatus.PENDING) {
       throw new BadRequestException('Միայն սպասող վերադարձները կարելի է չեղարկել');
     }
+    return ret;
+  }
+
+  async cancel(id: number, actor?: WarehouseActor) {
+    await this.cancellable(id, actor);
 
     return this.prisma.resourceReturn.update({
       where: { id },
       data: { status: ResourceReturnStatus.CANCELLED },
       include: this.include,
     });
+  }
+
+  /**
+   * The assistant's preflight for «Չեղարկել» a return (2026-10-01, coverage
+   * gaps batch 4): cancel()'s own check, nothing written. Two rules more, the
+   * owner's for AI writes: only the person who filed the return calls it off
+   * here (the screen lets anybody on the requesting side, and warehouse staff,
+   * do it), and one workspace — a return whose requesting company is known and
+   * is not the one being worked in reads as not found. Answers what the card
+   * shows, and `material`: any change to the return moves updatedAt.
+   */
+  async previewCancel(id: number, actor: WarehouseActor) {
+    const row = await this.prisma.resourceReturn.findUnique({
+      where: { id },
+      include: { reservation: { include: { item: { select: { id: true, name: true, unit: true } } } } },
+    });
+    if (!row) throw new NotFoundException('Return not found');
+    const requester = row.reservation.requesterWorkspaceId ?? null;
+    if (actor.declared && requester !== null && requester !== actor.declared) throw new NotFoundException('Return not found');
+    if (row.requestedBy !== actor.userId) {
+      throw new ForbiddenException('Օգնականի միջոցով կարելի է չեղարկել միայն Ձեր ներկայացրած վերադարձը');
+    }
+    await this.cancellable(id, actor);
+    return {
+      from: row.status,
+      to: ResourceReturnStatus.CANCELLED,
+      return: {
+        id: row.id,
+        item: row.reservation.item,
+        quantity: row.quantity,
+        notes: row.notes,
+        taskId: row.reservation.taskId ?? null,
+        projectName: row.reservation.projectName ?? null,
+        requestedAt: row.requestedAt.toISOString(),
+        material: {
+          returnId: row.id,
+          status: row.status,
+          quantity: row.quantity,
+          requestedBy: row.requestedBy,
+          updatedAt: row.updatedAt.toISOString(),
+        },
+      },
+    };
   }
 }
 

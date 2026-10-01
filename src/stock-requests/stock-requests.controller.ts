@@ -92,6 +92,18 @@ export class StockRequestsController {
     return this.stockRequestsService.reject(id, req.user?.id, body?.reason);
   }
 
+  /**
+   * The assistant's preflight for withdrawing one's own pending request
+   * (2026-10-01) — see src/common/preflight/preflight.ts and the service's
+   * previewCancel. Unguarded like the mutation (the service is the gate);
+   * nothing written.
+   */
+  @Post(':id/preflight/cancel')
+  @ApiOperation({ summary: 'Preflight: may this person withdraw their own pending request?' })
+  async preflightCancel(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return { ...PREFLIGHT_OK, ...(await this.stockRequestsService.previewCancel(id, req.user?.id)) };
+  }
+
   @Patch(':id/cancel')
   @ApiOperation({ summary: 'Requester withdraws a pending request' })
   async cancel(@Param('id', ParseIntPipe) id: number, @Req() req: any) {

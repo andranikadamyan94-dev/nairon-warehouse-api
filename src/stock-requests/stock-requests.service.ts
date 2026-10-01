@@ -293,8 +293,8 @@ export class StockRequestsService {
     return this.prisma.stockRequest.findUnique({ where: { id } });
   }
 
-  /** The requester (or an admin) may withdraw a pending request. */
-  async cancel(id: number, userId: number, isSuperAdmin: boolean) {
+  /** What cancel() checks before it writes. Shared with the assistant's preflight. */
+  private async cancellable(id: number, userId: number, isSuperAdmin: boolean) {
     const req = await this.prisma.stockRequest.findUnique({ where: { id } });
     if (!req) throw new NotFoundException('Հայտը չի գտնվել');
     if (req.status !== 'PENDING') {
@@ -303,11 +303,58 @@ export class StockRequestsService {
     if (!isSuperAdmin && req.createdBy !== userId) {
       throw new ForbiddenException('Հայտը կարող է չեղարկել միայն ներկայացնողը');
     }
+    return req;
+  }
+
+  /** The requester (or an admin) may withdraw a pending request. */
+  async cancel(id: number, userId: number, isSuperAdmin: boolean) {
+    await this.cancellable(id, userId, isSuperAdmin);
     const upd = await this.prisma.stockRequest.updateMany({
       where: { id, status: 'PENDING' },
       data: { status: 'CANCELLED', decidedBy: userId, decidedAt: new Date() },
     });
     if (upd.count === 0) throw new BadRequestException('Հայտն արդեն որոշված է');
     return this.prisma.stockRequest.findUnique({ where: { id } });
+  }
+
+  /**
+   * The assistant's preflight for «Չեղարկել» (2026-10-01, coverage gaps batch
+   * 4): cancel()'s own check, nothing written, and one rule more — the owner's
+   * for AI writes: only the person who filed the request withdraws it here
+   * (an administrator withdrawing somebody else's stays on the screen).
+   * Answers the request as the card shows it, and `material` — what an
+   * agreement is pinned to. A request has no updatedAt, so its lines and
+   * comment are the pin: an edit in between supersedes the card.
+   */
+  async previewCancel(id: number, userId: number) {
+    const req = await this.cancellable(id, userId, false);
+    const full = await this.prisma.stockRequest.findUnique({
+      where: { id: req.id },
+      include: {
+        warehouse: { select: { id: true, name: true, code: true } },
+        items: { include: { item: { select: { id: true, name: true, unit: true } } }, orderBy: { id: 'asc' } },
+      },
+    });
+    if (!full) throw new NotFoundException('Հայտը չի գտնվել');
+    const lines = full.items.map((l) => ({ itemId: l.itemId, itemName: l.item?.name ?? null, unit: l.item?.unit ?? null, quantity: l.quantity }));
+    return {
+      from: full.status,
+      to: 'CANCELLED' as const,
+      request: {
+        id: full.id,
+        warehouse: full.warehouse,
+        comment: full.comment,
+        createdAt: full.createdAt.toISOString(),
+        items: lines,
+        material: {
+          requestId: full.id,
+          status: full.status,
+          createdBy: full.createdBy,
+          warehouseId: full.warehouseId,
+          comment: full.comment,
+          lines: lines.map((l) => [l.itemId, l.quantity]),
+        },
+      },
+    };
   }
 }
