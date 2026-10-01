@@ -13,6 +13,8 @@ import { FileService } from '../common/file.service';
 import { TxClient } from '../common/operations/operations.service';
 
 type Ctx = { isSuperAdmin?: boolean; permissionNames?: string[] };
+/** The caller as CRM knows them: their own token and the organization they are acting in. */
+export type TaskViewer = { authorization?: string; entityId?: number | null };
 
 export type LineInput = {
   itemId?: number | null;
@@ -337,14 +339,60 @@ export class PurchaseRequisitionsService {
     return this.page(where, query);
   }
 
-  /** #1894: the requisitions attached to / created from a task. */
-  async findByTask(taskId: number) {
+  /**
+   * #1894: the requisitions attached to / created from a task — the task
+   * panel in CRM.
+   *
+   * 2026-10-01: this had no check at all, so anybody signed in read the
+   * lines, comments and attachments of the requisitions on any task id, in
+   * any organization. Now:
+   *
+   *   - whoever may open the task in CRM sees all of them — that is what the
+   *     panel is for, and CRM alone knows who that is;
+   *   - anybody else sees only the ones `assertCanSee` already lets them
+   *     open by id (their own, procurement, the requisition's organization's
+   *     approvers).
+   *
+   * CRM is only asked when the second rule leaves something out, and with the
+   * caller's own token and organization — the same request the panel's task
+   * came from. Unreachable or refusing is "may not open it" (fail closed).
+   */
+  async findByTask(taskId: number, userId: number, ctx?: Ctx, crm: TaskViewer = {}) {
     const rows = await this.prisma.purchaseRequisition.findMany({
       where: { taskId },
       include: this.include,
       orderBy: { id: 'desc' },
     });
-    return this.decorate(rows);
+    const c = rows.length ? await this.resolveCtx(userId, ctx) : undefined;
+    const allowed: any[] = [];
+    for (const r of rows) if (await this.canSee(r, userId, c)) allowed.push(r);
+    if (allowed.length === rows.length) return this.decorate(rows);
+    return this.decorate((await this.taskVisibleInCrm(taskId, crm)) ? rows : allowed);
+  }
+
+  private async canSee(req: any, userId: number, ctx?: Ctx): Promise<boolean> {
+    try {
+      await this.assertCanSee(req, userId, ctx);
+      return true;
+    } catch (e) {
+      if (e instanceof ForbiddenException) return false;
+      throw e;
+    }
+  }
+
+  /** May this person open the task in CRM, in the organization they are in? CRM's own GET answers. */
+  private async taskVisibleInCrm(taskId: number, crm: TaskViewer): Promise<boolean> {
+    if (!crm.authorization || !crm.entityId) return false;
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    try {
+      const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}`, {
+        headers: { Authorization: crm.authorization, 'x-entity-id': String(crm.entityId) },
+        signal: AbortSignal.timeout(5000),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
 
   private async page(where: any, query: { page?: string; limit?: string }) {

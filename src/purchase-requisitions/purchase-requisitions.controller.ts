@@ -84,8 +84,10 @@ export class PurchaseRequisitionsController {
 
   /** #1894: the requisitions bound to a task (task modal). */
   @Get('by-task/:taskId')
-  byTask(@Param('taskId', ParseIntPipe) taskId: number) {
-    return this.service.findByTask(taskId);
+  byTask(@Param('taskId', ParseIntPipe) taskId: number, @Req() req: any) {
+    // Who may see which of them is the service's question (2026-10-01).
+    const authorization = typeof req.headers?.authorization === 'string' ? req.headers.authorization : undefined;
+    return this.service.findByTask(taskId, req.user?.id, ctxOf(req), { authorization, entityId: entityOf(req) });
   }
 
   /**
