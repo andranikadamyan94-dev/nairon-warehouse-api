@@ -4,6 +4,7 @@ import { APP_GUARD } from '@nestjs/core';
 
 import { jwtConstants } from './constants';
 import { AuthGuard } from './guards/auth.guard';
+import { DelegatedWriteMembership } from './delegated-write.membership';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { AuthGuard } from './guards/auth.guard';
     }),
   ],
   providers: [
+    DelegatedWriteMembership,
     {
       provide: APP_GUARD,
       useClass: AuthGuard,

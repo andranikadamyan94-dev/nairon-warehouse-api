@@ -2,6 +2,7 @@ import {
   CanActivate,
   ExecutionContext,
   Injectable,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -12,6 +13,18 @@ import { jwtConstants } from '../constants';
 import { UsersPrismaService } from '../../common/users-prisma.service';
 import { WarehouseActorService } from '../actor.service';
 import { NOT_FOR_DELEGATED_KEY, delegatedForbidden, delegatedRefusal } from '../delegated-token.policy';
+import {
+  DELEGATED_WRITE_ROUTE_KEY,
+  DelegatedWriteRouteMeta,
+  WriteTokenLedger,
+  delegatedWriteCheck,
+  delegatedWriteEnabled,
+  delegatedWriteForbidden,
+  isDelegatedWriteToken,
+  missingWriteRight,
+  writeTokenLedger,
+} from '../delegated-write.policy';
+import { DelegatedWriteMembership } from '../delegated-write.membership';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -20,6 +33,9 @@ export class AuthGuard implements CanActivate {
     private reflector: Reflector,
     private usersPrisma: UsersPrismaService,
     private actors: WarehouseActorService,
+    // Only a delegated WRITE token needs it; without it such a token is refused.
+    @Optional() private writeMembership?: DelegatedWriteMembership,
+    @Optional() private ledger: WriteTokenLedger = writeTokenLedger,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -50,6 +66,14 @@ export class AuthGuard implements CanActivate {
       throw new UnauthorizedException('Այս հաշիվը ապաակտիվացված է');
     }
 
+    // Delegated WRITE tokens (V3.4 standing approvals), with
+    // DELEGATED_TOKENS_WRITE on: one tool's marked route, re-checked here.
+    // Flag off, they fall to the read-only rule below, which refuses them.
+    if (isDelegatedWriteToken(request['user']) && delegatedWriteEnabled()) {
+      await this.admitDelegatedWrite(context, request);
+      return true;
+    }
+
     // Delegated AI tokens (carrying `act`): GET only, with X-Entity-ID equal
     // to the token's organisation — required here, because without it the
     // actor counts the person's grants from every organisation — and never on
@@ -74,6 +98,43 @@ export class AuthGuard implements CanActivate {
     request['actor'] = await this.actors.resolve(request);
 
     return true;
+  }
+
+  /**
+   * delegated-write.policy.ts, in order: the token against this route, then
+   * the organisation (HR over the internal channel — never the token, which
+   * hr-api refuses), then the actor in exactly that organisation and its
+   * rights there, literally, then one mutation per token. Any "no" is a 403.
+   */
+  private async admitDelegatedWrite(context: ExecutionContext, request: any): Promise<void> {
+    const route = this.reflector.getAllAndOverride<DelegatedWriteRouteMeta>(DELEGATED_WRITE_ROUTE_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    const grant = delegatedWriteCheck(request['user'], {
+      method: request.method,
+      entityHeader: request.headers?.['x-entity-id'],
+      route,
+    });
+    if (typeof grant === 'string') throw delegatedWriteForbidden(grant);
+
+    if (!this.writeMembership) throw delegatedWriteForbidden('not_a_member');
+    if (!(await this.writeMembership.isMember(grant.entityId, grant.userId))) {
+      throw delegatedWriteForbidden('not_a_member');
+    }
+    // Read by WarehouseActorService: HR has just said this person is in exactly this entity.
+    request.delegatedWrite = grant;
+
+    // The actor, declared in the token's organisation (X-Entity-ID was checked
+    // equal to it above); its permissions are that organisation's only.
+    const actor = await this.actors.resolve(request);
+    if (actor.declared !== grant.entityId) throw delegatedWriteForbidden('entity_mismatch');
+    if (missingWriteRight(grant.tool, actor.permissionNames)) throw delegatedWriteForbidden('missing_permission');
+
+    if (grant.kind === 'mutation' && !this.ledger.spend(request['user'].jti, request['user'].exp)) {
+      throw delegatedWriteForbidden('token_already_used');
+    }
+    request['actor'] = actor;
   }
 
   private extractTokenFromHeader(

@@ -20,6 +20,7 @@ import { OperationsService } from '../common/operations/operations.service';
 import { OperationKey } from '../common/operations/operation-key.decorator';
 import { PREFLIGHT_OK } from '../common/preflight/preflight';
 import { WarehouseActor } from '../auth/actor';
+import { DelegatedWriteRoute } from '../auth/delegated-write.policy';
 
 import { ReservationsService } from './reservations.service';
 
@@ -58,6 +59,8 @@ export class ReservationsController {
   @Post()
   @UseGuards(PermissionGuard)
   @Permissions('view_warehouse', 'manage_reservations')
+  // V3.4: the one mutation a `warehouse.reservations.create` standing-approval token may make — once per token.
+  @DelegatedWriteRoute('warehouse.reservations.create', 'mutation')
   @ApiOperation({ summary: 'Create resource reservations' })
   @ApiResponse({ status: 201 })
   async create(
@@ -88,6 +91,8 @@ export class ReservationsController {
   @Post('preflight/create')
   @UseGuards(PermissionGuard)
   @Permissions('view_warehouse', 'manage_reservations')
+  // V3.4: the one preflight a `warehouse.reservations.create` standing-approval token may call.
+  @DelegatedWriteRoute('warehouse.reservations.create', 'preflight')
   @ApiOperation({ summary: 'Preflight: may this be reserved, and what would it create?' })
   async preflightCreate(@Body() dto: CreateReservationDto, @Actor() actor: WarehouseActor) {
     return { ...PREFLIGHT_OK, request: await this.reservationsService.previewCreate(dto, actor) };

@@ -9,6 +9,8 @@ const CACHE = Symbol('warehouseActor');
 type RequestLike = {
   user?: { id?: number | string };
   headers?: Record<string, unknown>;
+  /** Set by AuthGuard only, after HR confirmed over the internal channel (delegated-write.policy.ts). */
+  delegatedWrite?: { userId: number; entityId: number };
   [CACHE]?: Promise<WarehouseActor>;
 };
 
@@ -78,7 +80,12 @@ export class WarehouseActorService {
     }
 
     const roles = await this.usersPrisma.getUserWorkspaces(userId);
-    const member = roles.wildcard ? [] : await this.fromHr(userId, request.headers?.['authorization']);
+    // A delegated write token: hr-api refuses the token itself, so HR's answer
+    // is the one AuthGuard just took over the internal channel, for exactly
+    // the token's organisation.
+    const verified =
+      request.delegatedWrite && request.delegatedWrite.userId === userId ? [request.delegatedWrite.entityId] : null;
+    const member = roles.wildcard ? [] : verified ?? (await this.fromHr(userId, request.headers?.['authorization']));
     const home = {
       wildcard: roles.wildcard,
       entityIds: [...new Set([...roles.entityIds, ...member])].sort((x, y) => x - y),
