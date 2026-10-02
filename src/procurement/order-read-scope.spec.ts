@@ -96,8 +96,6 @@ describe('procurement changes by id — the organisation acted in', () => {
     ['PATCH :id/order', (c, id, a) => c.markOrdered(id, a)],
     ['PATCH :id/cancel', (c, id, a) => c.cancel(id, {}, { user: { id: 1 } }, a)],
     ['POST :id/finalize', (c, id, a) => c.finalize(id, { user: { id: 1 } }, a)],
-    ['POST :id/approve', (c, id, a) => c.approve(id, { user: { id: 1 } }, a)],
-    ['POST :id/reject-approval', (c, id, a) => c.rejectApproval(id, { reason: 'x' }, { user: { id: 1 } }, a)],
     ['POST :id/resubmit', (c, id, a) => c.resubmit(id, a)],
     ['PATCH :id/amend', (c, id, a) => c.amend(id, {} as any, a, 1)],
     ['DELETE :id', (c, id, a) => c.remove(id, a)],
@@ -112,6 +110,16 @@ describe('procurement changes by id — the organisation acted in', () => {
     }
     return { controller: new ProcurementController(service), done };
   };
+
+  // Owner rule 29.09: an approver from any organization approves every organization's orders.
+  it.each([
+    ['POST :id/approve', (c: ProcurementController, id: number) => c.approve(id, { user: { id: 1 } })],
+    ['POST :id/reject-approval', (c: ProcurementController, id: number) => c.rejectApproval(id, { reason: 'x' }, { user: { id: 1 } })],
+  ] as const)("%s: another organisation's order still reaches the service (it decides who may approve)", async (_route, call) => {
+    const { controller, done } = stubbed();
+    await expect(call(controller, 2)).resolves.toBe('changed');
+    expect(done).toHaveBeenCalledTimes(1);
+  });
 
   it.each(CHANGES)("%s: another organisation's order is not found, and nothing changes", async (_route, call) => {
     const { controller, done } = stubbed();

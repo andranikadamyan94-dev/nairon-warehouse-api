@@ -256,16 +256,16 @@ export class ProcurementController {
   // which ProcurementService.assertMayApprove checks (the guard reads one).
   @Post(':id/approve')
   @ApiOperation({ summary: 'Approve a pending order — raises it with finance' })
-  async approve(@Param('id', ParseIntPipe) id: number, @Req() req: any, @Actor() actor: WarehouseActor) {
-    await this.inActiveOrg(id, actor);
+  // Owner rule 29.09: an approver from any organization approves every organization's orders,
+  // so no active-organization check here (assertMayApprove decides).
+  async approve(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.procurementService.approve(id, req.user?.id);
   }
 
   // Hotfix 2026-09-29: see approve — checked in the service, any organization.
   @Post(':id/reject-approval')
   @ApiOperation({ summary: 'Send a pending order back to draft with a reason' })
-  async rejectApproval(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any, @Actor() actor: WarehouseActor) {
-    await this.inActiveOrg(id, actor);
+  async rejectApproval(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any) {
     return this.procurementService.rejectApproval(id, req.user?.id, body?.reason);
   }
 
