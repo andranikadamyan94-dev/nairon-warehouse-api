@@ -61,8 +61,8 @@ export class ResponsibilitiesController {
   @UseGuards(PermissionGuard)
   @Permissions('view_responsibilities', 'manage_responsibilities')
   @Get()
-  getAll() {
-    return this.responsibilitiesService.getAll();
+  getAll(@Actor() actor: WarehouseActor) {
+    return this.responsibilitiesService.getAll(actor);
   }
 
   // Your own always; somebody else's per holdings-access.ts (a right in the

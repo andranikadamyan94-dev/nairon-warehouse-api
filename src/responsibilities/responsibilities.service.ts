@@ -3,15 +3,15 @@ import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/commo
 import { AssignResponsibilityDto } from './dto/assign-responsibility.dto';
 import { PrismaService } from 'prisma/prisma.service';
 import { WarehouseActor } from '../auth/actor';
-import { DelegatedWriteMembership } from '../auth/delegated-write.membership';
+import { HolderScope } from '../common/holder-scope.service';
 import { decideHoldingsRead } from './holdings-access';
 
 @Injectable()
 export class ResponsibilitiesService {
   constructor(
     private readonly prisma: PrismaService,
-    // HR's org tree over the internal channel (GET /entities/:id/members/internal).
-    private readonly membership: DelegatedWriteMembership,
+    // HR's org tree (members/internal) and CRM's object catalogue, over the internal channel.
+    private readonly holders: HolderScope,
   ) {}
 
   async assign(dto: AssignResponsibilityDto) {
@@ -82,12 +82,22 @@ export class ResponsibilitiesService {
     const rows = await this.prisma.assetCustody.findMany({ where: { assetId }, orderBy: { assignedAt: 'desc' } });
     return rows.map((c) => this.fromCustody(c));
   }
-  async getAll() {
+  /**
+   * The register. In an organisation (X-Entity-ID) it holds only that
+   * organisation's holders — its members, and objects filed under it (or
+   * under none) — unless the caller is a global super-admin. With no
+   * organisation declared it is the whole register, as before: nothing in the
+   * product reads it without one today (the warehouse client's page reads
+   * GET /custody), and the assistant always sends one.
+   */
+  async getAll(actor?: Pick<WarehouseActor, 'declared' | 'isGlobalSuperAdmin'>) {
     const rows = await this.prisma.assetCustody.findMany({
       include: { asset: { include: { item: true } } },
       orderBy: { assignedAt: 'desc' },
     });
-    return rows.map((c) => this.fromCustody(c));
+    const scoped =
+      actor && actor.declared !== null && !actor.isGlobalSuperAdmin ? await this.holders.filter(rows, actor.declared) : rows;
+    return scoped.map((c) => this.fromCustody(c));
   }
 
   /**
@@ -104,7 +114,7 @@ export class ResponsibilitiesService {
           : 'Ուրիշի պատասխանատվությունները տեսնելու թույլտվություն չունեք',
       );
     }
-    if (verdict.kind === 'if-member' && !(await this.membership.isMember(verdict.entityId, verdict.userId))) {
+    if (verdict.kind === 'if-member' && !(await this.holders.isMember(verdict.entityId, verdict.userId))) {
       throw new NotFoundException('Աշխատակիցը չի գտնվել');
     }
   }

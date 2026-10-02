@@ -34,6 +34,15 @@ import { AmendProcurementDto } from './dto/amend-procurement.dto';
 export class ProcurementController {
   constructor(private readonly procurementService: ProcurementService) {}
 
+  /**
+   * Every procurement-side change by id asks this first: in an organisation
+   * (X-Entity-ID), an order filed under another one is not found. With none
+   * sent (the warehouse client) nothing changes. See assertInActiveOrg.
+   */
+  private inActiveOrg(id: number, actor: WarehouseActor | undefined): Promise<void> {
+    return this.procurementService.assertInActiveOrg(id, actor?.declared ?? null);
+  }
+
   @UseGuards(PermissionGuard)
   // receive_procurement_alerts: the people the alerts are sent to must be able
   // to open what the alert links to (read only — writes stay with manage_*).
@@ -46,8 +55,8 @@ export class ProcurementController {
   )
   @Get()
   @ApiOperation({ summary: 'Get all procurement orders' })
-  findAll(@Query() query: any) {
-    return this.procurementService.findAll(query);
+  findAll(@Query() query: any, @Actor() actor: WarehouseActor) {
+    return this.procurementService.findAll(query, actor?.declared ?? null);
   }
 
   // Receiving belongs to the warehouse side of the 2026-09-01 split: orders
@@ -111,11 +120,13 @@ export class ProcurementController {
   @ApiOperation({
     summary: 'Re-file an order under another organization (super-admin)',
   })
-  setEntity(
+  async setEntity(
     @Param('id', ParseIntPipe) id: number,
     @Body('entityId') entityId: number | null,
     @Req() req: any,
+    @Actor() actor: WarehouseActor,
   ) {
+    await this.inActiveOrg(id, actor);
     return this.procurementService.setEntity(
       id,
       entityId ?? null,
@@ -130,12 +141,14 @@ export class ProcurementController {
     summary:
       'Update procurement order. A settled order (received / closed short) yields only to a super-admin, and then only its supplier, note and line prices.',
   })
-  update(
+  async update(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: UpdateProcurementDto,
     @Req() req: any,
+    @Actor() actor: WarehouseActor,
     @LoggedInUser('id') userId?: number,
   ) {
+    await this.inActiveOrg(id, actor);
     return this.procurementService.update(id, dto, {
       isSuperAdmin: !!req.isSuperAdmin,
       userId,
@@ -149,7 +162,8 @@ export class ProcurementController {
     summary:
       'Confirm the purchase — order placed with the supplier, hands off to warehouse receiving',
   })
-  markOrdered(@Param('id', ParseIntPipe) id: number) {
+  async markOrdered(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    await this.inActiveOrg(id, actor);
     return this.procurementService.confirmOrdered(id);
   }
 
@@ -214,11 +228,13 @@ export class ProcurementController {
     summary:
       'Cancel procurement order — creator (or super-admin) only; voids the finance transfers and, mid-delivery, settles the remainder short instead',
   })
-  cancel(
+  async cancel(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: { reason?: string },
     @Req() req: any,
+    @Actor() actor: WarehouseActor,
   ) {
+    await this.inActiveOrg(id, actor);
     return this.procurementService.cancel(
       id,
       req.user?.id,
@@ -231,7 +247,8 @@ export class ProcurementController {
   @Permissions('manage_procurement')
   @Post(':id/finalize')
   @ApiOperation({ summary: 'Send a draft order for approval (approve_purchase_order) — finance hears of it once approved' })
-  finalize(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+  async finalize(@Param('id', ParseIntPipe) id: number, @Req() req: any, @Actor() actor: WarehouseActor) {
+    await this.inActiveOrg(id, actor);
     return this.procurementService.finalize(id, req.user?.id);
   }
 
@@ -239,14 +256,16 @@ export class ProcurementController {
   // which ProcurementService.assertMayApprove checks (the guard reads one).
   @Post(':id/approve')
   @ApiOperation({ summary: 'Approve a pending order — raises it with finance' })
-  approve(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+  async approve(@Param('id', ParseIntPipe) id: number, @Req() req: any, @Actor() actor: WarehouseActor) {
+    await this.inActiveOrg(id, actor);
     return this.procurementService.approve(id, req.user?.id);
   }
 
   // Hotfix 2026-09-29: see approve — checked in the service, any organization.
   @Post(':id/reject-approval')
   @ApiOperation({ summary: 'Send a pending order back to draft with a reason' })
-  rejectApproval(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any) {
+  async rejectApproval(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any, @Actor() actor: WarehouseActor) {
+    await this.inActiveOrg(id, actor);
     return this.procurementService.rejectApproval(id, req.user?.id, body?.reason);
   }
 
@@ -254,7 +273,8 @@ export class ProcurementController {
   @Permissions('manage_procurement')
   @Post(':id/resubmit')
   @ApiOperation({ summary: 'Resubmit a finance-rejected order back to DRAFT' })
-  resubmit(@Param('id', ParseIntPipe) id: number) {
+  async resubmit(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    await this.inActiveOrg(id, actor);
     return this.procurementService.resubmit(id);
   }
 
@@ -296,11 +316,13 @@ export class ProcurementController {
     summary:
       "Correct the prices of a received order to the supplier's invoice (2026-09-22). The difference goes to finance as an adjustment or a refund through the normal approval.",
   })
-  amend(
+  async amend(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: AmendProcurementDto,
+    @Actor() actor: WarehouseActor,
     @LoggedInUser('id') userId?: number,
   ) {
+    await this.inActiveOrg(id, actor);
     return this.procurementService.amend(id, dto, userId);
   }
 
@@ -308,7 +330,8 @@ export class ProcurementController {
   @Permissions('manage_procurement')
   @Delete(':id')
   @ApiOperation({ summary: 'Delete procurement order' })
-  remove(@Param('id', ParseIntPipe) id: number) {
+  async remove(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    await this.inActiveOrg(id, actor);
     return this.procurementService.remove(id);
   }
 }

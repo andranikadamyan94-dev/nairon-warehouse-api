@@ -67,11 +67,15 @@ export class ProcurementService {
     limit?: string;
     sortBy?: string;
     sortOrder?: string;
-  }) {
+  }, declared: number | null = null) {
     const page = Number(query?.page ?? 1);
     const limit = Number(query?.limit ?? 20);
 
     const where: any = {};
+    // Org sweep follow-up (2026-10-02): in an organisation (X-Entity-ID), its
+    // orders and the ones filed under none. With no organisation sent — the
+    // warehouse client's «Գնումներ» page — every order, as before.
+    if (declared !== null) where.AND = [{ OR: [{ entityId: declared }, { entityId: null }] }];
     if (query?.status) where.status = query.status;
     if (query?.supplierId) where.supplierId = Number(query.supplierId);
     if (query?.search) {
@@ -115,6 +119,23 @@ export class ProcurementService {
     });
     if (!order) throw new NotFoundException('Գնման պատվերը չի գտնվել');
     return order;
+  }
+
+  /**
+   * The organisation check for a change to an order by id (org sweep
+   * follow-up, 2026-10-02): in an organisation (X-Entity-ID), an order filed
+   * under another one is not found, before anything else is checked or
+   * changed. An order filed under none is not held to one. With no
+   * organisation sent — the warehouse client sends none — nothing changes.
+   * Receiving (receive, close-short) is the shared warehouse's side and is
+   * not asked this.
+   */
+  async assertInActiveOrg(id: number, declared: number | null): Promise<void> {
+    if (declared === null) return;
+    const order = await this.prisma.procurementOrder.findUnique({ where: { id }, select: { entityId: true } });
+    if (!order) throw new NotFoundException('Գնման պատվերը չի գտնվել');
+    const filedUnder = (order as { entityId?: number | null }).entityId ?? null;
+    if (filedUnder !== null && filedUnder !== declared) throw new NotFoundException('Գնման պատվերը չի գտնվել');
   }
 
   /**

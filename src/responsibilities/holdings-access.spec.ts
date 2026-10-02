@@ -3,6 +3,7 @@ import { ForbiddenException, NotFoundException, ServiceUnavailableException } fr
 import { ResponsibilitiesController } from './responsibilities.controller';
 import { ResponsibilitiesService } from './responsibilities.service';
 import { DelegatedWriteMembership } from '../auth/delegated-write.membership';
+import { HolderScope } from '../common/holder-scope.service';
 import { WarehouseActor } from '../auth/actor';
 import { AssetCustodyController } from '../asset-custody/asset-custody.controller';
 import { IS_PUBLIC_KEY } from '../auth/decorators/public.decorator';
@@ -26,20 +27,35 @@ const actor = (over: Partial<WarehouseActor> = {}): WarehouseActor => ({
 });
 
 const build = (hr: 'up' | 'down' = 'up') => {
-  const rows = [{ id: 5, assetId: 9, holderUserId: 41, assignedAt: new Date(0), asset: { serialNumber: 'SN-1' } }];
+  // Person 41 (organisation 3), person 77 (organisation 9), object 600 (filed
+  // under 3), object 700 (under 9), object 800 (under none).
+  const rows = [
+    { id: 5, assetId: 9, holderUserId: 41, holderObjectId: null, assignedAt: new Date(0), asset: { serialNumber: 'SN-1' } },
+    { id: 6, assetId: 10, holderUserId: 77, holderObjectId: null, assignedAt: new Date(0), asset: { serialNumber: 'SN-2' } },
+    { id: 7, assetId: 11, holderUserId: null, holderObjectId: 600, assignedAt: new Date(0), asset: {} },
+    { id: 8, assetId: 12, holderUserId: null, holderObjectId: 700, assignedAt: new Date(0), asset: {} },
+    { id: 9, assetId: 13, holderUserId: null, holderObjectId: 800, assignedAt: new Date(0), asset: {} },
+  ];
   const prisma: any = {
-    assetCustody: { findMany: jest.fn(async ({ where }: any) => rows.filter((r) => r.holderUserId === where.holderUserId)) },
+    assetCustody: {
+      findMany: jest.fn(async ({ where }: any = {}) =>
+        where?.holderUserId === undefined ? rows : rows.filter((r) => r.holderUserId === where.holderUserId),
+      ),
+    },
   };
+  const OBJECTS: Record<number, number | null> = { 600: 3, 700: 9, 800: null };
+  const objects: any = { crmObject: jest.fn(async (id: number) => (id in OBJECTS ? { id, entityId: OBJECTS[id] } : undefined)) };
   const membership = new DelegatedWriteMembership();
   const fetcher = jest.fn(async (url: string, init: { headers: Record<string, string> }) => {
     if (hr === 'down') throw new Error('ECONNREFUSED');
-    const m = /\/api\/entities\/(\d+)\/members\/internal\?userIds=(\d+)$/.exec(url);
+    const m = /\/api\/entities\/(\d+)\/members\/internal\?userIds=([\d,]+)$/.exec(url);
     expect(init.headers['x-internal-secret']).toBe('s3cret');
-    const [entityId, userId] = [Number(m![1]), Number(m![2])];
-    return { ok: true, status: 200, json: async () => ((MEMBERS[entityId] ?? []).includes(userId) ? [userId] : []) };
+    const entityId = Number(m![1]);
+    const asked = m![2].split(',').map(Number);
+    return { ok: true, status: 200, json: async () => asked.filter((u) => (MEMBERS[entityId] ?? []).includes(u)) };
   });
   membership.fetcher = fetcher as never;
-  const service = new ResponsibilitiesService(prisma, membership);
+  const service = new ResponsibilitiesService(prisma, new HolderScope(membership, objects));
   return { controller: new ResponsibilitiesController(service), prisma, fetcher };
 };
 
@@ -103,7 +119,7 @@ describe('GET /responsibilities/user/:userId — whose holdings', () => {
     // Person 77 belongs to 9; acting in 9 with the right there shows them.
     await expect(
       controller.getUserResponsibilities(77, actor({ declared: 9, home: { wildcard: false, entityIds: [3, 9] }, permissionNames: ['view_responsibilities'] })),
-    ).resolves.toEqual([]);
+    ).resolves.toEqual([expect.objectContaining({ userId: 77, assetId: 10 })]);
   });
 
   it('HR unreachable is a 503, never an answer either way', async () => {
@@ -121,5 +137,49 @@ describe('GET /responsibilities/user/:userId — whose holdings', () => {
     await expect(custody.openInternal(41, 's3cret')).resolves.toEqual([{ id: 5 }]);
     await expect(custody.openInternal(41, 'wrong')).rejects.toBeInstanceOf(ForbiddenException);
     expect(openForUser).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('GET /responsibilities — the register, in an organisation', () => {
+  const env = { ...process.env };
+  beforeEach(() => {
+    process.env.INTERNAL_SECRET = 's3cret';
+    process.env.HR_SERVICE_URL = 'http://hr.test';
+  });
+  afterEach(() => {
+    process.env = { ...env };
+  });
+  const ids = (rows: any[]) => rows.map((r) => r.id).sort();
+
+  it("holds only the organisation's members and its objects (and objects filed under none)", async () => {
+    const { controller, fetcher } = build();
+    expect(ids(await controller.getAll(actor({ permissionNames: ['view_responsibilities'] })))).toEqual([5, 7, 9]);
+    // One HR call for all the people.
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][0]).toBe('http://hr.test/api/entities/3/members/internal?userIds=41,77');
+  });
+
+  it('is the whole register with no organisation sent (today\'s behaviour), without asking HR', async () => {
+    const { controller, fetcher } = build();
+    expect(ids(await controller.getAll(actor({ declared: null })))).toEqual([5, 6, 7, 8, 9]);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('is the whole register for a global super-admin, organisation or not', async () => {
+    const { controller, fetcher } = build();
+    expect(ids(await controller.getAll(actor({ isSuperAdmin: true, isGlobalSuperAdmin: true })))).toEqual([5, 6, 7, 8, 9]);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('a super-admin of one organisation is still held to it', async () => {
+    const { controller } = build();
+    expect(ids(await controller.getAll(actor({ isSuperAdmin: true, declared: 9, home: { wildcard: false, entityIds: [9] } })))).toEqual([6, 8, 9]);
+  });
+
+  it('HR unreachable is a 503, not an unfiltered register', async () => {
+    const { controller } = build('down');
+    await expect(controller.getAll(actor({ permissionNames: ['view_responsibilities'] }))).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
   });
 });

@@ -6,6 +6,7 @@ import { WarehouseNotificationsService } from '../common/notifications/notificat
 import { CreateAssetRequestDto, DirectIssueDto, IssueAssetRequestDto, ObjectIssueDto, ReassignCustodyDto, ReleaseCondition, ReturnCustodyDto } from './dto/asset-custody.dto';
 import { ObjectsService } from '../objects/objects.service';
 import { TxClient } from '../common/operations/operations.service';
+import { HolderScope } from '../common/holder-scope.service';
 
 /**
  * Asset custody (2026-09-23, owner's decisions in
@@ -26,6 +27,14 @@ export const PERM = {
 
 type Actor = { userId: number; isSuperAdmin: boolean; permissions: string[] };
 
+/**
+ * Where a custody read is asked from: the organisation acted in (X-Entity-ID,
+ * already checked against the person's own by AuthGuard; null when none was
+ * sent — the warehouse client sends none) and the caller's own token, for CRM.
+ */
+export type ReadScope = { declared: number | null; isGlobalSuperAdmin: boolean; authorization?: string };
+const NO_SCOPE: ReadScope = { declared: null, isGlobalSuperAdmin: false };
+
 const custodyInclude = {
   asset: { include: { item: true, warehouse: true } },
   request: true,
@@ -40,6 +49,7 @@ export class AssetCustodyService {
     private readonly usersPrisma: UsersPrismaService,
     private readonly notifications: WarehouseNotificationsService,
     private readonly objects: ObjectsService,
+    private readonly holders: HolderScope,
   ) {}
 
   private has(actor: Actor, ...perms: string[]) {
@@ -382,7 +392,47 @@ export class AssetCustodyService {
   }
 
   /** What an object holds, and held. Objects are visible to every signed-in CRM user, so is this. */
-  async forObject(objectId: number) {
+  /**
+   * May this person read what an object holds (org sweep follow-up,
+   * 2026-10-02)? Before, anybody signed in could, for any object.
+   *
+   *   - In an organisation, an object CRM files under another one is not
+   *     found. One filed under none, or that CRM no longer lists, is not
+   *     held to an organisation.
+   *   - Then: a custody right (view / issue / approve), or — in an
+   *     organisation — CRM letting the person open the object there (its own
+   *     GET, with their token): the object page's «Գույք» tab is shown to
+   *     whoever sees the object in CRM, warehouse right or not.
+   *   - Otherwise 403. With no organisation sent only a custody right admits
+   *     (CRM answers nothing without one); no screen reads it that way today.
+   */
+  async assertMayReadObject(objectId: number, actor: Actor, scope: ReadScope = NO_SCOPE): Promise<void> {
+    if (scope.declared !== null) {
+      const owner = await this.holders.objectEntity(objectId);
+      if (owner !== null && owner !== scope.declared) throw new NotFoundException('Օբյեկտը չի գտնվել');
+    }
+    if (this.has(actor, PERM.view, PERM.issue, PERM.approve)) return;
+    if (scope.declared !== null && (await this.crmMayOpenObject(objectId, scope))) return;
+    throw new ForbiddenException('Օբյեկտի գույքը դիտելու իրավունք չկա');
+  }
+
+  /** CRM's own answer: may this person open the object in this organisation? Unreachable is "no". */
+  private async crmMayOpenObject(objectId: number, scope: ReadScope): Promise<boolean> {
+    if (!scope.authorization || scope.declared === null) return false;
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    try {
+      const res = await fetch(`${crmUrl}/api/construction-objects/${objectId}`, {
+        headers: { Authorization: scope.authorization, 'x-entity-id': String(scope.declared) },
+        signal: AbortSignal.timeout(5000),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async forObject(objectId: number, actor?: Actor, scope: ReadScope = NO_SCOPE) {
+    if (actor) await this.assertMayReadObject(objectId, actor, scope);
     const rows = await this.prisma.assetCustody.findMany({
       where: { OR: [{ holderObjectId: objectId }, { originObjectId: objectId }] },
       include: custodyInclude,
@@ -504,11 +554,33 @@ export class AssetCustodyService {
     });
   }
 
-  async list(query: { holderUserId?: number; holderObjectId?: number; open?: boolean; assetId?: number }, actor: Actor) {
-    if (query.holderUserId !== actor.userId && !query.holderObjectId && !this.has(actor, PERM.view, PERM.issue, PERM.approve)) {
+  /**
+   * The register, or one holder's part of it. Org sweep follow-up
+   * (2026-10-02), in an organisation (X-Entity-ID) only:
+   *   - somebody else's (holderUserId) also needs HR to place them in it
+   *     (404 otherwise), as GET /responsibilities/user/:id;
+   *   - the whole register holds only that organisation's holders, unless the
+   *     caller is a global super-admin (as GET /responsibilities).
+   * With no organisation sent — the warehouse client's «Պատասխանատվություններ»
+   * page — both stay as they were. An object's part (holderObjectId) follows
+   * GET /custody/object/:objectId's rule; it used to need nothing at all.
+   */
+  async list(
+    query: { holderUserId?: number; holderObjectId?: number; open?: boolean; assetId?: number },
+    actor: Actor,
+    scope: ReadScope = NO_SCOPE,
+  ) {
+    if (query.holderObjectId) {
+      await this.assertMayReadObject(query.holderObjectId, actor, scope);
+    } else if (query.holderUserId !== actor.userId && !this.has(actor, PERM.view, PERM.issue, PERM.approve)) {
       throw new ForbiddenException('Գույքի պատասխանատվությունները դիտելու իրավունք չկա');
     }
-    return this.prisma.assetCustody.findMany({
+    if (query.holderUserId && query.holderUserId !== actor.userId && scope.declared !== null) {
+      if (!(await this.holders.isMember(scope.declared, query.holderUserId))) {
+        throw new NotFoundException('Աշխատակիցը չի գտնվել');
+      }
+    }
+    const rows = await this.prisma.assetCustody.findMany({
       where: {
         ...(query.holderUserId ? { holderUserId: query.holderUserId } : {}),
         ...(query.holderObjectId ? { holderObjectId: query.holderObjectId } : {}),
@@ -518,6 +590,11 @@ export class AssetCustodyService {
       include: custodyInclude,
       orderBy: { assignedAt: 'desc' },
     });
+    const wholeRegister = !query.holderUserId && !query.holderObjectId;
+    if (wholeRegister && scope.declared !== null && !scope.isGlobalSuperAdmin) {
+      return this.holders.filter(rows, scope.declared);
+    }
+    return rows;
   }
 
   /** What a person still holds — for HR before a deactivation. */
