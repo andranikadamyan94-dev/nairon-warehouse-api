@@ -16,6 +16,8 @@ import { ResponsibilitiesService } from './responsibilities.service';
 
 import { AssignResponsibilityDto } from './dto/assign-responsibility.dto';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
+import { Actor } from '../auth/decorators/actor.decorator';
+import { WarehouseActor } from '../auth/actor';
 
 @ApiTags('Responsibilities')
 @Controller('responsibilities')
@@ -63,11 +65,15 @@ export class ResponsibilitiesController {
     return this.responsibilitiesService.getAll();
   }
 
+  // Your own always; somebody else's per holdings-access.ts (a right in the
+  // organisation you act in, and the person a member of it).
   @Get('user/:userId')
-  getUserResponsibilities(
-    @Param('userId')
-    userId: string,
+  async getUserResponsibilities(
+    @Param('userId', ParseIntPipe)
+    userId: number,
+    @Actor() actor: WarehouseActor,
   ) {
-    return this.responsibilitiesService.getUserResponsibilities(+userId);
+    await this.responsibilitiesService.assertMayReadHoldings(actor, userId);
+    return this.responsibilitiesService.getUserResponsibilities(userId);
   }
 }

@@ -2767,15 +2767,24 @@ export class ReservationsService {
 
   // ─── getOne ──────────────────────────────────────────────────────────────────
 
+  /**
+   * GET /reservations/:id's read rule, by id: assertMayRead, with CRM asked
+   * whether the person is on the reservation's task. Missing and refused are
+   * the same 404. GET /allocations/:id applies it to the allocation's
+   * reservation.
+   */
+  async assertMayReadById(actor: WarehouseActor | undefined, id: number): Promise<void> {
+    if (!actor) return;
+    const row = await this.prisma.resourceReservation.findUnique({
+      where: { id },
+      select: { taskId: true },
+    });
+    if (!row) throw new NotFoundException('Ամրագրումը չի գտնվել');
+    await this.assertMayRead(actor, id, await this.isOnTask(row.taskId, actor.userId));
+  }
+
   async getOne(id: number, actor?: WarehouseActor) {
-    if (actor) {
-      const row = await this.prisma.resourceReservation.findUnique({
-        where: { id },
-        select: { taskId: true },
-      });
-      if (!row) throw new NotFoundException('Ամրագրումը չի գտնվել');
-      await this.assertMayRead(actor, id, await this.isOnTask(row.taskId, actor.userId));
-    }
+    await this.assertMayReadById(actor, id);
     const reservation = await this.prisma.resourceReservation.findUnique({
       where: { id },
       include: {

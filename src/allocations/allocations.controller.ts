@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Post, Query,
+import { Body, Controller, Delete, Get, Param, ParseIntPipe, Post, Query,
   UseGuards,
 } from '@nestjs/common';
 
@@ -10,6 +10,8 @@ import { AllocationsService } from './allocations.service';
 
 import { PaginationQueryDto } from '../common/dto/pagination-query.dto';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
+import { Actor } from '../auth/decorators/actor.decorator';
+import { WarehouseActor } from '../auth/actor';
 
 class ReturnItemDto {
   @IsInt()
@@ -46,10 +48,11 @@ export class AllocationsController {
   @Permissions('view_reservations', 'manage_reservations')
   @Get(':id')
   getOne(
-    @Param('id')
-    id: string,
+    @Param('id', ParseIntPipe)
+    id: number,
+    @Actor() actor: WarehouseActor,
   ) {
-    return this.allocationsService.getOne(+id);
+    return this.allocationsService.getOne(id, actor);
   }
 
   @UseGuards(PermissionGuard)

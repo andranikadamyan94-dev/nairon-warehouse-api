@@ -4,9 +4,10 @@ import { AllocationsController } from './allocations.controller';
 import { AllocationsService } from './allocations.service';
 
 import { PrismaModule } from 'prisma/prisma.module';
+import { ReservationsModule } from '../reservations/reservations.module';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, ReservationsModule],
 
   controllers: [AllocationsController],
 

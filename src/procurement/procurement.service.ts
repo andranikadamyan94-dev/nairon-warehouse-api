@@ -19,6 +19,7 @@ import { requireInternalSecret } from '../common/internal-headers';
 import { requireFinanceUrl } from '../common/finance-url';
 import { transferOperationKey } from '../common/operation-key';
 import { UsersPrismaService } from '../common/users-prisma.service';
+import { WarehouseActor } from '../auth/actor';
 
 /** 2026-09-25: an order needs this right, held in the order's organization, before finance hears of it. */
 export const APPROVE_ORDER_PERMISSION = 'approve_purchase_order';
@@ -113,6 +114,25 @@ export class ProcurementService {
       include,
     });
     if (!order) throw new NotFoundException('Գնման պատվերը չի գտնվել');
+    return order;
+  }
+
+  /**
+   * GET /procurement/:id for a signed-in person (org sweep 2026-10-02). It
+   * answered any order — supplier, lines, prices — to anybody with a
+   * procurement right in any organisation. Now an order filed under an
+   * organisation is shown only when that is the organisation the caller acts
+   * in (X-Entity-ID; their rights are resolved there by the route guard), and
+   * is otherwise not found — no organisation declared included. An order filed
+   * under none keeps the old behaviour, as GET /purchase-requisitions/:id does.
+   * The internal route (finance) still reads findOne.
+   */
+  async findOneFor(id: number, actor: Pick<WarehouseActor, 'declared'>) {
+    const order = await this.findOne(id);
+    const filedUnder = (order as { entityId?: number | null }).entityId ?? null;
+    if (filedUnder !== null && filedUnder !== actor.declared) {
+      throw new NotFoundException('Գնման պատվերը չի գտնվել');
+    }
     return order;
   }
 

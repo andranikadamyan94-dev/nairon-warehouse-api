@@ -24,6 +24,8 @@ import { Public } from '../auth/decorators/public.decorator';
 import { InternalGuard } from '../auth/guards/internal.guard';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { LoggedInUser } from '../auth/decorators/logged-in-user.decorator';
+import { Actor } from '../auth/decorators/actor.decorator';
+import { WarehouseActor } from '../auth/actor';
 import { ReceiveDeliveryLineDto } from './dto/receive-delivery.dto';
 import { AmendProcurementDto } from './dto/amend-procurement.dto';
 
@@ -72,9 +74,9 @@ export class ProcurementController {
     'approve_purchase_order',
   )
   @Get(':id')
-  @ApiOperation({ summary: 'Get procurement order by id' })
-  findOne(@Param('id', ParseIntPipe) id: number) {
-    return this.procurementService.findOne(id);
+  @ApiOperation({ summary: 'Get procurement order by id (one filed under the organisation you act in, or under none)' })
+  findOne(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    return this.procurementService.findOneFor(id, actor);
   }
 
   @UseGuards(PermissionGuard)

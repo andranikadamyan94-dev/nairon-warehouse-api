@@ -6,6 +6,8 @@ import { PrismaService } from 'prisma/prisma.service';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { ItemType } from '../common/enums/item-type.enum';
 import { ResourceReservationStatus } from '../common/enums/resource-reservation-status.enum';
+import { ReservationsService } from '../reservations/reservations.service';
+import { WarehouseActor } from '../auth/actor';
 
 @Injectable()
 export class AllocationsService {
@@ -39,6 +41,7 @@ export class AllocationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stockAlerts: StockAlertService,
+    private readonly reservations: ReservationsService,
   ) {}
 
   async getAll(query: any) {
@@ -64,14 +67,28 @@ export class AllocationsService {
     return { data, total, page, limit };
   }
 
-  async getOne(id: number) {
-    return this.prisma.reservationAllocation.findUnique({
+  /**
+   * One allocation, under its reservation's read rule (org sweep 2026-10-02):
+   * it carries the reservation, so it is shown to exactly those
+   * GET /reservations/:id would show that reservation to. Missing and refused
+   * are the same 404 — before, a missing id answered an empty 200.
+   */
+  async getOne(id: number, actor?: WarehouseActor) {
+    const allocation = await this.prisma.reservationAllocation.findUnique({
       where: { id },
       include: {
         asset: { include: { item: true } },
         reservation: { include: { item: true } },
       },
     });
+    if (!allocation) throw new NotFoundException('Հատկացումը չի գտնվել');
+    try {
+      await this.reservations.assertMayReadById(actor, allocation.reservationId);
+    } catch (e) {
+      if (e instanceof NotFoundException) throw new NotFoundException('Հատկացումը չի գտնվել');
+      throw e;
+    }
+    return allocation;
   }
 
   async returnAllocations(returns: { allocationId: number; quantity?: number }[]) {

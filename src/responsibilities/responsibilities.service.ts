@@ -1,11 +1,18 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 
 import { AssignResponsibilityDto } from './dto/assign-responsibility.dto';
 import { PrismaService } from 'prisma/prisma.service';
+import { WarehouseActor } from '../auth/actor';
+import { DelegatedWriteMembership } from '../auth/delegated-write.membership';
+import { decideHoldingsRead } from './holdings-access';
 
 @Injectable()
 export class ResponsibilitiesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    // HR's org tree over the internal channel (GET /entities/:id/members/internal).
+    private readonly membership: DelegatedWriteMembership,
+  ) {}
 
   async assign(dto: AssignResponsibilityDto) {
     const asset = await this.prisma.asset.findUnique({
@@ -81,6 +88,25 @@ export class ResponsibilitiesService {
       orderBy: { assignedAt: 'desc' },
     });
     return rows.map((c) => this.fromCustody(c));
+  }
+
+  /**
+   * holdings-access.ts. No organisation or no right is a 403 (nothing about
+   * the person is looked up); a colleague HR does not place in the
+   * organisation is a 404; HR unreachable is a 503, never assumed.
+   */
+  async assertMayReadHoldings(actor: WarehouseActor, userId: number): Promise<void> {
+    const verdict = decideHoldingsRead(actor, userId);
+    if (verdict.kind === 'refused') {
+      throw new ForbiddenException(
+        verdict.because === 'no-organisation'
+          ? 'Ընտրեք կազմակերպությունը'
+          : 'Ուրիշի պատասխանատվությունները տեսնելու թույլտվություն չունեք',
+      );
+    }
+    if (verdict.kind === 'if-member' && !(await this.membership.isMember(verdict.entityId, verdict.userId))) {
+      throw new NotFoundException('Աշխատակիցը չի գտնվել');
+    }
   }
 
   async getUserResponsibilities(userId: number) {
