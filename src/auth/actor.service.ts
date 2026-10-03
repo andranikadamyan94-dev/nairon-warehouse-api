@@ -98,9 +98,9 @@ export class WarehouseActorService {
       throw new ForbiddenException('Դուք նշված կազմակերպությունում դեր չունեք');
     }
 
-    const { isSuperAdmin, isGlobalSuperAdmin, permissionNames } =
+    const { isSuperAdmin, isGlobalSuperAdmin, permissionNames, readOnly } =
       await this.usersPrisma.getUserAccessInfo(userId, asked ?? 0);
 
-    return { userId, isSuperAdmin, isGlobalSuperAdmin, permissionNames, home, declared: asked };
+    return { userId, isSuperAdmin, isGlobalSuperAdmin, readOnly, permissionNames, home, declared: asked };
   }
 }

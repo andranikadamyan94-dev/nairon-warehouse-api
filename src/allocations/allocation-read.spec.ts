@@ -41,6 +41,7 @@ const build = () => {
 const actor = (over: Partial<WarehouseActor> = {}): WarehouseActor => ({
   userId: 50,
   isSuperAdmin: false,
+  readOnly: false,
   isGlobalSuperAdmin: false,
   permissionNames: [],
   home: { wildcard: false, entityIds: [9] },

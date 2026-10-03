@@ -9,6 +9,7 @@ import {
 const actor = (over: Partial<WarehouseActor> = {}): WarehouseActor => ({
   userId: 11,
   isSuperAdmin: false,
+  readOnly: false,
   isGlobalSuperAdmin: false,
   permissionNames: ['manage_items'],
   home: { wildcard: true, entityIds: [] },

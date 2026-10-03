@@ -29,6 +29,7 @@ const END = '2026-10-10T18:00:00.000Z';
 const actor = (over: Partial<WarehouseActor> = {}): WarehouseActor => ({
   userId: 39,
   isSuperAdmin: false,
+  readOnly: false,
   isGlobalSuperAdmin: false,
   permissionNames: [],
   home: { wildcard: false, entityIds: [3] },

@@ -68,8 +68,14 @@ export class AssetCustodyService {
    * object (only its responsible person asks for it), who the asset is for, the
    * item, the person. Shared with the assistant's preflight so the two cannot
    * drift.
+   *
+   * 2026-10-03: a request on somebody else's behalf is filed in an
+   * organisation (X-Entity-ID, `entityId`), and that person must belong to it
+   * — HR's org tree answers (HolderScope.isMember → members/internal), as for
+   * the custody reads. No organisation named, or a person HR does not place
+   * in it, is a 400; HR unreachable is a 503, never assumed either way.
    */
-  private async assertMayRequest(dto: CreateAssetRequestDto, actor: Actor) {
+  private async assertMayRequest(dto: CreateAssetRequestDto, actor: Actor, entityId: number | null) {
     const forObject = dto.forObjectId ? await this.objects.crmObject(dto.forObjectId) : null;
     if (dto.forObjectId && !forObject) throw new NotFoundException('Օբյեկտը չի գտնվել');
     // Owner 2026-09-29: only the object's responsible person asks on its behalf (fresh from CRM, not the cache).
@@ -88,6 +94,12 @@ export class AssetCustodyService {
     if (!item) throw new NotFoundException('Ռեսուրսը չի գտնվել');
     if (item.type !== 'ASSET') throw new BadRequestException('Հայտ կարելի է ներկայացնել միայն ակտիվների համար');
     if (forUserId && (await this.usersPrisma.isDeactivated(forUserId))) throw new BadRequestException('Աշխատակիցն ապաակտիվացված է');
+    if (forUserId && forUserId !== actor.userId) {
+      if (!entityId) throw new BadRequestException('Ուրիշի համար հայտ ներկայացնելիս ընտրեք կազմակերպությունը');
+      if (!(await this.holders.isMember(entityId, forUserId))) {
+        throw new BadRequestException('Աշխատակիցը չի պատկանում ընտրված կազմակերպությանը');
+      }
+    }
     return { forObject, forUserId, item };
   }
 
@@ -103,7 +115,7 @@ export class AssetCustodyService {
    * Idempotency-Key); announceRequest() is then called once, after the commit.
    */
   async fileRequest(dto: CreateAssetRequestDto, actor: Actor, entityId: number | null, tx?: TxClient) {
-    const { forObject, forUserId } = await this.assertMayRequest(dto, actor);
+    const { forObject, forUserId } = await this.assertMayRequest(dto, actor, entityId);
     return (tx ?? this.prisma).assetRequest.create({
       data: {
         kind: forObject ? 'OBJECT' : 'PERSONAL',
@@ -226,7 +238,7 @@ export class AssetCustodyService {
     if (![PERM.request, PERM.approve, PERM.issue].some((p) => actor.permissions.includes(p))) {
       throw new ForbiddenException('Դուք այս կազմակերպությունում գույքի հայտ ներկայացնելու թույլտվություն չունեք');
     }
-    const { item, forUserId } = await this.assertMayRequest(dto, actor);
+    const { item, forUserId } = await this.assertMayRequest(dto, actor, entityId);
     // The person's requests for the same item still open — a second one is often a mistake.
     const open = await this.prisma.assetRequest.count({
       where: { requestedBy: actor.userId, itemId: item.id, status: { in: ['PENDING', 'APPROVED'] } },

@@ -37,6 +37,7 @@ const T0 = new Date('2026-09-30T08:00:00Z');
 const actor = (userId: number, over: Partial<WarehouseActor> = {}): WarehouseActor => ({
   userId,
   isSuperAdmin: false,
+  readOnly: false,
   isGlobalSuperAdmin: false,
   permissionNames: ['view_warehouse'],
   home: { wildcard: false, entityIds: [ENTITY] },
