@@ -13,6 +13,7 @@ import { jwtConstants } from '../constants';
 import { UsersPrismaService } from '../../common/users-prisma.service';
 import { WarehouseActorService } from '../actor.service';
 import { NOT_FOR_DELEGATED_KEY, delegatedForbidden, delegatedRefusal } from '../delegated-token.policy';
+import { readOnlyForbidden, readOnlyRefused, routeKey } from '../read-only.policy';
 import {
   DELEGATED_WRITE_ROUTE_KEY,
   DelegatedWriteRouteMeta,
@@ -97,6 +98,13 @@ export class AuthGuard implements CanActivate {
     // A workspace claim the caller has no role in is refused in here.
     request['actor'] = await this.actors.resolve(request);
 
+    // Read-only super administrator (read-only.policy.ts): the actor sees
+    // whatever its flags open and is refused every writing method — here, in
+    // the one guard every route runs, before PermissionGuard's super-admin
+    // bypass. Exposed on the request the way PermissionGuard exposes isSuperAdmin.
+    request.readOnly = request['actor'].readOnly;
+    if (readOnlyRefused(request['actor'].readOnly, request.method, routeKey(context))) throw readOnlyForbidden();
+
     return true;
   }
 
@@ -131,6 +139,8 @@ export class AuthGuard implements CanActivate {
     // equal to it above); its permissions are that organisation's only.
     const actor = await this.actors.resolve(request);
     if (actor.declared !== grant.entityId) throw delegatedWriteForbidden('entity_mismatch');
+    // The person the token acts for cannot write; neither can the token.
+    if (actor.readOnly) throw readOnlyForbidden();
     if (missingWriteRight(grant.tool, actor.permissionNames)) throw delegatedWriteForbidden('missing_permission');
 
     if (grant.kind === 'mutation' && !this.ledger.spend(request['user'].jti, request['user'].exp)) {

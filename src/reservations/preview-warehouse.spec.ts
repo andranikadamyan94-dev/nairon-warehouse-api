@@ -19,6 +19,7 @@ const UNLINKED = 'Նախագիծը կապված չէ որևէ պահեստի հ�
 const actor: WarehouseActor = {
   userId: 39,
   isSuperAdmin: false,
+  readOnly: false,
   isGlobalSuperAdmin: false,
   permissionNames: [],
   home: { wildcard: false, entityIds: [3] },

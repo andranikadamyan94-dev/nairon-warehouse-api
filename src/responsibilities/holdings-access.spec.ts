@@ -19,6 +19,7 @@ const MEMBERS: Record<number, number[]> = { 3: [32, 41], 9: [77] };
 const actor = (over: Partial<WarehouseActor> = {}): WarehouseActor => ({
   userId: 32,
   isSuperAdmin: false,
+  readOnly: false,
   isGlobalSuperAdmin: false,
   permissionNames: [],
   home: { wildcard: false, entityIds: [3] },

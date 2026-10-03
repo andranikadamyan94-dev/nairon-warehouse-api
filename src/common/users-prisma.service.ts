@@ -117,7 +117,7 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
     userId: number,
     entityId = 0,
     targetDepartmentIds?: number[],
-  ): Promise<{ isSuperAdmin: boolean; isGlobalSuperAdmin: boolean; permissionNames: string[] }> {
+  ): Promise<{ isSuperAdmin: boolean; isGlobalSuperAdmin: boolean; permissionNames: string[]; readOnly: boolean }> {
     // Context-aware resolution. An assignment applies when its entity matches
     // the entity in play (assignment entityId 0 = every entity; request
     // entityId 0 = no entity context, everything counts) and, for
@@ -131,8 +131,14 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
     // scoping never applies to super-admin roles.
     const hasDeptCtx = targetDepartmentIds !== undefined;
     const deptIds = targetDepartmentIds && targetDepartmentIds.length ? targetDepartmentIds : [-1];
-    const rows = await this.$queryRaw<{ name: string | null; isSuperAdmin: boolean; urEntityId: number }[]>`
-      SELECT DISTINCT p.name AS "name", r."isSuperAdmin" AS "isSuperAdmin", ur."entityId" AS "urEntityId"
+    const rows = await this.$queryRaw<
+      { name: string | null; isSuperAdmin: boolean; urEntityId: number; readOnly: boolean }[]
+    >`
+      SELECT DISTINCT p.name AS "name", r."isSuperAdmin" AS "isSuperAdmin", ur."entityId" AS "urEntityId",
+        EXISTS (
+          SELECT 1 FROM "UserRole" ro JOIN "Role" rr ON rr.id = ro."roleId"
+          WHERE ro."userId" = ${userId} AND rr."readOnly" = true
+        ) AS "readOnly"
       FROM "UserRole" ur
       JOIN "Role" r ON r.id = ur."roleId"
       LEFT JOIN "RolePermission" rp ON rp."roleId" = r.id
@@ -154,7 +160,26 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
         rows.map((r) => r.name).filter((n): n is string => !!n && n !== '_entity_configured_'),
       ),
     ];
-    return { isSuperAdmin, isGlobalSuperAdmin, permissionNames };
+    // Read-only is NOT scoped to the entity in play: any read-only role, in any
+    // organisation, makes the account read-only everywhere it goes. The EXISTS
+    // above rides on every row; with no row in this context it is asked alone.
+    const readOnly = rows.length ? rows[0].readOnly === true : await this.hasReadOnlyRole(userId);
+    return { isSuperAdmin, isGlobalSuperAdmin, permissionNames, readOnly };
+  }
+
+  /**
+   * Whether this person holds ANY role flagged `Role.readOnly` (auth-api; the
+   * «Read-Only Super Admin» role), in any organisation. Deliberately
+   * independent of the selected entity — see auth/read-only.policy.ts.
+   */
+  async hasReadOnlyRole(userId: number): Promise<boolean> {
+    const rows = await this.$queryRaw<{ ok: number }[]>`
+      SELECT 1 AS ok
+      FROM "UserRole" ur JOIN "Role" r ON r.id = ur."roleId"
+      WHERE ur."userId" = ${userId} AND r."readOnly" = true
+      LIMIT 1
+    `;
+    return rows.length > 0;
   }
 
   /**

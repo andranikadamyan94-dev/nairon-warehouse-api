@@ -43,6 +43,7 @@ import { ResourceWorkspaceService } from './resource-workspace.service';
 const actor = (over: Partial<WarehouseActor> = {}): WarehouseActor => ({
   userId: 11,
   isSuperAdmin: false,
+  readOnly: false,
   isGlobalSuperAdmin: false,
   permissionNames: [],
   home: { wildcard: false, entityIds: [] },
@@ -123,7 +124,7 @@ function catalogue() {
   return {
     seen,
     wheres: (table: string, op: string) => seen.filter((s) => s.table === table && s.op === op).map((s) => s.args.where),
-    items: new ItemsService(prisma, categories, { check: () => undefined } as any, workspaces),
+    items: new ItemsService(prisma, categories, { check: () => undefined } as any, workspaces, {} as any),
     categories,
     assets: new AssetsService(prisma, workspaces, { getUsersByIds: async () => [] } as any),
     maintenance: new MaintenanceService(prisma, workspaces),
@@ -152,7 +153,9 @@ describe('A · an ordinary authenticated user reads the shared catalogue, whatev
     }
     const wheres = c.wheres('item', 'findMany');
     expect(wheres).toHaveLength(EVERYONE.length);
-    for (const where of wheres) expect(where).toEqual({});
+    // Catalog (2026-10-01): variants sit under their parent, so a bare list
+    // hides child items — for everybody alike; nothing about who is asking.
+    for (const where of wheres) expect(where).toEqual({ parentItemId: null });
   });
 
   it('opens one item filed under company 1 for everybody', async () => {

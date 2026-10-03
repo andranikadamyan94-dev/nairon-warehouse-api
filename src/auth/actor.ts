@@ -30,6 +30,13 @@ export type WarehouseActor = {
   isGlobalSuperAdmin: boolean;
 
   /**
+   * Holds a role flagged readOnly, in any organisation: sees whatever the two
+   * flags above open and is refused every writing request — the global
+   * AuthGuard, with auth/read-only.policy.ts.
+   */
+  readOnly: boolean;
+
+  /**
    * Effective permissions, resolved IN `declared` when one was verified and
    * across every assignment when none was. Never the caller's claim.
    */
