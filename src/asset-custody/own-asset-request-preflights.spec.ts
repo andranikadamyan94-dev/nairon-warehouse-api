@@ -113,7 +113,9 @@ function world() {
       return { result, replayed: false };
     }),
   };
-  const svc = new AssetCustodyService(prisma, usersPrisma, notifications, objects, {} as any);
+  // HR's org tree: everybody here belongs to ENTITY (membership itself: asset-request-for-someone.spec.ts).
+  const holders: any = { isMember: jest.fn(async (entityId: number) => entityId === ENTITY) };
+  const svc = new AssetCustodyService(prisma, usersPrisma, notifications, objects, holders);
   const controller = new AssetCustodyController(svc, usersPrisma, operations);
   return { controller, requests, writes, sent, operations };
 }
