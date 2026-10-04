@@ -24,8 +24,6 @@ import { Public } from '../auth/decorators/public.decorator';
 import { InternalGuard } from '../auth/guards/internal.guard';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { LoggedInUser } from '../auth/decorators/logged-in-user.decorator';
-import { Actor } from '../auth/decorators/actor.decorator';
-import { WarehouseActor } from '../auth/actor';
 import { ReceiveDeliveryLineDto } from './dto/receive-delivery.dto';
 import { AmendProcurementDto } from './dto/amend-procurement.dto';
 
@@ -34,14 +32,11 @@ import { AmendProcurementDto } from './dto/amend-procurement.dto';
 export class ProcurementController {
   constructor(private readonly procurementService: ProcurementService) {}
 
-  /**
-   * Every procurement-side change by id asks this first: in an organisation
-   * (X-Entity-ID), an order filed under another one is not found. With none
-   * sent (the warehouse client) nothing changes. See assertInActiveOrg.
-   */
-  private inActiveOrg(id: number, actor: WarehouseActor | undefined): Promise<void> {
-    return this.procurementService.assertInActiveOrg(id, actor?.declared ?? null);
-  }
+  // The warehouse is global (owner decision 2026-10-05): no route here holds
+  // an order to the organisation acted in (X-Entity-ID). Who may read or
+  // change an order is the route guard's and the service's business alone —
+  // a super-admin corrects or re-files a settled order from any organisation,
+  // and approvers act for every organisation (29.09).
 
   @UseGuards(PermissionGuard)
   // receive_procurement_alerts: the people the alerts are sent to must be able
@@ -55,8 +50,8 @@ export class ProcurementController {
   )
   @Get()
   @ApiOperation({ summary: 'Get all procurement orders' })
-  findAll(@Query() query: any, @Actor() actor: WarehouseActor) {
-    return this.procurementService.findAll(query, actor?.declared ?? null);
+  findAll(@Query() query: any) {
+    return this.procurementService.findAll(query);
   }
 
   // Receiving belongs to the warehouse side of the 2026-09-01 split: orders
@@ -83,9 +78,9 @@ export class ProcurementController {
     'approve_purchase_order',
   )
   @Get(':id')
-  @ApiOperation({ summary: 'Get procurement order by id (one filed under the organisation you act in, or under none)' })
-  findOne(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
-    return this.procurementService.findOneFor(id, actor);
+  @ApiOperation({ summary: 'Get procurement order by id' })
+  findOne(@Param('id', ParseIntPipe) id: number) {
+    return this.procurementService.findOne(id);
   }
 
   @UseGuards(PermissionGuard)
@@ -120,13 +115,11 @@ export class ProcurementController {
   @ApiOperation({
     summary: 'Re-file an order under another organization (super-admin)',
   })
-  async setEntity(
+  setEntity(
     @Param('id', ParseIntPipe) id: number,
     @Body('entityId') entityId: number | null,
     @Req() req: any,
-    @Actor() actor: WarehouseActor,
   ) {
-    await this.inActiveOrg(id, actor);
     return this.procurementService.setEntity(
       id,
       entityId ?? null,
@@ -141,14 +134,12 @@ export class ProcurementController {
     summary:
       'Update procurement order. A settled order (received / closed short) yields only to a super-admin, and then only its supplier, note and line prices.',
   })
-  async update(
+  update(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: UpdateProcurementDto,
     @Req() req: any,
-    @Actor() actor: WarehouseActor,
     @LoggedInUser('id') userId?: number,
   ) {
-    await this.inActiveOrg(id, actor);
     return this.procurementService.update(id, dto, {
       isSuperAdmin: !!req.isSuperAdmin,
       userId,
@@ -162,8 +153,7 @@ export class ProcurementController {
     summary:
       'Confirm the purchase — order placed with the supplier, hands off to warehouse receiving',
   })
-  async markOrdered(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
-    await this.inActiveOrg(id, actor);
+  markOrdered(@Param('id', ParseIntPipe) id: number) {
     return this.procurementService.confirmOrdered(id);
   }
 
@@ -228,13 +218,11 @@ export class ProcurementController {
     summary:
       'Cancel procurement order — creator (or super-admin) only; voids the finance transfers and, mid-delivery, settles the remainder short instead',
   })
-  async cancel(
+  cancel(
     @Param('id', ParseIntPipe) id: number,
     @Body() body: { reason?: string },
     @Req() req: any,
-    @Actor() actor: WarehouseActor,
   ) {
-    await this.inActiveOrg(id, actor);
     return this.procurementService.cancel(
       id,
       req.user?.id,
@@ -247,8 +235,7 @@ export class ProcurementController {
   @Permissions('manage_procurement')
   @Post(':id/finalize')
   @ApiOperation({ summary: 'Send a draft order for approval (approve_purchase_order) — finance hears of it once approved' })
-  async finalize(@Param('id', ParseIntPipe) id: number, @Req() req: any, @Actor() actor: WarehouseActor) {
-    await this.inActiveOrg(id, actor);
+  finalize(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     return this.procurementService.finalize(id, req.user?.id);
   }
 
@@ -273,8 +260,7 @@ export class ProcurementController {
   @Permissions('manage_procurement')
   @Post(':id/resubmit')
   @ApiOperation({ summary: 'Resubmit a finance-rejected order back to DRAFT' })
-  async resubmit(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
-    await this.inActiveOrg(id, actor);
+  resubmit(@Param('id', ParseIntPipe) id: number) {
     return this.procurementService.resubmit(id);
   }
 
@@ -316,13 +302,11 @@ export class ProcurementController {
     summary:
       "Correct the prices of a received order to the supplier's invoice (2026-09-22). The difference goes to finance as an adjustment or a refund through the normal approval.",
   })
-  async amend(
+  amend(
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: AmendProcurementDto,
-    @Actor() actor: WarehouseActor,
     @LoggedInUser('id') userId?: number,
   ) {
-    await this.inActiveOrg(id, actor);
     return this.procurementService.amend(id, dto, userId);
   }
 
@@ -330,8 +314,7 @@ export class ProcurementController {
   @Permissions('manage_procurement')
   @Delete(':id')
   @ApiOperation({ summary: 'Delete procurement order' })
-  async remove(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
-    await this.inActiveOrg(id, actor);
+  remove(@Param('id', ParseIntPipe) id: number) {
     return this.procurementService.remove(id);
   }
 }

@@ -61,19 +61,19 @@ export class ResponsibilitiesController {
   @UseGuards(PermissionGuard)
   @Permissions('view_responsibilities', 'manage_responsibilities')
   @Get()
-  getAll(@Actor() actor: WarehouseActor) {
-    return this.responsibilitiesService.getAll(actor);
+  getAll() {
+    return this.responsibilitiesService.getAll();
   }
 
-  // Your own always; somebody else's per holdings-access.ts (a right in the
-  // organisation you act in, and the person a member of it).
+  // Your own always; somebody else's per holdings-access.ts (a responsibility
+  // or custody right — the warehouse is global, no organisation is asked).
   @Get('user/:userId')
   async getUserResponsibilities(
     @Param('userId', ParseIntPipe)
     userId: number,
     @Actor() actor: WarehouseActor,
   ) {
-    await this.responsibilitiesService.assertMayReadHoldings(actor, userId);
+    this.responsibilitiesService.assertMayReadHoldings(actor, userId);
     return this.responsibilitiesService.getUserResponsibilities(userId);
   }
 }

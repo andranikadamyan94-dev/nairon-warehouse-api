@@ -6,7 +6,6 @@ import { WarehouseNotificationsService } from '../common/notifications/notificat
 import { CreateAssetRequestDto, DirectIssueDto, IssueAssetRequestDto, ObjectIssueDto, ReassignCustodyDto, ReleaseCondition, ReturnCustodyDto } from './dto/asset-custody.dto';
 import { ObjectsService } from '../objects/objects.service';
 import { TxClient } from '../common/operations/operations.service';
-import { HolderScope } from '../common/holder-scope.service';
 
 /**
  * Asset custody (2026-09-23, owner's decisions in
@@ -31,9 +30,11 @@ type Actor = { userId: number; isSuperAdmin: boolean; permissions: string[] };
  * Where a custody read is asked from: the organisation acted in (X-Entity-ID,
  * already checked against the person's own by AuthGuard; null when none was
  * sent — the warehouse client sends none) and the caller's own token, for CRM.
+ * The warehouse is global (owner decision 2026-10-05): the scope never filters
+ * custody rows; it only lets CRM answer whether a person may open an object.
  */
-export type ReadScope = { declared: number | null; isGlobalSuperAdmin: boolean; authorization?: string };
-const NO_SCOPE: ReadScope = { declared: null, isGlobalSuperAdmin: false };
+export type ReadScope = { declared: number | null; authorization?: string };
+const NO_SCOPE: ReadScope = { declared: null };
 
 const custodyInclude = {
   asset: { include: { item: true, warehouse: true } },
@@ -49,7 +50,6 @@ export class AssetCustodyService {
     private readonly usersPrisma: UsersPrismaService,
     private readonly notifications: WarehouseNotificationsService,
     private readonly objects: ObjectsService,
-    private readonly holders: HolderScope,
   ) {}
 
   private has(actor: Actor, ...perms: string[]) {
@@ -391,26 +391,20 @@ export class AssetCustodyService {
     return row;
   }
 
-  /** What an object holds, and held. Objects are visible to every signed-in CRM user, so is this. */
   /**
-   * May this person read what an object holds (org sweep follow-up,
-   * 2026-10-02)? Before, anybody signed in could, for any object.
+   * May this person read what an object holds? The warehouse is global (owner
+   * decision 2026-10-05): an object is never held to the organisation acted
+   * in, whichever organisation CRM files it under, and CRM's catalogue is not
+   * consulted for that.
    *
-   *   - In an organisation, an object CRM files under another one is not
-   *     found. One filed under none, or that CRM no longer lists, is not
-   *     held to an organisation.
-   *   - Then: a custody right (view / issue / approve), or — in an
-   *     organisation — CRM letting the person open the object there (its own
-   *     GET, with their token): the object page's «Գույք» tab is shown to
-   *     whoever sees the object in CRM, warehouse right or not.
+   *   - A custody right (view / issue / approve) admits, for any object.
+   *   - Otherwise, in an organisation, CRM letting the person open the object
+   *     there (its own GET, with their token): the object page's «Գույք» tab
+   *     is shown to whoever sees the object in CRM, warehouse right or not.
    *   - Otherwise 403. With no organisation sent only a custody right admits
-   *     (CRM answers nothing without one); no screen reads it that way today.
+   *     (CRM answers nothing without one).
    */
   async assertMayReadObject(objectId: number, actor: Actor, scope: ReadScope = NO_SCOPE): Promise<void> {
-    if (scope.declared !== null) {
-      const owner = await this.holders.objectEntity(objectId);
-      if (owner !== null && owner !== scope.declared) throw new NotFoundException('Օբյեկտը չի գտնվել');
-    }
     if (this.has(actor, PERM.view, PERM.issue, PERM.approve)) return;
     if (scope.declared !== null && (await this.crmMayOpenObject(objectId, scope))) return;
     throw new ForbiddenException('Օբյեկտի գույքը դիտելու իրավունք չկա');
@@ -555,15 +549,12 @@ export class AssetCustodyService {
   }
 
   /**
-   * The register, or one holder's part of it. Org sweep follow-up
-   * (2026-10-02), in an organisation (X-Entity-ID) only:
-   *   - somebody else's (holderUserId) also needs HR to place them in it
-   *     (404 otherwise), as GET /responsibilities/user/:id;
-   *   - the whole register holds only that organisation's holders, unless the
-   *     caller is a global super-admin (as GET /responsibilities).
-   * With no organisation sent — the warehouse client's «Պատասխանատվություններ»
-   * page — both stay as they were. An object's part (holderObjectId) follows
-   * GET /custody/object/:objectId's rule; it used to need nothing at all.
+   * The register, or one holder's part of it. The warehouse is global (owner
+   * decision 2026-10-05): the register is never narrowed to the organisation
+   * acted in, and a holder is never looked up in HR's org tree — every
+   * organisation's holders, as before 2026-10-02. Somebody else's part, and
+   * the whole register, need a custody right; an object's part
+   * (holderObjectId) follows GET /custody/object/:objectId's rule.
    */
   async list(
     query: { holderUserId?: number; holderObjectId?: number; open?: boolean; assetId?: number },
@@ -575,12 +566,7 @@ export class AssetCustodyService {
     } else if (query.holderUserId !== actor.userId && !this.has(actor, PERM.view, PERM.issue, PERM.approve)) {
       throw new ForbiddenException('Գույքի պատասխանատվությունները դիտելու իրավունք չկա');
     }
-    if (query.holderUserId && query.holderUserId !== actor.userId && scope.declared !== null) {
-      if (!(await this.holders.isMember(scope.declared, query.holderUserId))) {
-        throw new NotFoundException('Աշխատակիցը չի գտնվել');
-      }
-    }
-    const rows = await this.prisma.assetCustody.findMany({
+    return this.prisma.assetCustody.findMany({
       where: {
         ...(query.holderUserId ? { holderUserId: query.holderUserId } : {}),
         ...(query.holderObjectId ? { holderObjectId: query.holderObjectId } : {}),
@@ -590,11 +576,6 @@ export class AssetCustodyService {
       include: custodyInclude,
       orderBy: { assignedAt: 'desc' },
     });
-    const wholeRegister = !query.holderUserId && !query.holderObjectId;
-    if (wholeRegister && scope.declared !== null && !scope.isGlobalSuperAdmin) {
-      return this.holders.filter(rows, scope.declared);
-    }
-    return rows;
   }
 
   /** What a person still holds — for HR before a deactivation. */

@@ -1,21 +1,23 @@
-import { ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { ForbiddenException } from '@nestjs/common';
 
 import { ResponsibilitiesController } from './responsibilities.controller';
 import { ResponsibilitiesService } from './responsibilities.service';
-import { DelegatedWriteMembership } from '../auth/delegated-write.membership';
-import { HolderScope } from '../common/holder-scope.service';
+import { decideHoldingsRead } from './holdings-access';
 import { WarehouseActor } from '../auth/actor';
 import { AssetCustodyController } from '../asset-custody/asset-custody.controller';
 import { IS_PUBLIC_KEY } from '../auth/decorators/public.decorator';
 
 /**
- * GET /responsibilities/user/:userId (org sweep 2026-10-02, hole 5). It had no
- * check at all: anyone signed in read anyone's custody — assets and serials.
+ * GET /responsibilities/user/:userId and GET /responsibilities. The warehouse
+ * is global (owner decision 2026-10-05): your own holdings are always yours
+ * to read, somebody else's need a responsibility / custody right, and that is
+ * all — no organisation has to be declared, the person is not looked up in
+ * HR's org tree, and the register is never narrowed to an organisation.
  *
- * Organisation 3's members, per HR: 32 and 41. Person 77 is in organisation 9.
+ * Person 41 belongs to organisation 3 and 77 to 9 (per HR, which is not
+ * asked). Objects 600 (filed under 3), 700 (under 9) and 800 (under none)
+ * hold assets too.
  */
-const MEMBERS: Record<number, number[]> = { 3: [32, 41], 9: [77] };
-
 const actor = (over: Partial<WarehouseActor> = {}): WarehouseActor => ({
   userId: 32,
   isSuperAdmin: false,
@@ -27,9 +29,7 @@ const actor = (over: Partial<WarehouseActor> = {}): WarehouseActor => ({
   ...over,
 });
 
-const build = (hr: 'up' | 'down' = 'up') => {
-  // Person 41 (organisation 3), person 77 (organisation 9), object 600 (filed
-  // under 3), object 700 (under 9), object 800 (under none).
+const build = () => {
   const rows = [
     { id: 5, assetId: 9, holderUserId: 41, holderObjectId: null, assignedAt: new Date(0), asset: { serialNumber: 'SN-1' } },
     { id: 6, assetId: 10, holderUserId: 77, holderObjectId: null, assignedAt: new Date(0), asset: { serialNumber: 'SN-2' } },
@@ -44,20 +44,12 @@ const build = (hr: 'up' | 'down' = 'up') => {
       ),
     },
   };
-  const OBJECTS: Record<number, number | null> = { 600: 3, 700: 9, 800: null };
-  const objects: any = { crmObject: jest.fn(async (id: number) => (id in OBJECTS ? { id, entityId: OBJECTS[id] } : undefined)) };
-  const membership = new DelegatedWriteMembership();
-  const fetcher = jest.fn(async (url: string, init: { headers: Record<string, string> }) => {
-    if (hr === 'down') throw new Error('ECONNREFUSED');
-    const m = /\/api\/entities\/(\d+)\/members\/internal\?userIds=([\d,]+)$/.exec(url);
-    expect(init.headers['x-internal-secret']).toBe('s3cret');
-    const entityId = Number(m![1]);
-    const asked = m![2].split(',').map(Number);
-    return { ok: true, status: 200, json: async () => asked.filter((u) => (MEMBERS[entityId] ?? []).includes(u)) };
+  const service = new ResponsibilitiesService(prisma);
+  // Any HR or CRM call from these reads is a regression — and would be a 503 with nothing to answer it.
+  const net = jest.spyOn(global, 'fetch').mockImplementation(async (url: any) => {
+    throw new Error(`unexpected network call: ${url}`);
   });
-  membership.fetcher = fetcher as never;
-  const service = new ResponsibilitiesService(prisma, new HolderScope(membership, objects));
-  return { controller: new ResponsibilitiesController(service), prisma, fetcher };
+  return { controller: new ResponsibilitiesController(service), prisma, net };
 };
 
 describe('GET /responsibilities/user/:userId — whose holdings', () => {
@@ -67,68 +59,58 @@ describe('GET /responsibilities/user/:userId — whose holdings', () => {
     process.env.HR_SERVICE_URL = 'http://hr.test';
   });
   afterEach(() => {
+    jest.restoreAllMocks();
     process.env = { ...env };
   });
 
-  it('shows your own, with no right, no organisation, and without asking HR', async () => {
-    const { controller, fetcher } = build();
+  it('shows your own, with no right, no organisation, and without asking anybody', async () => {
+    const { controller, net } = build();
     await expect(controller.getUserResponsibilities(41, actor({ userId: 41, declared: null }))).resolves.toHaveLength(1);
-    expect(fetcher).not.toHaveBeenCalled();
+    expect(net).not.toHaveBeenCalled();
   });
 
   it("refuses somebody else's to a person with no responsibility right — nothing read", async () => {
-    const { controller, prisma, fetcher } = build();
+    const { controller, prisma, net } = build();
     await expect(controller.getUserResponsibilities(41, actor({ permissionNames: ['view_items'] }))).rejects.toBeInstanceOf(
       ForbiddenException,
     );
-    expect(fetcher).not.toHaveBeenCalled();
+    expect(net).not.toHaveBeenCalled();
     expect(prisma.assetCustody.findMany).not.toHaveBeenCalled();
   });
 
-  it("refuses somebody else's when no organisation is declared, right or not", async () => {
-    const { controller, prisma } = build();
+  it("shows somebody else's to a right holder with no organisation declared (no «Ընտրեք կազմակերպությունը» any more)", async () => {
+    const { controller } = build();
     await expect(
       controller.getUserResponsibilities(41, actor({ permissionNames: ['view_responsibilities'], declared: null })),
-    ).rejects.toBeInstanceOf(ForbiddenException);
+    ).resolves.toEqual([expect.objectContaining({ userId: 41, assetId: 9 })]);
     await expect(
       controller.getUserResponsibilities(41, actor({ isSuperAdmin: true, isGlobalSuperAdmin: true, declared: null })),
-    ).rejects.toBeInstanceOf(ForbiddenException);
-    expect(prisma.assetCustody.findMany).not.toHaveBeenCalled();
+    ).resolves.toHaveLength(1);
   });
 
   it.each(['view_responsibilities', 'manage_responsibilities', 'view_asset_custody', 'issue_assets', 'approve_asset_requests', 'manage_warehouse'])(
-    'shows a member of the organisation to a holder of %s there',
+    'shows a colleague to a holder of %s, without asking HR',
     async (right) => {
-      const { controller, fetcher } = build();
+      const { controller, net } = build();
       const rows = await controller.getUserResponsibilities(41, actor({ permissionNames: [right] }));
       expect(rows).toEqual([expect.objectContaining({ userId: 41, assetId: 9 })]);
-      expect(fetcher).toHaveBeenCalledWith('http://hr.test/api/entities/3/members/internal?userIds=41', expect.anything());
+      expect(net).not.toHaveBeenCalled();
     },
   );
 
-  it("is not found for somebody outside the organisation — another organisation's person, right or super admin", async () => {
-    const { controller, prisma } = build();
+  it("shows another organisation's person to a right holder acting elsewhere — right or super admin, HR not asked", async () => {
+    const { controller, net } = build();
     await expect(
       controller.getUserResponsibilities(77, actor({ permissionNames: ['manage_responsibilities'] })),
-    ).rejects.toBeInstanceOf(NotFoundException);
-    await expect(controller.getUserResponsibilities(77, actor({ isSuperAdmin: true }))).rejects.toBeInstanceOf(NotFoundException);
-    expect(prisma.assetCustody.findMany).not.toHaveBeenCalled();
-  });
-
-  it('asks HR about the organisation declared, not one the right was found in elsewhere', async () => {
-    const { controller } = build();
-    // Person 77 belongs to 9; acting in 9 with the right there shows them.
-    await expect(
-      controller.getUserResponsibilities(77, actor({ declared: 9, home: { wildcard: false, entityIds: [3, 9] }, permissionNames: ['view_responsibilities'] })),
     ).resolves.toEqual([expect.objectContaining({ userId: 77, assetId: 10 })]);
+    await expect(controller.getUserResponsibilities(77, actor({ isSuperAdmin: true }))).resolves.toHaveLength(1);
+    expect(net).not.toHaveBeenCalled();
   });
 
-  it('HR unreachable is a 503, never an answer either way', async () => {
-    const { controller, prisma } = build('down');
-    await expect(
-      controller.getUserResponsibilities(41, actor({ permissionNames: ['view_responsibilities'] })),
-    ).rejects.toBeInstanceOf(ServiceUnavailableException);
-    expect(prisma.assetCustody.findMany).not.toHaveBeenCalled();
+  it('the rule knows no organisation: own, allowed, or refused for want of a right', () => {
+    expect(decideHoldingsRead(actor({ userId: 41, declared: null }), 41)).toEqual({ kind: 'own' });
+    expect(decideHoldingsRead(actor({ permissionNames: ['view_responsibilities'], declared: null }), 77)).toEqual({ kind: 'allowed' });
+    expect(decideHoldingsRead(actor({ permissionNames: ['view_items'] }), 77)).toEqual({ kind: 'refused', because: 'no-right' });
   });
 
   it("leaves HR's deactivation check alone: the custody internal route is public behind the internal secret", async () => {
@@ -141,46 +123,21 @@ describe('GET /responsibilities/user/:userId — whose holdings', () => {
   });
 });
 
-describe('GET /responsibilities — the register, in an organisation', () => {
-  const env = { ...process.env };
-  beforeEach(() => {
-    process.env.INTERNAL_SECRET = 's3cret';
-    process.env.HR_SERVICE_URL = 'http://hr.test';
-  });
-  afterEach(() => {
-    process.env = { ...env };
-  });
+describe('GET /responsibilities — the register', () => {
+  afterEach(() => jest.restoreAllMocks());
   const ids = (rows: any[]) => rows.map((r) => r.id).sort();
 
-  it("holds only the organisation's members and its objects (and objects filed under none)", async () => {
-    const { controller, fetcher } = build();
-    expect(ids(await controller.getAll(actor({ permissionNames: ['view_responsibilities'] })))).toEqual([5, 7, 9]);
-    // One HR call for all the people.
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(fetcher.mock.calls[0][0]).toBe('http://hr.test/api/entities/3/members/internal?userIds=41,77');
+  it("holds every organisation's holders — people and objects — whichever organisation is acted in", async () => {
+    const { controller, net } = build();
+    // The handler takes nothing: the organisation acted in cannot narrow it.
+    expect(ResponsibilitiesController.prototype.getAll.length).toBe(0);
+    expect(ids(await controller.getAll())).toEqual([5, 6, 7, 8, 9]);
+    expect(net).not.toHaveBeenCalled();
   });
 
-  it('is the whole register with no organisation sent (today\'s behaviour), without asking HR', async () => {
-    const { controller, fetcher } = build();
-    expect(ids(await controller.getAll(actor({ declared: null })))).toEqual([5, 6, 7, 8, 9]);
-    expect(fetcher).not.toHaveBeenCalled();
-  });
-
-  it('is the whole register for a global super-admin, organisation or not', async () => {
-    const { controller, fetcher } = build();
-    expect(ids(await controller.getAll(actor({ isSuperAdmin: true, isGlobalSuperAdmin: true })))).toEqual([5, 6, 7, 8, 9]);
-    expect(fetcher).not.toHaveBeenCalled();
-  });
-
-  it('a super-admin of one organisation is still held to it', async () => {
-    const { controller } = build();
-    expect(ids(await controller.getAll(actor({ isSuperAdmin: true, declared: 9, home: { wildcard: false, entityIds: [9] } })))).toEqual([6, 8, 9]);
-  });
-
-  it('HR unreachable is a 503, not an unfiltered register', async () => {
-    const { controller } = build('down');
-    await expect(controller.getAll(actor({ permissionNames: ['view_responsibilities'] }))).rejects.toBeInstanceOf(
-      ServiceUnavailableException,
-    );
+  it('is never a 503: HR and CRM are not consulted, so their being down cannot matter', async () => {
+    const { controller, net } = build();
+    await expect(controller.getAll()).resolves.toHaveLength(5);
+    expect(net).not.toHaveBeenCalled();
   });
 });

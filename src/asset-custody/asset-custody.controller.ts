@@ -33,7 +33,6 @@ export class AssetCustodyController {
     const auth = req.headers?.authorization;
     return {
       declared: req.actor?.declared ?? null,
-      isGlobalSuperAdmin: !!req.actor?.isGlobalSuperAdmin,
       authorization: typeof auth === 'string' ? auth : undefined,
     };
   }

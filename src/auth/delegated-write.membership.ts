@@ -32,8 +32,7 @@ export class DelegatedWriteMembership {
 
   /**
    * Which of these people belong to the organisation — one HR call per 500
-   * (HR's cap). Also used for the warehouse's people-scoped reads (the
-   * responsibilities register, custody by holder), where the same 503 holds.
+   * (HR's cap).
    */
   async membersAmong(entityId: number, userIds: number[]): Promise<Set<number>> {
     const wanted = [...new Set(userIds.filter((u) => Number.isSafeInteger(u) && u > 0))];

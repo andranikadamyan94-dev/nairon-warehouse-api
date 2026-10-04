@@ -113,7 +113,7 @@ function world() {
       return { result, replayed: false };
     }),
   };
-  const svc = new AssetCustodyService(prisma, usersPrisma, notifications, objects, {} as any);
+  const svc = new AssetCustodyService(prisma, usersPrisma, notifications, objects);
   const controller = new AssetCustodyController(svc, usersPrisma, operations);
   return { controller, requests, writes, sent, operations };
 }
