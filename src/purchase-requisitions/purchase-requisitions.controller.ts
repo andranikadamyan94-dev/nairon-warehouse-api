@@ -266,6 +266,16 @@ export class PurchaseRequisitionsController {
     return this.service.addAttachment(id, req.user?.id, file, ctxOf(req));
   }
 
+  @Patch(':id/attachments/:attachmentId')
+  renameAttachment(
+    @Param('id', ParseIntPipe) id: number,
+    @Param('attachmentId', ParseIntPipe) attachmentId: number,
+    @Body() body: { name?: unknown },
+    @Req() req: any,
+  ) {
+    return this.service.renameAttachment(id, attachmentId, req.user?.id, body?.name);
+  }
+
   @Delete(':id/attachments/:attachmentId')
   deleteAttachment(
     @Param('id', ParseIntPipe) id: number,

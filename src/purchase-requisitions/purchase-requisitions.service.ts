@@ -11,6 +11,7 @@ import { PrismaService } from 'prisma/prisma.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
 import { FileService } from '../common/file.service';
 import { TxClient } from '../common/operations/operations.service';
+import { renamedFileName } from '../common/file-rename';
 
 type Ctx = { isSuperAdmin?: boolean; permissionNames?: string[] };
 /** The caller as CRM knows them: their own token and the organization they are acting in. */
@@ -837,6 +838,17 @@ export class PurchaseRequisitionsService {
       },
     });
     return this.findOne(id, userId, ctx);
+  }
+
+  /** Display name only; like deleting, it is the uploader's right. */
+  async renameAttachment(id: number, attachmentId: number, userId: number, name: unknown) {
+    const att = await this.prisma.purchaseRequisitionAttachment.findFirst({ where: { id: attachmentId, requisitionId: id } });
+    if (!att) throw new NotFoundException('Ֆայլը չի գտնվել');
+    if (att.uploadedBy !== userId) throw new ForbiddenException('Ֆայլը կարող է վերանվանել միայն կցողը');
+    return this.prisma.purchaseRequisitionAttachment.update({
+      where: { id: attachmentId },
+      data: { name: renamedFileName(att.name, name) },
+    });
   }
 
   async deleteAttachment(id: number, attachmentId: number, userId: number) {
