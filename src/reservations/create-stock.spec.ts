@@ -143,6 +143,8 @@ function world(opts: {
     warehouseId: opts.pool === 'PROJECT' ? PROJECT_WAREHOUSE : null,
     objectId: null,
   });
+  // The requester side is the task's people (two-party.ts, 2026-10-05): user 39 created task 100.
+  (svc as any).crmTask = async () => ({ id: 100, projectId: 20, createdById: 39, executors: [], acceptors: [], responsibles: [] });
 
   const create = (quantity: number, who: WarehouseActor = actor()) =>
     svc.create(
@@ -290,9 +292,10 @@ describe('J. who may ask is decided exactly as before', () => {
     expect(w.state.reservations).toEqual([]);
   });
 
-  it('another company’s work is refused, even when short — nothing created, no alert', async () => {
+  it('somebody off the task, with no warehouse permission, is refused even when short — nothing created, no alert', async () => {
     const w = world({ pool: 'MAIN', main: 0 });
-    const outsider = actor({ userId: 50, home: { wildcard: false, entityIds: [4] } });
+    // A role in the requester's own company (3) is not the task (two-party.ts, 2026-10-05).
+    const outsider = actor({ userId: 50, home: { wildcard: false, entityIds: [3] } });
     await expect(w.create(1, outsider)).rejects.toBeInstanceOf(ForbiddenException);
     expect(w.state.reservations).toEqual([]);
     expect(w.alerts).toEqual([]);

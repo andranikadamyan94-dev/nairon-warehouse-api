@@ -5,7 +5,6 @@ import { UsersPrismaService } from '../common/users-prisma.service';
 import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
 import { CreateAssetRequestDto, DirectIssueDto, IssueAssetRequestDto, ObjectIssueDto, ReassignCustodyDto, ReleaseCondition, ReturnCustodyDto } from './dto/asset-custody.dto';
 import { ObjectsService } from '../objects/objects.service';
-import { DelegatedWriteMembership } from '../auth/delegated-write.membership';
 import { TxClient } from '../common/operations/operations.service';
 
 /**
@@ -51,7 +50,6 @@ export class AssetCustodyService {
     private readonly usersPrisma: UsersPrismaService,
     private readonly notifications: WarehouseNotificationsService,
     private readonly objects: ObjectsService,
-    private readonly membership: DelegatedWriteMembership,
   ) {}
 
   private has(actor: Actor, ...perms: string[]) {
@@ -71,14 +69,16 @@ export class AssetCustodyService {
    * item, the person. Shared with the assistant's preflight so the two cannot
    * drift.
    *
-   * 2026-10-03: a request on somebody else's behalf is filed in an
-   * organisation (X-Entity-ID, `entityId`), and that person must belong to it
-   * — HR's org tree answers (DelegatedWriteMembership.isMember →
-   * members/internal; HolderScope was removed on 2026-10-05, custody reads are
-   * global again). No organisation named, or a person HR does not place
-   * in it, is a 400; HR unreachable is a 503, never assumed either way.
+   * A request on somebody else's behalf needs the approve or issue right, and
+   * a person who exists and is active — the users database says (filterActive).
+   * It needs neither a selected organisation nor that person's HR membership
+   * in it: the 2026-10-03 rule asking HR's org tree (members/internal) was
+   * withdrawn on 2026-10-05 with "the warehouse is global" — the warehouse
+   * client has no organisation picker, and a colleague of another
+   * organisation is as real a holder as one's own. `entityId` is only what
+   * the row is stamped with.
    */
-  private async assertMayRequest(dto: CreateAssetRequestDto, actor: Actor, entityId: number | null) {
+  private async assertMayRequest(dto: CreateAssetRequestDto, actor: Actor) {
     const forObject = dto.forObjectId ? await this.objects.crmObject(dto.forObjectId) : null;
     if (dto.forObjectId && !forObject) throw new NotFoundException('Օբյեկտը չի գտնվել');
     // Owner 2026-09-29: only the object's responsible person asks on its behalf (fresh from CRM, not the cache).
@@ -96,12 +96,10 @@ export class AssetCustodyService {
     const item = await this.prisma.item.findUnique({ where: { id: dto.itemId } });
     if (!item) throw new NotFoundException('Ռեսուրսը չի գտնվել');
     if (item.type !== 'ASSET') throw new BadRequestException('Հայտ կարելի է ներկայացնել միայն ակտիվների համար');
-    if (forUserId && (await this.usersPrisma.isDeactivated(forUserId))) throw new BadRequestException('Աշխատակիցն ապաակտիվացված է');
-    if (forUserId && forUserId !== actor.userId) {
-      if (!entityId) throw new BadRequestException('Ուրիշի համար հայտ ներկայացնելիս ընտրեք կազմակերպությունը');
-      if (!(await this.membership.isMember(entityId, forUserId))) {
-        throw new BadRequestException('Աշխատակիցը չի պատկանում ընտրված կազմակերպությանը');
-      }
+    // The person exists and is active — the users database, queried directly
+    // (filterActive), so somebody offboarded a moment ago is already gone.
+    if (forUserId && !(await this.usersPrisma.filterActive([forUserId])).length) {
+      throw new BadRequestException('Աշխատակիցը չի գտնվել կամ ապաակտիվացված է');
     }
     return { forObject, forUserId, item };
   }
@@ -118,7 +116,7 @@ export class AssetCustodyService {
    * Idempotency-Key); announceRequest() is then called once, after the commit.
    */
   async fileRequest(dto: CreateAssetRequestDto, actor: Actor, entityId: number | null, tx?: TxClient) {
-    const { forObject, forUserId } = await this.assertMayRequest(dto, actor, entityId);
+    const { forObject, forUserId } = await this.assertMayRequest(dto, actor);
     return (tx ?? this.prisma).assetRequest.create({
       data: {
         kind: forObject ? 'OBJECT' : 'PERSONAL',
@@ -226,9 +224,10 @@ export class AssetCustodyService {
   //                   stays on the screen;
   //   literal right   a super-admin flag does not stand in for request_assets
   //                   (or approve / issue, which the route also admits);
-  //   one workspace   a request is filed in the organization being worked in,
-  //                   and one filed in another reads as not found;
-  //   own only        only the person who filed a request withdraws it here.
+  //   one workspace   a request is filed in the organization being worked in;
+  //   own only        only the person who filed a request withdraws it here —
+  //                   whatever organisation the browser has selected (owner,
+  //                   2026-10-05: "your own" is requestedBy alone).
   //
   // Each answers what a confirmation card needs; cancel also `material`, the
   // state an agreement is pinned to (any decision or issue moves updatedAt).
@@ -241,7 +240,7 @@ export class AssetCustodyService {
     if (![PERM.request, PERM.approve, PERM.issue].some((p) => actor.permissions.includes(p))) {
       throw new ForbiddenException('Դուք այս կազմակերպությունում գույքի հայտ ներկայացնելու թույլտվություն չունեք');
     }
-    const { item, forUserId } = await this.assertMayRequest(dto, actor, entityId);
+    const { item, forUserId } = await this.assertMayRequest(dto, actor);
     // The person's requests for the same item still open — a second one is often a mistake.
     const open = await this.prisma.assetRequest.count({
       where: { requestedBy: actor.userId, itemId: item.id, status: { in: ['PENDING', 'APPROVED'] } },
@@ -259,9 +258,8 @@ export class AssetCustodyService {
     };
   }
 
-  async previewCancelRequest(id: number, actor: Actor, entityId: number | null) {
+  async previewCancelRequest(id: number, actor: Actor) {
     const r = await this.requestOr404(id);
-    if (entityId && r.entityId && r.entityId !== entityId) throw new NotFoundException('Հայտը չի գտնվել');
     if (r.requestedBy !== actor.userId) throw new ForbiddenException('Օգնականի միջոցով կարելի է չեղարկել միայն Ձեր ներկայացրած հայտը');
     const req = await this.cancellable(id, actor);
     return {

@@ -4,12 +4,14 @@ import { ResourceReturnsController } from '../resource-returns/resource-returns.
 import { ReservationsController } from './reservations.controller';
 import {
   OPERATION_SIDE,
+  REQUESTER_SIDE_WAREHOUSE_PERMISSIONS,
   RESERVATION_READ_PERMISSIONS,
   ReservationParties,
   WAREHOUSE_OPERATION_PERMISSIONS,
   decideOperation,
   decideRequester,
   decideWarehouse,
+  inRequesterCompany,
   isReservationReader,
   isWarehouseViewer,
   mayRead,
@@ -17,6 +19,11 @@ import {
 
 /**
  * WAREHOUSE V1 CONTRACT — Requester Organization <-> Shared Warehouse.
+ *
+ * Owner decision 2026-10-05, "the warehouse is global": the requester side
+ * passes on being ON THE CRM TASK (`onTheTask`, which CRM answers) or on the
+ * act's warehouse permission — never on a role in the requester's company.
+ * The company still decides READING (mayRead).
  *
  * The actors below are shaped like the real staging data: the catalogue is
  * filed under company 1, nobody but the super admin holds a role there, and
@@ -153,6 +160,30 @@ describe('the warehouse permission each warehouse act needs is the one its route
   it('names a permission for every warehouse and either-side operation, and for nothing else', () => {
     expect(Object.keys(WAREHOUSE_OPERATION_PERMISSIONS).sort()).toEqual([...WAREHOUSE_OPS, ...EITHER_OPS].sort());
   });
+
+  /*
+   * The requester-side acts a route serves: the warehouse pass that lets
+   * warehouse staff do them for any task is the route's own permission beside
+   * view_warehouse (owner, 2026-10-05).
+   */
+  const requesterRoutes: [string, object, string][] = [
+    ['reservation.create', ReservationsController.prototype, 'create'],
+    ['reservation.update', ReservationsController.prototype, 'updateTaskReservations'],
+    ['return.create', ResourceReturnsController.prototype, 'create'],
+  ];
+
+  it.each(requesterRoutes)('requester-side %s: the warehouse pass is what its route demands beside view_warehouse, plus the CRM task-edit right', (operation, controller, method) => {
+    const required = permissionsOf(controller, method);
+    expect(required).toContain(REQUESTER_PASS);
+    // CRM's update_project_task opens the requester side too (2026-10-05): a
+    // project manager who may edit the task in CRM may ask for its resources.
+    expect(REQUESTER_SIDE_WAREHOUSE_PERMISSIONS[operation]).toEqual([...warehouseSideOf(required), 'update_project_task']);
+  });
+
+  it('names a requester-side pass for the routed requester acts only — never for an either-side act', () => {
+    expect(Object.keys(REQUESTER_SIDE_WAREHOUSE_PERMISSIONS).sort()).toEqual(['reservation.create', 'reservation.update', 'return.create']);
+    for (const op of EITHER_OPS) expect(REQUESTER_SIDE_WAREHOUSE_PERMISSIONS[op]).toBeUndefined();
+  });
 });
 
 describe('C · the warehouse side is the shared pool, decided by warehouse permissions only', () => {
@@ -218,60 +249,99 @@ describe('C · the warehouse side is the shared pool, decided by warehouse permi
   });
 });
 
-describe('D / F · a warehouse permission is not requester authority for another company', () => {
-  it('does not let the warehouse head act as company 3’s or company 4’s requester', () => {
-    for (const parties of [asked3, asked4]) {
-      for (const op of REQUESTER_OPS) {
+describe('C / D · the warehouse is global: a warehouse permission is requester authority for any company’s task', () => {
+  const ROUTED_REQUESTER_OPS = ['reservation.create', 'reservation.update', 'return.create'];
+
+  it('lets the warehouse head ask, change the ask and hand back for company 3, company 4 and a legacy row', () => {
+    for (const parties of [asked3, asked4, legacy, uncatalogued]) {
+      for (const op of ROUTED_REQUESTER_OPS) {
         expect(decideOperation(warehouseHead, parties, op)).toMatchObject({
-          allowed: false,
+          allowed: true,
           side: 'requester',
-          because: 'outside-scope',
+          because: 'warehouse-permission',
+          workspace: parties.requester,
         });
       }
     }
   });
 
-  it('does not let manage_warehouse stand in for a role in the requester’s company', () => {
+  it('asks for the act’s own permission: the reservation right does not file returns, the returns right does not ask for goods', () => {
+    const reservationsOnly = actor({ permissionNames: ['manage_reservations'], home: { wildcard: false, entityIds: [6] } });
+    const returnsOnly = actor({ permissionNames: ['manage_resource_returns'], home: { wildcard: false, entityIds: [6] } });
+    expect(decideOperation(reservationsOnly, asked3, 'reservation.create').allowed).toBe(true);
+    expect(decideOperation(reservationsOnly, asked3, 'reservation.update').allowed).toBe(true);
+    expect(decideOperation(reservationsOnly, asked3, 'return.create')).toMatchObject({ allowed: false, because: 'not-on-the-task' });
+    expect(decideOperation(returnsOnly, asked3, 'return.create').allowed).toBe(true);
+    expect(decideOperation(returnsOnly, asked3, 'reservation.create')).toMatchObject({ allowed: false, because: 'not-on-the-task' });
+  });
+
+  it('honours manage_warehouse, the warehouse super-permission, on the requester side too', () => {
     const manager = actor({ permissionNames: ['manage_warehouse'], home: { wildcard: false, entityIds: [7] } });
-    expect(decideRequester(manager, asked3).allowed).toBe(false);
+    for (const op of REQUESTER_OPS) expect(decideRequester(manager, asked3, {}, op).allowed).toBe(true);
   });
 
-  it('does let warehouse staff request for the company their own role is in', () => {
-    expect(decideOperation(warehouseHead, { requester: 6, stockOwner: 1 }, 'reservation.create').allowed).toBe(true);
-  });
-});
-
-describe('E / F · the requester side is the requester’s company', () => {
-  it('lets company 3 act as the requester of company 3’s work, with no warehouse permission', () => {
-    for (const op of REQUESTER_OPS) {
-      expect(decideOperation(requester3, asked3, op)).toMatchObject({ allowed: true, because: 'in-scope' });
+  it('does not let view_warehouse — the requester’s route pass — stand in for being on the task', () => {
+    for (const op of ROUTED_REQUESTER_OPS) {
+      expect(decideOperation(viewer4, asked4, op)).toMatchObject({ allowed: false, because: 'not-on-the-task' });
     }
   });
 
-  it('does not let company 3 act as the requester for company 4', () => {
+  it('a company’s director with the reservation right asks for another company’s task — as warehouse staff would', () => {
+    expect(decideOperation(director3, asked4, 'reservation.create')).toMatchObject({ allowed: true, because: 'warehouse-permission' });
+  });
+});
+
+describe('E / F · the requester side is the CRM task, not the requester’s company', () => {
+  it('lets a person on the task ask, change the ask, accept and hand back — whichever company they are in, with no warehouse permission', () => {
+    for (const who of [requester3, inCatalogueCompany, viewer4, actor()]) {
+      for (const parties of [asked3, asked4, legacy, uncatalogued]) {
+        for (const op of REQUESTER_OPS) {
+          expect(decideOperation(who, parties, op, { onTheTask: true })).toMatchObject({
+            allowed: true,
+            side: 'requester',
+            because: 'on-the-task',
+            workspace: parties.requester,
+          });
+        }
+      }
+    }
+  });
+
+  it('refuses a role in the requester’s own company that is not on the task — company 3 for company 3’s work included', () => {
     for (const op of REQUESTER_OPS) {
-      expect(decideOperation(requester3, asked4, op)).toMatchObject({ allowed: false, because: 'outside-scope' });
-      expect(decideOperation(director3, asked4, op).allowed).toBe(false);
+      expect(decideOperation(requester3, asked3, op)).toMatchObject({ allowed: false, side: 'requester', because: 'not-on-the-task' });
+      expect(decideOperation(requester3, asked4, op)).toMatchObject({ allowed: false, because: 'not-on-the-task' });
+    }
+  });
+
+  it('refuses a wildcard role too: a role in every company is still not the task', () => {
+    const everywhere = actor({ userId: 70, home: { wildcard: true, entityIds: [] } });
+    for (const parties of [asked3, legacy]) {
+      for (const op of REQUESTER_OPS) {
+        expect(decideOperation(everywhere, parties, op)).toMatchObject({ allowed: false, because: 'not-on-the-task' });
+      }
     }
   });
 
   it('does not let a requester approve, allocate, reject, release or receive without the warehouse permission', () => {
-    for (const op of WAREHOUSE_OPS) expect(decideOperation(requester3, asked3, op).allowed).toBe(false);
-  });
-
-  it('ignores where the item is filed — the stock owner is bookkeeping', () => {
-    for (const stockOwner of [1, 3, 4, 6, null]) {
-      expect(decideRequester(requester3, { requester: 3, stockOwner }).allowed).toBe(true);
-      expect(decideRequester(requester3, { requester: 4, stockOwner }).allowed).toBe(false);
+    for (const op of WAREHOUSE_OPS) {
+      expect(decideOperation(requester3, asked3, op).allowed).toBe(false);
+      expect(decideOperation(requester3, asked3, op, { onTheTask: true }).allowed).toBe(false);
     }
   });
 
-  it('lets a task member be the requester only where the requester is unknown — a known company decides alone', () => {
-    // Company 6's storekeeper on a task of company 4's project, filing a return.
-    expect(decideOperation(storekeeper, asked4, 'return.create', { onTheTask: true })).toMatchObject({
-      allowed: false,
-      because: 'outside-scope',
-    });
+  it('ignores both companies on this side — who asked and where the item is filed are bookkeeping', () => {
+    for (const stockOwner of [1, 3, 4, 6, null]) {
+      for (const requester of [3, 4, null]) {
+        expect(decideRequester(requester3, { requester, stockOwner }, { onTheTask: true }).allowed).toBe(true);
+        expect(decideRequester(requester3, { requester, stockOwner }).allowed).toBe(false);
+      }
+    }
+  });
+
+  it('reports the company that asked on the verdict, for the log, without reading it', () => {
+    expect(decideRequester(requester3, asked4, { onTheTask: true }).workspace).toBe(4);
+    expect(decideRequester(requester3, legacy, { onTheTask: true }).workspace).toBeNull();
   });
 });
 
@@ -288,11 +358,17 @@ describe('G · legacy reservations whose requester was never pinned', () => {
     }
   });
 
-  it('refuse requester-side acts to anybody bounded who is not on the task — nothing is guessed', () => {
-    for (const who of [requester3, director3, warehouseHead, inCatalogueCompany]) {
+  it('refuse requester-side acts to anybody off the task without the act’s warehouse permission — nothing is guessed', () => {
+    for (const who of [requester3, viewer4, inCatalogueCompany, actor({ home: { wildcard: true, entityIds: [] } })]) {
       for (const op of REQUESTER_OPS) {
-        expect(decideOperation(who, legacy, op)).toMatchObject({ allowed: false, because: 'unknown-workspace' });
+        expect(decideOperation(who, legacy, op)).toMatchObject({ allowed: false, because: 'not-on-the-task', workspace: null });
       }
+    }
+  });
+
+  it('let warehouse staff act as their requester, as for any task', () => {
+    for (const op of ['reservation.create', 'reservation.update', 'return.create']) {
+      expect(decideOperation(warehouseHead, legacy, op)).toMatchObject({ allowed: true, because: 'warehouse-permission' });
     }
   });
 
@@ -329,20 +405,28 @@ describe('G · legacy reservations whose requester was never pinned', () => {
 });
 
 describe('either side may end an arrangement', () => {
-  it('lets the requester’s company do it as the requester, without a warehouse permission', () => {
+  it('lets the people on the task do it as the requester, without a warehouse permission', () => {
     for (const op of EITHER_OPS) {
-      expect(decideOperation(requester3, asked3, op)).toMatchObject({ allowed: true, side: 'requester' });
+      expect(decideOperation(requester3, asked3, op, { onTheTask: true })).toMatchObject({
+        allowed: true,
+        side: 'requester',
+        because: 'on-the-task',
+      });
     }
   });
 
-  it('lets warehouse staff do it as the warehouse, for any company', () => {
+  it('lets warehouse staff do it as the warehouse, for any company — the warehouse head wears that hat too', () => {
     for (const op of EITHER_OPS) {
       expect(decideOperation(storekeeper, asked4, op)).toMatchObject({ allowed: true, side: 'warehouse' });
+      expect(decideOperation(warehouseHead, asked4, op)).toMatchObject({ allowed: true, side: 'warehouse', because: 'warehouse-permission' });
     }
   });
 
-  it('refuses a third company with no warehouse permission', () => {
-    for (const op of EITHER_OPS) expect(decideOperation(requester3, asked4, op).allowed).toBe(false);
+  it('refuses a role in the company that asked, off the task and without a warehouse permission — and a third company alike', () => {
+    for (const op of EITHER_OPS) {
+      expect(decideOperation(requester3, asked3, op)).toMatchObject({ allowed: false, because: 'no-warehouse-permission' });
+      expect(decideOperation(requester3, asked4, op).allowed).toBe(false);
+    }
   });
 });
 
@@ -360,6 +444,17 @@ describe('H · the super admin', () => {
 describe('who may look', () => {
   it('lets the requester’s company see its reservation', () => {
     expect(mayRead(requester3, asked3)).toBe(true);
+    expect(inRequesterCompany(requester3, asked3)).toBe(true);
+  });
+
+  it('D · reading kept the company rule when acting lost it: company 3 sees company 3’s reservation and may not touch it off the task', () => {
+    expect(mayRead(requester3, asked3, { onTheTask: false, warehouseViewer: false })).toBe(true);
+    for (const op of [...REQUESTER_OPS, ...EITHER_OPS]) expect(decideOperation(requester3, asked3, op).allowed).toBe(false);
+    // A wildcard role reads everything the company rule opens — and acts on nothing by it.
+    const everywhere = actor({ userId: 70, home: { wildcard: true, entityIds: [] } });
+    expect(inRequesterCompany(everywhere, asked4)).toBe(true);
+    expect(mayRead(everywhere, legacy, { warehouseViewer: false })).toBe(true);
+    expect(decideOperation(everywhere, asked4, 'reservation.create').allowed).toBe(false);
   });
 
   it('lets the people on the task see it, whichever company they are in', () => {
@@ -458,8 +553,8 @@ describe('receive_reservation_alerts · reservation READ authority, and nothing 
         expect(decideOperation(alertsOnly, parties, op)).toEqual(decideOperation(same, parties, op));
       }
     }
-    expect(decideRequester(alertsOnly, asked3)).toMatchObject({ allowed: false, because: 'outside-scope' });
-    expect(decideRequester(alertsOnly, legacy)).toMatchObject({ allowed: false, because: 'unknown-workspace' });
+    expect(decideRequester(alertsOnly, asked3)).toMatchObject({ allowed: false, because: 'not-on-the-task' });
+    expect(decideRequester(alertsOnly, legacy)).toMatchObject({ allowed: false, because: 'not-on-the-task' });
   });
 
   it('does not widen returns or the warehouse viewer list', () => {

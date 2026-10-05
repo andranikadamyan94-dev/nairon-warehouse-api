@@ -16,9 +16,11 @@ import { AssetCustodyService, PERM } from './asset-custody.service';
  *
  *   for oneself     somebody else's or an object's request is refused;
  *   literal right   a super-admin flag does not stand in for request_assets;
- *   one workspace   an organization must be named, and a request filed in
- *                   another one reads as not found;
- *   own only        only the person who filed it withdraws it here.
+ *   one workspace   an organization must be named to file;
+ *   own only        only the person who filed it withdraws it here — whatever
+ *                   organisation is selected (2026-10-05: "own" is requestedBy
+ *                   alone; a request filed in another one used to read as not
+ *                   found).
  *
  * And none of them writes or notifies anything. The create mutation now files
  * at most once per Idempotency-Key and tells approvers once, after the commit.
@@ -96,7 +98,7 @@ function world() {
       permissionNames: grants[userId] ?? [],
     })),
     getUsersByIds: jest.fn(async (ids: number[]) => ids.map((id) => ({ id, firstName: 'Անի', lastName: `${id}` }))),
-    isDeactivated: jest.fn(async () => false),
+    filterActive: jest.fn(async (ids: number[]) => ids),
   };
   const notifications: any = {
     send: jest.fn(async (n: any) => sent.push(`send ${n.title}`)),
@@ -113,9 +115,7 @@ function world() {
       return { result, replayed: false };
     }),
   };
-  // HR's org tree: everybody here belongs to ENTITY (membership itself: asset-request-for-someone.spec.ts).
-  const holders: any = { isMember: jest.fn(async (entityId: number) => entityId === ENTITY) };
-  const svc = new AssetCustodyService(prisma, usersPrisma, notifications, objects, holders);
+  const svc = new AssetCustodyService(prisma, usersPrisma, notifications, objects);
   const controller = new AssetCustodyController(svc, usersPrisma, operations);
   return { controller, requests, writes, sent, operations };
 }
@@ -262,10 +262,13 @@ describe('POST /asset-requests/:id/preflight/cancel — cancellable(), as PATCH 
     expect(await outcome(() => world().controller.cancel(1, request(ADMIN)))).toBe('ok');
   });
 
-  it('one workspace: a request filed in another organization reads as not found; one with none is the person\'s own', async () => {
-    expect(await outcome(() => world().controller.preflightCancelRequest(5, request(ME)))).toMatch(/^404 /);
+  it('B · own only, whatever is selected: one\'s own request filed in another organization is one\'s own, as is one filed in none', async () => {
+    expect(await outcome(() => world().controller.preflightCancelRequest(5, request(ME)))).toBe('ok');
     expect(await outcome(() => world().controller.preflightCancelRequest(5, request(ME, OTHER)))).toBe('ok');
+    expect(await outcome(() => world().controller.preflightCancelRequest(5, request(ME, null)))).toBe('ok');
     expect(await outcome(() => world().controller.preflightCancelRequest(6, request(ME)))).toBe('ok');
+    // …and the mutation agrees.
+    expect(await outcome(() => world().controller.cancel(5, request(ME)))).toBe('ok');
   });
 
   it('a yes grants nothing: decided in between, the mutation refuses', async () => {

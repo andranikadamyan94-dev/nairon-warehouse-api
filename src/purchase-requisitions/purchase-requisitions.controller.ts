@@ -91,23 +91,24 @@ export class PurchaseRequisitionsController {
   }
 
   /**
-   * The organization's approval desk. The guard admits anyone holding the
-   * permission somewhere; the service narrows it to the active organization.
+   * The approval desk. The guard admits anyone holding the permission
+   * somewhere, and the desk is global (owner, 2026-10-05): every
+   * organisation's rows, whatever X-Entity-ID says.
    */
   @UseGuards(PermissionGuard)
   @Permissions('approve_purchase_requisition')
   @Get('approvals')
-  @ApiOperation({ summary: 'Requisitions of the active organization awaiting (or past) its approval' })
+  @ApiOperation({ summary: 'Requisitions of every organisation awaiting (or past) approval' })
   approvals(@Query() query: any, @Req() req: any) {
-    return this.service.findForApproval(req.user?.id, entityOf(req), query ?? {});
+    return this.service.findForApproval(req.user?.id, query ?? {});
   }
 
   @UseGuards(PermissionGuard)
   @Permissions('confirm_requisition_rejection')
   @Get('rejections')
-  @ApiOperation({ summary: 'Rejections of the active organization awaiting confirmation (or already decided)' })
+  @ApiOperation({ summary: 'Rejections of every organisation awaiting confirmation (or already decided)' })
   rejections(@Query() query: any, @Req() req: any) {
-    return this.service.findRejections(req.user?.id, entityOf(req), query ?? {});
+    return this.service.findRejections(req.user?.id, query ?? {});
   }
 
   @UseGuards(PermissionGuard)
@@ -129,25 +130,25 @@ export class PurchaseRequisitionsController {
   @Post(':id/preflight/submit')
   @ApiOperation({ summary: 'Preflight: may this person send their draft for approval?' })
   async preflightSubmit(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
-    return { ...PREFLIGHT_OK, ...(await this.service.previewSubmit(id, req.user?.id, entityOf(req))) };
+    return { ...PREFLIGHT_OK, ...(await this.service.previewSubmit(id, req.user?.id)) };
   }
 
   @Post(':id/preflight/update')
   @ApiOperation({ summary: 'Preflight: may this person change their requisition, and to what?' })
   async preflightUpdate(@Param('id', ParseIntPipe) id: number, @Body() dto: any, @Req() req: any) {
-    return { ...PREFLIGHT_OK, ...(await this.service.previewUpdate(id, dto ?? {}, req.user?.id, entityOf(req))) };
+    return { ...PREFLIGHT_OK, ...(await this.service.previewUpdate(id, dto ?? {}, req.user?.id)) };
   }
 
   @Post(':id/preflight/cancel')
   @ApiOperation({ summary: 'Preflight: may this person withdraw their requisition?' })
   async preflightCancel(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
-    return { ...PREFLIGHT_OK, ...(await this.service.previewCancel(id, req.user?.id, entityOf(req))) };
+    return { ...PREFLIGHT_OK, ...(await this.service.previewCancel(id, req.user?.id)) };
   }
 
   @Post(':id/preflight/comment')
   @ApiOperation({ summary: 'Preflight: may this person comment on their requisition?' })
   async preflightComment(@Param('id', ParseIntPipe) id: number, @Body() body: any, @Req() req: any) {
-    return { ...PREFLIGHT_OK, ...(await this.service.previewComment(id, req.user?.id, body?.text ?? '', entityOf(req))) };
+    return { ...PREFLIGHT_OK, ...(await this.service.previewComment(id, req.user?.id, body?.text ?? '')) };
   }
 
   @Get(':id')

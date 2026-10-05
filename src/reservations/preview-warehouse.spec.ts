@@ -16,12 +16,13 @@ import { ReservationsService } from './reservations.service';
 
 const UNLINKED = 'Նախագիծը կապված չէ որևէ պահեստի հետ — դիմեք պահեստի պատասխանատուին';
 
+/** Warehouse staff asking: manage_reservations is requester standing for any task (two-party.ts, 2026-10-05), so CRM is not asked who is on it. */
 const actor: WarehouseActor = {
   userId: 39,
   isSuperAdmin: false,
   readOnly: false,
   isGlobalSuperAdmin: false,
-  permissionNames: [],
+  permissionNames: ['manage_reservations'],
   home: { wildcard: false, entityIds: [3] },
   declared: null,
 };

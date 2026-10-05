@@ -97,7 +97,7 @@ export class AssetCustodyController {
   @Post('asset-requests/:id/preflight/cancel')
   @ApiOperation({ summary: 'Preflight: may this person withdraw their own asset request?' })
   async preflightCancelRequest(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
-    return { ...PREFLIGHT_OK, ...(await this.service.previewCancelRequest(id, await this.actor(req), this.entityOf(req))) };
+    return { ...PREFLIGHT_OK, ...(await this.service.previewCancelRequest(id, await this.actor(req))) };
   }
 
   @Get('asset-requests')

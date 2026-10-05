@@ -81,9 +81,13 @@ const OPEN_ORDER_STATUSES = ['PENDING_FINANCE_APPROVAL', 'FINANCE_APPROVED', 'OR
  * lines — or reject. FULFILLED is set by the order's receive flow when it
  * completes.
  *
- * Both new permissions are resolved for the requisition's own organization,
- * not the caller's active one — a right granted in organization A never
- * approves a request filed in organization B.
+ * Deciding on ONE requisition (approve, reject, confirm or decline a
+ * rejection) is resolved for the requisition's own organization, not the
+ * caller's active one — a right granted in organization A never approves a
+ * request filed in organization B. The approval and rejection QUEUES, though,
+ * are global (owner, 2026-10-05: the warehouse is global; the warehouse client
+ * has no organisation picker): whoever holds the right anywhere sees every
+ * organisation's rows.
  *
  * Notifications deliberately absent — platform-wide pass after this sprint.
  */
@@ -130,6 +134,16 @@ export class PurchaseRequisitionsService {
    */
   private async holdsInEntity(userId: number, entityId: number, permission: string): Promise<boolean> {
     const info = await this.usersPrisma.getUserAccessInfo(userId, entityId);
+    return info.isSuperAdmin || info.permissionNames.includes(permission);
+  }
+
+  /**
+   * Does the caller hold `permission` — or super-admin — in ANY organisation?
+   * Entity 0 is the union of every assignment (users-prisma). The queues
+   * (findForApproval, findRejections) ask this: the warehouse is global.
+   */
+  private async holdsAnywhere(userId: number, permission: string): Promise<boolean> {
+    const info = await this.usersPrisma.getUserAccessInfo(userId);
     return info.isSuperAdmin || info.permissionNames.includes(permission);
   }
 
@@ -344,16 +358,18 @@ export class PurchaseRequisitionsService {
   }
 
   /**
-   * The organization's approval desk: every non-draft requisition filed in
-   * the caller's active organization, for holders of
-   * approve_purchase_requisition there. PENDING_APPROVAL is what needs them;
-   * the rest is the history of what they (or procurement) decided.
+   * The approval desk: every non-draft requisition of EVERY organisation, for
+   * holders of approve_purchase_requisition anywhere (owner, 2026-10-05: the
+   * warehouse is global, and the right is resolved across organisations like
+   * every warehouse right since 827039d). PENDING_APPROVAL is what needs them;
+   * the rest is the history of what they (or procurement) decided. Deciding
+   * on a row still needs the right in that row's organisation (assertMayDecide).
    */
-  async findForApproval(userId: number, entityId: number | null, query: { status?: string; page?: string; limit?: string; search?: string }) {
-    if (!entityId || !(await this.holdsInEntity(userId, entityId, APPROVE_PERMISSION))) {
-      throw new ForbiddenException('Դուք այս կազմակերպության գնման հայտերը հաստատելու թույլտվություն չունեք');
+  async findForApproval(userId: number, query: { status?: string; page?: string; limit?: string; search?: string }) {
+    if (!(await this.holdsAnywhere(userId, APPROVE_PERMISSION))) {
+      throw new ForbiddenException('Դուք գնման հայտերը հաստատելու թույլտվություն չունեք');
     }
-    const where: any = { entityId, status: query.status ? query.status : { not: 'DRAFT' } };
+    const where: any = { status: query.status ? query.status : { not: 'DRAFT' } };
     if (query.search?.trim()) {
       where.OR = [
         { title: { contains: query.search.trim(), mode: 'insensitive' } },
@@ -481,24 +497,25 @@ export class PurchaseRequisitionsService {
   // both the owner's for AI writes: the requisition must be the caller's own
   // (a super-admin cancelling somebody else's stays on the screen), and the
   // right to file is read literally — a super-admin flag does not stand in
-  // for create_purchase_requisition. And one workspace: a requisition filed
-  // for another organization than the one being worked in reads as not found.
+  // for create_purchase_requisition. "Your own" is `createdBy` alone: the
+  // organisation the browser has selected is not asked (owner, 2026-10-05 —
+  // the warehouse is global; before, a requisition filed for another
+  // organisation than the one being worked in read as not found).
   //
   // Each answers what a confirmation card needs, with `material` — the state
   // an agreement is pinned to: any edit, status change or decision moves
   // `updatedAt`, so a card drawn before it goes stale instead of acting on a
   // requisition the person has not seen.
 
-  /** Own, in this organization — or not found / refused, before any other rule. */
-  private async ownInEntity(id: number, userId: number, entityId: number | null, refusal: string) {
+  /** The caller's own — or refused, before any other rule. */
+  private async own(id: number, userId: number, refusal: string) {
     const req = await this.getOrThrow(id);
-    if (entityId && req.entityId && req.entityId !== entityId) throw new NotFoundException('Հայտը չի գտնվել');
     if (req.createdBy !== userId) throw new ForbiddenException(refusal);
     return req;
   }
 
-  async previewSubmit(id: number, userId: number, entityId: number | null) {
-    await this.ownInEntity(id, userId, entityId, 'Հայտը կարող է ուղարկել միայն ներկայացնողը');
+  async previewSubmit(id: number, userId: number) {
+    await this.own(id, userId, 'Հայտը կարող է ուղարկել միայն ներկայացնողը');
     const req = await this.submittable(id, userId);
     const literal = await this.usersPrisma.getUserAccessInfo(userId, req.entityId!);
     if (!literal.permissionNames.includes(CREATE_PERMISSION)) {
@@ -507,8 +524,8 @@ export class PurchaseRequisitionsService {
     return { from: req.status, to: 'PENDING_APPROVAL', requisition: await this.snapshotOf(id) };
   }
 
-  async previewUpdate(id: number, dto: UpdateRequisitionInput, userId: number, entityId: number | null) {
-    await this.ownInEntity(id, userId, entityId, 'Հայտը կարող է խմբագրել միայն ներկայացնողը');
+  async previewUpdate(id: number, dto: UpdateRequisitionInput, userId: number) {
+    await this.own(id, userId, 'Հայտը կարող է խմբագրել միայն ներկայացնողը');
     const { lines, periodStart, periodEnd } = await this.updatable(id, dto ?? {}, userId);
     const before = await this.snapshotOf(id);
     const text = (v: string | undefined | null) => v?.trim() || null;
@@ -526,15 +543,15 @@ export class PurchaseRequisitionsService {
     };
   }
 
-  async previewCancel(id: number, userId: number, entityId: number | null) {
-    await this.ownInEntity(id, userId, entityId, 'Հայտը կարող է չեղարկել միայն ներկայացնողը');
+  async previewCancel(id: number, userId: number) {
+    await this.own(id, userId, 'Հայտը կարող է չեղարկել միայն ներկայացնողը');
     const req = await this.cancellable(id, userId, false);
     return { from: req.status, to: 'CANCELLED', requisition: await this.snapshotOf(id) };
   }
 
-  async previewComment(id: number, userId: number, text: string, entityId: number | null) {
+  async previewComment(id: number, userId: number, text: string) {
     if (!text?.trim()) throw new BadRequestException('Մեկնաբանությունը դատարկ է');
-    await this.ownInEntity(id, userId, entityId, 'Այս կերպ կարելի է մեկնաբանել միայն Ձեր սեփական գնման հայտը');
+    await this.own(id, userId, 'Այս կերպ կարելի է մեկնաբանել միայն Ձեր սեփական գնման հայտը');
     const req = await this.commentable(id, userId, text);
     return { text: text.trim(), requisition: await this.snapshotOf(req.id) };
   }
@@ -652,12 +669,17 @@ export class PurchaseRequisitionsService {
     if (req.status !== 'REJECTION_PENDING') throw new BadRequestException('Հայտի մերժումը հաստատման սպասման մեջ չէ');
   }
 
-  /** The confirmer's desk: the active organization's rejections awaiting them, plus the ones already decided. */
-  async findRejections(userId: number, entityId: number | null, query: { status?: string; page?: string; limit?: string; search?: string }) {
-    if (!entityId || !(await this.holdsInEntity(userId, entityId, CONFIRM_REJECTION_PERMISSION))) {
-      throw new ForbiddenException('Դուք այս կազմակերպության գնման հայտերի մերժումը հաստատելու թույլտվություն չունեք');
+  /**
+   * The confirmer's desk: every organisation's rejections awaiting them, plus
+   * the ones already decided — for holders of confirm_requisition_rejection
+   * anywhere (global, as findForApproval). Confirming one still needs the
+   * right in that row's organisation (assertMayConfirm).
+   */
+  async findRejections(userId: number, query: { status?: string; page?: string; limit?: string; search?: string }) {
+    if (!(await this.holdsAnywhere(userId, CONFIRM_REJECTION_PERMISSION))) {
+      throw new ForbiddenException('Դուք գնման հայտերի մերժումը հաստատելու թույլտվություն չունեք');
     }
-    const where: any = { entityId, status: query.status ? query.status : 'REJECTION_PENDING' };
+    const where: any = { status: query.status ? query.status : 'REJECTION_PENDING' };
     if (query.status === 'REJECTED') where.rejectionConfirmedBy = { not: null };
     if (query.search?.trim()) {
       where.OR = [

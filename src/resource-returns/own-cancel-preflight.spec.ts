@@ -5,16 +5,21 @@ import { WarehouseActor } from '../auth/actor';
 import { PERMISSIONS_KEY } from '../auth/guards/permission.guard';
 import { PREFLIGHT_OK } from '../common/preflight/preflight';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
+import { decideOperation } from '../reservations/two-party';
 import { ResourceReturnsController } from './resource-returns.controller';
 import { ResourceReturnsService } from './resource-returns.service';
 
 /**
  * POST /resource-returns/:id/preflight/cancel (2026-10-01, coverage gaps
  * batch 4): «Չեղարկել» one's own pending return. cancel()'s own check — the
- * two-party rule and PENDING — behind the same guard, nothing written. Two
- * rules more: only the person who filed the return (the screen lets the whole
- * requesting side and warehouse staff), and one workspace — a return whose
- * requesting company is known and is not the one declared reads as not found.
+ * two-party rule and PENDING — behind the same guard, nothing written. One
+ * rule more: only the person who filed the return (the screen lets the whole
+ * requesting side — the task's people — and warehouse staff). "Own" is
+ * requestedBy alone: the organisation the browser selected is not asked
+ * (2026-10-05; before, a return whose requesting company was not the one
+ * declared read as not found).
+ *
+ * ME and COLLEAGUE are on task 2451; KEEPER is warehouse staff off it.
  */
 
 const outcome = async (attempt: () => Promise<unknown> | unknown) => {
@@ -79,9 +84,16 @@ function world() {
       }),
     },
   };
-  const svc = new ResourceReturnsService(prisma, {} as any, new ResourceWorkspaceService(prisma), {} as any);
+  // The reservations service's task standing, stood in (it asks CRM who is on the task).
+  const onTask = new Set([ME, COLLEAGUE]);
+  const reservations: any = {
+    decideWithTask: jest.fn(async (who: WarehouseActor, parties: any, operation: string) =>
+      decideOperation(who, parties, operation, { onTheTask: onTask.has(who.userId) }),
+    ),
+  };
+  const svc = new ResourceReturnsService(prisma, {} as any, new ResourceWorkspaceService(prisma), reservations);
   const controller = new ResourceReturnsController(svc, {} as any);
-  return { controller, rows, writes };
+  return { controller, rows, writes, reservations };
 }
 
 it('sits beside PATCH :id/cancel, behind the same guard', () => {
@@ -123,10 +135,19 @@ it('own only: a colleague on the requesting side, or warehouse staff, stay on th
   expect(await outcome(() => world().controller.preflightCancel(1, keeper))).toMatch(/^403 /);
 });
 
-it('one workspace: a return asked for by another company reads as not found', async () => {
-  const both = actor(ME, { home: { wildcard: false, entityIds: [ENTITY, OTHER] } });
-  expect(await outcome(() => world().controller.preflightCancel(4, both))).toMatch(/^404 /);
-  expect(await outcome(() => world().controller.preflightCancel(4, { ...both, declared: OTHER }))).toBe('ok');
+it('B · own, anywhere: one\'s own return asked for by another company is one\'s own, whatever is declared', async () => {
+  expect(await outcome(() => world().controller.preflightCancel(4, actor(ME)))).toBe('ok');
+  expect(await outcome(() => world().controller.preflightCancel(4, actor(ME, { declared: OTHER })))).toBe('ok');
+  expect(await outcome(() => world().controller.preflightCancel(4, actor(ME, { declared: null })))).toBe('ok');
+  // The requester side is the task's, not the company's: ME is on the task, a role in OTHER is not asked for.
+  const w = world();
+  expect(await outcome(() => w.controller.cancel('4', actor(ME)))).toBe('ok');
+  expect(w.reservations.decideWithTask).toHaveBeenCalledWith(expect.objectContaining({ userId: ME }), { requester: OTHER, stockOwner: 1 }, 'return.cancel', 2451);
+});
+
+it('C · somebody off the task, without the returns right, may not call off a return of their own company\'s work', async () => {
+  const bystander = actor(60);
+  expect(await outcome(() => world().controller.cancel('1', bystander))).toMatch(/^403 /);
 });
 
 it('a yes grants nothing: received in between, the mutation refuses', async () => {

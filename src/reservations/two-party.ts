@@ -7,10 +7,13 @@ import { WarehouseActor, Workspace, decideWorkspace } from '../auth/actor';
  *
  * The warehouse is ONE shared pool for every company. So the two sides are:
  *
- *   requester    the company whose work asked for the resource — from the CRM
- *                project, pinned on the reservation as requesterWorkspaceId
- *                when it was made — or, where the operation already has one,
- *                the authoritative CRM task relationship.
+ *   requester    the people whose work asked for the resource: the CRM task
+ *                the reservation serves. Who is on it — creator, Կատարող,
+ *                Ստուգող, Պատասխանատու — is asked of CRM, never of the body.
+ *                The company that asked is still pinned on the reservation as
+ *                requesterWorkspaceId when it is made, and still decides who
+ *                may READ it (mayRead); since 2026-10-05 it no longer decides
+ *                who may ACT for it.
  *   warehouse    the shared warehouse, operated by whoever holds the existing
  *                warehouse permission for the act. Not a company.
  *
@@ -20,16 +23,22 @@ import { WarehouseActor, Workspace, decideWorkspace } from '../auth/actor';
  * grants or refuses nothing. The head of the warehouse holds a role only in
  * company 6; the pool is filed under company 1; they run all of it.
  *
+ * OWNER DECISION 2026-10-05 — "the warehouse is global". The requester side
+ * passes when the caller is ON THE CRM TASK, or holds the warehouse permission
+ * the act needs. It does NOT pass on a role, or an HR membership, in the
+ * project's organisation: a person who merely belongs to the requester's
+ * company is not the one holding the drill. Before this, a role in that
+ * company was the requester standing, and a warehouse permission counted for
+ * nothing on this side.
+ *
  * And the two sides must not leak into each other:
  *
- *   A person who runs projects for the requester may ask, change their own
- *   request and hand things back. They may NOT approve stock, reject a
- *   request, or take goods back onto a shelf — that needs a warehouse
- *   permission.
+ *   A person on the task may ask, change the task's request and hand things
+ *   back. They may NOT approve stock, reject a request, or take goods back
+ *   onto a shelf — that needs a warehouse permission.
  *
- *   Warehouse staff may approve, allocate, reject, release and receive. They
- *   may NOT act as the requester of another company's work — a warehouse
- *   permission is not a role in the requester's company.
+ *   Warehouse staff may approve, allocate, reject, release and receive — and,
+ *   since the warehouse is global, ask and hand back for any task.
  *
  * Some actions belong to both sides and are marked as such. Reading is its own
  * question and lives in `mayRead` below.
@@ -54,55 +63,87 @@ export type Side = 'requester' | 'warehouse';
 export type SideVerdict = {
   allowed: boolean;
   because:
-    /** Requester: a wildcard role applies in every company, the requester's included. */
-    | 'unbounded'
-    /** Requester: they hold a role in the requester's company. */
-    | 'in-scope'
-    /** Requester: they hold a role, but somewhere else. */
-    | 'outside-scope'
-    /** Requester: the row cannot say which company asked, and nothing else stands in. */
-    | 'unknown-workspace'
-    /** Requester, legacy row: they are on the CRM task the reservation serves. */
+    /** Requester: they are on the CRM task the reservation serves (creator or a role slot). */
     | 'on-the-task'
-    /** Warehouse: they hold the warehouse permission this act needs. */
+    /** Requester: they are not on the task and hold no warehouse permission for the act. */
+    | 'not-on-the-task'
+    /** Either side: they hold the warehouse permission this act needs. */
     | 'warehouse-permission'
     /** Warehouse: they do not. */
     | 'no-warehouse-permission';
   side: Side;
-  /** The requester company for a requester verdict; always null for the warehouse. */
+  /** The requester company for a requester verdict (null when the row never pinned one); always null for the warehouse. */
   workspace: Workspace;
 };
 
 /** What a caller already established about the actor and this reservation's task. */
 export type StandingContext = {
-  /** The actor holds one of the CRM task's role slots — asked of CRM, never of the body. */
+  /**
+   * The actor is on the CRM task: its creator, or one of its three role slots
+   * (Կատարող, Ստուգող, Պատասխանատու). Asked of CRM, never of the body.
+   */
   onTheTask?: boolean;
+};
+
+/**
+ * The warehouse permission that lets warehouse staff do a REQUESTER-side act
+ * for any task (owner, 2026-10-05: the warehouse is global). It is the same
+ * permission the route already demands beside the requester's own pass,
+ * view_warehouse — pinned against the controllers in two-party.spec.ts. The
+ * `both` operations are not here: their warehouse hat is decideWarehouse.
+ */
+export const REQUESTER_SIDE_WAREHOUSE_PERMISSIONS: Record<string, string[]> = {
+  // update_project_task is CRM's own "may edit this task" breadth right (a
+  // project manager who is not in a role slot): CRM's rules decide the
+  // requester side (owner, 2026-10-05), so it opens the same acts here.
+  'reservation.create': ['manage_reservations', 'update_project_task'],
+  'reservation.update': ['manage_reservations', 'update_project_task'],
+  'return.create': ['manage_resource_returns', 'update_project_task'],
 };
 
 /**
  * May this actor act as the REQUESTER of this reservation?
  *
- * The requester company is the authority. When it is known, the actor must
- * hold a role in it (or a wildcard role, which is a role in every company). A
- * warehouse permission is not a role there and changes nothing.
+ * Two ways in, and no third:
  *
- * When it is NOT known — the legacy rows made before it was pinned — nothing is
- * guessed. A wildcard holder still passes, because every possible answer is a
- * company they hold a role in. Anybody else passes only on the authoritative
- * CRM task relationship, when the operation has one: being on the task is a
- * narrower proof of taking part in the requesting work than a company would
- * be. Without it, the requester-side act is refused.
+ *  - they are on the CRM task the reservation serves — the creator or one of
+ *    its role slots, which CRM alone knows (`context.onTheTask`);
+ *  - they hold the warehouse permission the act needs (super admin,
+ *    manage_warehouse, or the operation's own from the map above).
+ *
+ * What is NOT a way in: a role in the requester's company, a wildcard role,
+ * an HR membership. The company that asked is still known (parties.requester)
+ * and is reported back, but it grants nothing here — it decides reading, in
+ * mayRead. Nothing is guessed for a legacy row whose requester was never
+ * pinned either: the task relationship is the same proof whether the company
+ * is known or not.
  */
 export function decideRequester(
   actor: WarehouseActor,
   parties: ReservationParties,
   context: StandingContext = {},
+  operation?: string,
 ): SideVerdict {
-  const verdict = decideWorkspace(actor, parties.requester);
-  if (!verdict.allowed && verdict.because === 'unknown-workspace' && context.onTheTask === true) {
-    return { allowed: true, because: 'on-the-task', side: 'requester', workspace: null };
+  if (context.onTheTask === true) {
+    return { allowed: true, because: 'on-the-task', side: 'requester', workspace: parties.requester };
   }
-  return { allowed: verdict.allowed, because: verdict.because, side: 'requester', workspace: verdict.workspace };
+  const needed = operation !== undefined ? REQUESTER_SIDE_WAREHOUSE_PERMISSIONS[operation] ?? [] : [];
+  const holds =
+    actor.isSuperAdmin ||
+    actor.permissionNames.includes('manage_warehouse') ||
+    needed.some((p) => actor.permissionNames.includes(p));
+  if (holds) return { allowed: true, because: 'warehouse-permission', side: 'requester', workspace: parties.requester };
+  return { allowed: false, because: 'not-on-the-task', side: 'requester', workspace: parties.requester };
+}
+
+/**
+ * Is this actor in the company that asked — the requester company of the
+ * reservation? READ ONLY: this is what lets a company follow its own orders
+ * (mayRead) and nothing else. A wildcard role is a role in every company; an
+ * unknown requester is nobody's.
+ */
+export function inRequesterCompany(actor: WarehouseActor, parties: ReservationParties): boolean {
+  return decideWorkspace(actor, parties.requester).allowed;
 }
 
 /**
@@ -152,7 +193,8 @@ export function decideWarehouse(actor: WarehouseActor, operation: string): SideV
  *
  * `both` means standing on either side is enough, and is not a leak in either
  * direction: cancelling a reservation ends an arrangement both sides are part
- * of, and either may walk away from it.
+ * of, and either may walk away from it — the people on the task as the
+ * requester, warehouse staff as the warehouse.
  *
  * `reservation.accept` is classified here but decided in the service by the CRM
  * task relationship (or super admin), as it always has been — confirming
@@ -184,7 +226,8 @@ export const OPERATION_SIDE: Record<string, Side | 'both'> = {
  *
  * For a `both` operation, standing on either side is enough — and the verdict
  * reports the side that let them through, so a log says which hat they were
- * wearing.
+ * wearing: the requester's when they are on the task, the warehouse's when a
+ * warehouse permission let them in.
  */
 export function decideOperation(
   actor: WarehouseActor,
@@ -198,11 +241,11 @@ export function decideOperation(
     // deciding whose it is.
     return { allowed: false, because: 'no-warehouse-permission', side: 'warehouse', workspace: null };
   }
-  if (side === 'requester') return decideRequester(actor, parties, context);
+  if (side === 'requester') return decideRequester(actor, parties, context, operation);
   if (side === 'warehouse') return decideWarehouse(actor, operation);
 
-  const asRequester = decideRequester(actor, parties, context);
-  if (asRequester.allowed) return asRequester;
+  const asRequester = decideRequester(actor, parties, context, operation);
+  if (asRequester.allowed && asRequester.because === 'on-the-task') return asRequester;
   return decideWarehouse(actor, operation);
 }
 
@@ -211,7 +254,10 @@ export function decideOperation(
  *
  * Four audiences, and leaving any of them out breaks something real:
  *
- *   - the requester's people, or the store fills orders nobody can follow;
+ *   - the requester's people — a role in the company that asked — or the
+ *     store fills orders nobody can follow. This is the one place the
+ *     requester company still decides (owner, 2026-10-05: acting for it is
+ *     the task's, reading it stays the company's);
  *   - the people on the task, who are the ones holding the drill — decided by
  *     CRM, not here, which is why it arrives as a flag;
  *   - warehouse staff with a viewing or managing warehouse permission, whichever
@@ -229,7 +275,7 @@ export function mayRead(
 ): boolean {
   if (actor.isSuperAdmin) return true;
   if (context.onTheTask) return true;
-  if (decideRequester(actor, parties).allowed) return true;
+  if (inRequesterCompany(actor, parties)) return true;
   return context.warehouseViewer === true;
 }
 

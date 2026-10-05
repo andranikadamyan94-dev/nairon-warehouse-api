@@ -17,7 +17,19 @@ import { RESERVATION_STATUS_LABELS, reservationStatusLabel } from '../common/sta
 import { WarehouseActor } from '../auth/actor';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 import { RequesterWorkspaceService } from '../common/workspace/requester-workspace.service';
-import { ReservationParties, decideOperation, isReservationReader, mayRead } from './two-party';
+import { ReservationParties, SideVerdict, decideOperation, isReservationReader, mayRead } from './two-party';
+
+/** Why a requester-side act was refused: not on the task, no warehouse permission (two-party.ts). */
+const REQUESTER_ONLY =
+  'Առաջադրանքի անունից գործել կարող են միայն դրա մասնակիցները՝ ստեղծողը, Կատարողը, Ստուգողը կամ Պատասխանատուն, կամ պահեստի թույլտվություն ունեցողները';
+const REQUEST_REFUSED =
+  'Այս առաջադրանքի համար պահանջել կարող են միայն դրա մասնակիցները՝ ստեղծողը, Կատարողը, Ստուգողը կամ Պատասխանատուն, կամ պահեստի թույլտվություն ունեցողները';
+const UPDATE_REFUSED =
+  'Այս առաջադրանքի ամրագրումը փոխել կարող են միայն դրա մասնակիցները՝ ստեղծողը, Կատարողը, Ստուգողը կամ Պատասխանատուն, կամ պահեստի թույլտվություն ունեցողները';
+
+/** Whether `userId` holds one of the task's three role slots, as CRM's internal route lists them. */
+const inTaskRole = (task: any, userId: number): boolean =>
+  ['acceptors', 'executors', 'responsibles'].some((r) => (task?.[r] ?? []).some((u: any) => (u.id ?? u.userId) === userId));
 import { quantitiesOf } from './quantities';
 import { lockItem, lockReservation } from '../common/operations/row-lock';
 import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
@@ -605,17 +617,37 @@ export class ReservationsService {
   ): Promise<ReservationParties> {
     const parties = await this.workspaces.partiesOfReservation(reservationId);
     if (!actor) return parties;
-    const verdict = decideOperation(actor, parties, operation);
+    let verdict = decideOperation(actor, parties, operation);
+    if (!verdict.allowed) {
+      // The requester hat is the task's: read which task before asking CRM.
+      const row = await this.prisma.resourceReservation.findUnique({ where: { id: reservationId }, select: { taskId: true } });
+      verdict = await this.decideWithTask(actor, parties, operation, row?.taskId);
+    }
     if (!verdict.allowed) {
       throw new ForbiddenException(
-        verdict.side === 'warehouse'
-          ? 'Սրա համար պահեստի թույլտվություն է պետք'
-          : verdict.because === 'unknown-workspace'
-            ? 'Պարզ չէ, թե որ կազմակերպությունն է պահանջել այս ամրագրումը, ուստի պահանջողի անունից գործել հնարավոր չէ'
-            : 'Սա այլ կազմակերպության պահանջն է',
+        verdict.side === 'warehouse' ? 'Սրա համար պահեստի թույլտվություն է պետք' : REQUESTER_ONLY,
       );
     }
     return parties;
+  }
+
+  /**
+   * The two-party verdict for an act on the reservation of `taskId`, with CRM
+   * asked about the task only when the actor's permissions alone do not settle
+   * it: warehouse staff and super admins pass without a round trip; everybody
+   * else is on the task — its creator or one of its role slots — or refused.
+   * Shared with returns. See two-party.ts (owner, 2026-10-05).
+   */
+  async decideWithTask(
+    actor: WarehouseActor,
+    parties: ReservationParties,
+    operation: string,
+    taskId: number | null | undefined,
+  ): Promise<SideVerdict> {
+    const byPermission = decideOperation(actor, parties, operation);
+    if (byPermission.allowed) return byPermission;
+    if (!(await this.isOnTask(taskId, actor.userId))) return byPermission;
+    return decideOperation(actor, parties, operation, { onTheTask: true });
   }
 
   /** May this person see this reservation at all? Wider than changing it. */
@@ -632,12 +664,17 @@ export class ReservationsService {
     throw new NotFoundException('Ամրագրումը չի գտնվել');
   }
 
-  /** Whether this person holds one of the task's three role slots, per CRM. */
+  /**
+   * Whether this person is ON the task, per CRM: its creator, or one of its
+   * three role slots. Wider than assertTaskRole — accepting goods stays with
+   * the roles — and the requester-side standing of two-party.ts. CRM
+   * unreachable, or no task at all, is "not on it": nothing is guessed.
+   */
   async isOnTask(taskId: number | null | undefined, userId: number): Promise<boolean> {
     if (!taskId) return false;
     try {
-      await this.assertTaskRole(Number(taskId), userId);
-      return true;
+      const task = await this.crmTask(Number(taskId));
+      return Number(task?.createdById) === userId || inTaskRole(task, userId);
     } catch {
       return false;
     }
@@ -666,14 +703,13 @@ export class ReservationsService {
       );
     }
     if (actor) {
-      const verdict = decideOperation(
+      const verdict = await this.decideWithTask(
         actor,
         { requester: requesterWorkspaceId, stockOwner: null },
         'reservation.create',
+        dto.taskId,
       );
-      if (!verdict.allowed) {
-        throw new ForbiddenException('Այս առաջադրանքն այլ կազմակերպությանն է, դրա համար պահանջել հնարավոր չէ');
-      }
+      if (!verdict.allowed) throw new ForbiddenException(REQUEST_REFUSED);
     }
 
     this.logger.log(
@@ -1015,12 +1051,13 @@ export class ReservationsService {
       );
     }
     if (actor) {
-      const verdict = decideOperation(
+      const verdict = await this.decideWithTask(
         actor,
         { requester: requesterWorkspaceId, stockOwner: null },
         'reservation.create',
+        dto.taskId,
       );
-      if (!verdict.allowed) throw new ForbiddenException('Այս առաջադրանքն այլ կազմակերպությանն է, դրա համար պահանջել հնարավոր չէ');
+      if (!verdict.allowed) throw new ForbiddenException(REQUEST_REFUSED);
     }
 
     if (!dto.resources?.length) {
@@ -1116,12 +1153,13 @@ export class ReservationsService {
       );
     }
     if (actor) {
-      const verdict = decideOperation(
+      const verdict = await this.decideWithTask(
         actor,
         { requester: requesterWorkspaceId, stockOwner: null },
         'reservation.update',
+        taskId,
       );
-      if (!verdict.allowed) throw new ForbiddenException('Այս առաջադրանքն այլ կազմակերպությանն է, դրա ամրագրումը փոխել հնարավոր չէ');
+      if (!verdict.allowed) throw new ForbiddenException(UPDATE_REFUSED);
     }
 
     const existing = await this.prisma.resourceReservation.findMany({
@@ -1843,24 +1881,25 @@ export class ReservationsService {
     });
   }
 
-  /** The acceptor/executor/responsible slots of the task, asked from CRM —
-   * the warehouse has no task-role data of its own. */
-  private async assertTaskRole(taskId: number, userId: number) {
+  /** The task as CRM's internal route answers it — its project, its people.
+   * The warehouse has no task data of its own. */
+  private async crmTask(taskId: number): Promise<any> {
     const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
-    let task: any;
     try {
       const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
         headers: { 'x-internal-secret': requireInternalSecret() },
       });
       if (!res.ok) throw new Error(String(res.status));
-      task = await res.json();
+      return await res.json();
     } catch {
       throw new BadRequestException('Առաջադրանքի տվյալները հասանելի չեն — փորձեք կրկին');
     }
-    const inRole = ['acceptors', 'executors', 'responsibles'].some((r) =>
-      (task?.[r] ?? []).some((u: any) => (u.id ?? u.userId) === userId),
-    );
-    if (!inRole) {
+  }
+
+  /** The acceptor/executor/responsible slots of the task, asked from CRM. */
+  private async assertTaskRole(taskId: number, userId: number) {
+    const task = await this.crmTask(taskId);
+    if (!inTaskRole(task, userId)) {
       throw new ForbiddenException(
         'Ընդունել կարող են միայն առաջադրանքի Կատարողը, Ստուգողը կամ Պատասխանատուն',
       );
@@ -3029,12 +3068,13 @@ export class ReservationsService {
       );
     }
     if (actor) {
-      const verdict = decideOperation(
+      const verdict = await this.decideWithTask(
         actor,
         { requester: requesterWorkspaceId, stockOwner: null },
         'reservation.update',
+        taskId,
       );
-      if (!verdict.allowed) throw new ForbiddenException('Այս առաջադրանքն այլ կազմակերպությանն է, դրա ամրագրումը փոխել հնարավոր չէ');
+      if (!verdict.allowed) throw new ForbiddenException(UPDATE_REFUSED);
     }
 
     this.logger.log(

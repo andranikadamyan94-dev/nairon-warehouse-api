@@ -19,7 +19,9 @@ import { CREATE_PERMISSION, PurchaseRequisitionsService } from './purchase-requi
  *                   super-admin or a procurement officer the screen lets act;
  *   literal right   a super-admin flag does not stand in for
  *                   create_purchase_requisition when sending a draft;
- *   one workspace   a requisition of another organization reads as not found.
+ *   own, anywhere   "own" is createdBy alone — the organisation the browser
+ *                   selected is not asked (2026-10-05; before, one's own
+ *                   requisition of another organisation read as not found).
  *
  * And none of them writes anything.
  */
@@ -160,9 +162,15 @@ describe('POST :id/preflight/submit — submittable(), as PATCH :id/submit', () 
     });
   });
 
-  it('one workspace: the requester\'s own draft for another organization reads as not found', async () => {
-    expect(await outcome(() => world().controller.preflightSubmit(R_OTHER_ORG, request(REQUESTER, ENTITY)))).toMatch(/^404 /);
+  it('B · own, anywhere: the requester\'s own draft for another organization is theirs whatever the browser selected', async () => {
+    expect(await outcome(() => world().controller.preflightSubmit(R_OTHER_ORG, request(REQUESTER, ENTITY)))).toBe('ok');
     expect(await outcome(() => world().controller.preflightSubmit(R_OTHER_ORG, request(REQUESTER, OTHER)))).toBe('ok');
+    expect(await outcome(() => world().controller.preflightSubmit(R_OTHER_ORG, request(REQUESTER, null)))).toBe('ok');
+    expect(await outcome(() => world().controller.preflightCancel(R_OTHER_ORG, request(REQUESTER, ENTITY)))).toBe('ok');
+    expect(await outcome(() => world().controller.preflightUpdate(R_OTHER_ORG, { title: 'x' }, request(REQUESTER, ENTITY)))).toBe('ok');
+    expect(await outcome(() => world().controller.preflightComment(R_OTHER_ORG, { text: 'x' }, request(REQUESTER, ENTITY)))).toBe('ok');
+    // Somebody else's stays refused — own is the rule, not the organisation.
+    expect(await outcome(() => world().controller.preflightSubmit(R_OTHER_ORG, request(COLLEAGUE, OTHER)))).toMatch(/^403 /);
   });
 });
 

@@ -123,24 +123,6 @@ export class ResourceReturnsService {
   }
 
   /**
-   * Whether the actor is on the CRM task a LEGACY reservation serves.
-   *
-   * Asked only when the reservation cannot say which company requested it: that
-   * is when the task relationship is the one authoritative requester-side
-   * standing left, and nothing is guessed in its place — not the reservation's
-   * old entityId label. A reservation that names its requester is decided by
-   * that company alone, so CRM is not asked.
-   */
-  private async onTheTaskOfLegacy(
-    parties: { requester: number | null },
-    taskId: number | null,
-    actor: WarehouseActor,
-  ): Promise<boolean> {
-    if (parties.requester !== null) return false;
-    return this.reservations.isOnTask(taskId, actor.userId);
-  }
-
-  /**
    * Could this return be filed, right now — and what is actually out?
    *
    * Same authority, same measurement, nothing written. The outstanding figure is
@@ -155,9 +137,7 @@ export class ResourceReturnsService {
     if (!reservation) throw new NotFoundException('Ամրագրումը չի գտնվել');
 
     const parties = await this.workspaces.partiesOfReservation(dto.reservationId);
-    const verdict = decideOperation(actor, parties, 'return.create', {
-      onTheTask: await this.onTheTaskOfLegacy(parties, reservation.taskId, actor),
-    });
+    const verdict = await this.reservations.decideWithTask(actor, parties, 'return.create', reservation.taskId);
     if (!verdict.allowed) throw returnRefusal(verdict.because);
 
     /*
@@ -221,11 +201,10 @@ export class ResourceReturnsService {
         `Վերադարձվող քանակը (${dto.quantity}) գերազանցում է տրամադրված մնացորդը (${Math.max(0, returnable)})`,
       );
     }
-    // Handing something back is the requester's act; the warehouse receives it.
+    // Handing something back is the requester's act — the task's people, or
+    // warehouse staff; the warehouse receives it.
     const parties = await this.workspaces.partiesOfReservation(dto.reservationId);
-    const verdict = decideOperation(actor, parties, 'return.create', {
-      onTheTask: await this.onTheTaskOfLegacy(parties, reservation.taskId, actor),
-    });
+    const verdict = await this.reservations.decideWithTask(actor, parties, 'return.create', reservation.taskId);
     if (!verdict.allowed) throw returnRefusal(verdict.because);
 
     /*
@@ -481,13 +460,14 @@ export class ResourceReturnsService {
 
   /** What cancel() checks before it writes. Shared with the assistant's preflight. */
   private async cancellable(id: number, actor?: WarehouseActor) {
-    const ret = await this.prisma.resourceReturn.findUnique({ where: { id } });
+    const ret = await this.prisma.resourceReturn.findUnique({ where: { id }, include: { reservation: { select: { taskId: true } } } });
     if (!ret) throw new NotFoundException('Վերադարձը չի գտնվել');
 
-    // Either party may call off a return that has not happened yet.
+    // Either party may call off a return that has not happened yet: the
+    // task's people as the requester, warehouse staff as the warehouse.
     if (actor) {
       const parties = await this.workspaces.partiesOfReturn(id);
-      const verdict = decideOperation(actor, parties, 'return.cancel');
+      const verdict = await this.reservations.decideWithTask(actor, parties, 'return.cancel', ret.reservation?.taskId);
       if (!verdict.allowed) {
         throw new ForbiddenException('Վերադարձը կարող են չեղարկել պահանջողը կամ պահեստի վերադարձների թույլտվություն ունեցողը');
       }
@@ -513,9 +493,10 @@ export class ResourceReturnsService {
    * gaps batch 4): cancel()'s own check, nothing written. Two rules more, the
    * owner's for AI writes: only the person who filed the return calls it off
    * here (the screen lets anybody on the requesting side, and warehouse staff,
-   * do it), and one workspace — a return whose requesting company is known and
-   * is not the one being worked in reads as not found. Answers what the card
-   * shows, and `material`: any change to the return moves updatedAt.
+   * do it). "Your own" is `requestedBy` alone — the organisation the browser
+   * has selected is not asked (owner, 2026-10-05: the warehouse is global).
+   * Answers what the card shows, and `material`: any change to the return
+   * moves updatedAt.
    */
   async previewCancel(id: number, actor: WarehouseActor) {
     const row = await this.prisma.resourceReturn.findUnique({
@@ -523,8 +504,6 @@ export class ResourceReturnsService {
       include: { reservation: { include: { item: { select: { id: true, name: true, unit: true } } } } },
     });
     if (!row) throw new NotFoundException('Վերադարձը չի գտնվել');
-    const requester = row.reservation.requesterWorkspaceId ?? null;
-    if (actor.declared && requester !== null && requester !== actor.declared) throw new NotFoundException('Վերադարձը չի գտնվել');
     if (row.requestedBy !== actor.userId) {
       throw new ForbiddenException('Օգնականի միջոցով կարելի է չեղարկել միայն Ձեր ներկայացրած վերադարձը');
     }
@@ -553,14 +532,13 @@ export class ResourceReturnsService {
 }
 
 /**
- * Why a return could not be filed. The two requester-side refusals are not the
- * same problem: one is another company's work, the other is a legacy
- * reservation whose requester nobody can name and whose task the caller is not on.
+ * Why a return could not be filed: handing back is the requester's act, and
+ * the requester is the task's people — or warehouse staff (two-party.ts).
  */
 function returnRefusal(because: string) {
   return new ForbiddenException(
-    because === 'unknown-workspace'
-      ? 'Պարզ չէ, թե որ կազմակերպությունն է պահանջել այս ամրագրումը, և դուք դրա առաջադրանքում չեք, ուստի պահանջողի անունից վերադարձնել հնարավոր չէ'
-      : 'Սա այլ կազմակերպության վերադարձն է',
+    because === 'not-on-the-task'
+      ? 'Վերադարձնել կարող են միայն առաջադրանքի մասնակիցները՝ ստեղծողը, Կատարողը, Ստուգողը կամ Պատասխանատուն, կամ պահեստի վերադարձների թույլտվություն ունեցողները'
+      : 'Սրա համար պահեստի թույլտվություն է պետք',
   );
 }

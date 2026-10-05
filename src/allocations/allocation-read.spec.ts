@@ -1,4 +1,4 @@
-import { ForbiddenException, NotFoundException } from '@nestjs/common';
+import { NotFoundException } from '@nestjs/common';
 
 import { AllocationsService } from './allocations.service';
 import { AllocationsController } from './allocations.controller';
@@ -31,9 +31,14 @@ const build = () => {
   };
   const workspaces: any = { partiesOfReservation: async () => ({ requester: 3, stockOwner: null }) };
   const reservations = new ReservationsService(prisma, {} as any, {} as any, {} as any, {} as any, workspaces, {} as any);
-  jest.spyOn(reservations as any, 'assertTaskRole').mockImplementation(async (_t: unknown, userId: unknown) => {
-    if (!ON_TASK.has(userId as number)) throw new ForbiddenException('not on the task');
-  });
+  // CRM's internal task route, stood in: task 12 and its Կատարող slots.
+  jest.spyOn(reservations as any, 'crmTask').mockImplementation(async () => ({
+    id: 12,
+    createdById: 0,
+    executors: [...ON_TASK].map((id) => ({ id })),
+    acceptors: [],
+    responsibles: [],
+  }));
   const allocations = new AllocationsService(prisma, {} as any, reservations);
   return { controller: new AllocationsController(allocations), allocations, reservations, prisma };
 };

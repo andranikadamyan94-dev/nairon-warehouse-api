@@ -45,7 +45,7 @@ const build = () => {
     getUserAccessInfo: jest.fn(async (userId: number) => ({ isSuperAdmin: false, permissionNames: perms[userId] ?? [] })),
     getUsersByIds: jest.fn(async () => []),
   };
-  const service = new AssetCustodyService(prisma, usersPrisma, {} as any, objects, {} as any);
+  const service = new AssetCustodyService(prisma, usersPrisma, {} as any, objects);
   const controller = new AssetCustodyController(service, usersPrisma, {} as any);
   const net = jest.spyOn(global, 'fetch').mockImplementation(async (url: any, init: any) => {
     // HR's org tree is never asked here any more; CRM's own object GET is the one call left.

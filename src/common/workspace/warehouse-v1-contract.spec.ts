@@ -24,8 +24,11 @@ import { ResourceWorkspaceService } from './resource-workspace.service';
  *   READ the shared catalogue   -> every authenticated caller the route admits
  *   WRITE the shared catalogue  -> the existing manage_* permission
  *   WAREHOUSE side              -> existing warehouse permissions, any company
- *   REQUESTER side              -> requesterWorkspaceId, or the CRM task
- *                                  relationship where the operation has one
+ *   REQUESTER side              -> the CRM task relationship (creator or a
+ *                                  role slot), or the act's warehouse
+ *                                  permission — owner, 2026-10-05: never a
+ *                                  role in the company that asked, which
+ *                                  (requesterWorkspaceId) decides reading only
  *   ResourceReservation.entityId -> never an input
  *
  * These run the real services over a stand-in database shaped like staging:
@@ -290,7 +293,7 @@ describe('B · nobody changes the catalogue without the existing manage_* permis
 
 type Parties = { requester: number | null; stockOwner: number | null };
 
-function reservations(opts: { parties: Parties; requester?: number | null; onTask?: number[]; superAdmins?: number[] }) {
+function reservations(opts: { parties: Parties; requester?: number | null; onTask?: number[]; creator?: number; superAdmins?: number[] }) {
   const onTask = new Set(opts.onTask ?? []);
   const reservationRow = {
     id: 8,
@@ -323,9 +326,16 @@ function reservations(opts: { parties: Parties; requester?: number | null; onTas
     getUserAccessInfo: async (userId: number) => ({ isSuperAdmin: (opts.superAdmins ?? []).includes(userId) }),
   };
   const svc = new ReservationsService(prisma, {} as any, {} as any, {} as any, usersPrisma, workspaces, requesters);
-  const assertTaskRole = jest.spyOn(svc as any, 'assertTaskRole').mockImplementation(async (_taskId: unknown, userId: unknown) => {
-    if (!onTask.has(userId as number)) throw new ForbiddenException('not on the task');
-  });
+  // CRM's internal task route, stood in: task 12 of project 70, its creator and its Կատարող slots.
+  jest.spyOn(svc as any, 'crmTask').mockImplementation(async () => ({
+    id: 12,
+    projectId: 70,
+    createdById: opts.creator ?? 0,
+    executors: [...onTask].map((id) => ({ id })),
+    acceptors: [],
+    responsibles: [],
+  }));
+  const assertTaskRole = jest.spyOn(svc as any, 'assertTaskRole');
   const isOnTask = jest.spyOn(svc, 'isOnTask');
   const returns = new ResourceReturnsService(prisma, {} as any, workspaces, svc);
   return { svc, returns, prisma, findReservation, assertTaskRole, isOnTask, row: reservationRow };
@@ -379,19 +389,27 @@ describe('C · a warehouse employee in company 6 operates stock filed under comp
 /* D                                                                         */
 /* ------------------------------------------------------------------------ */
 
-describe('D · a warehouse permission is not requester authority for another company', () => {
-  it('refuses the warehouse head asking for, or changing, company 3’s request', async () => {
+describe('D · a warehouse permission is requester authority for any company’s task — the warehouse is global', () => {
+  it('lets the warehouse head ask for, and change, company 3’s request without asking CRM who is on the task', async () => {
     const h = reservations({ parties: { requester: 3, stockOwner: 1 } });
-    await refused(h.svc.previewCreate(emptyRequest(), warehouseHead));
-    await refused(h.svc.previewUpdate(12, emptyRequest(), warehouseHead));
+    await passed(h.svc.previewCreate(emptyRequest(), warehouseHead));
+    await notRefused(h.svc.previewUpdate(12, emptyRequest(), warehouseHead));
+    expect(h.isOnTask).not.toHaveBeenCalled();
   });
 
-  it('refuses the warehouse head handing goods back as company 3', async () => {
+  it('lets the warehouse head hand goods back as company 3', async () => {
     const h = reservations({ parties: { requester: 3, stockOwner: 1 } });
-    await refused(h.returns.previewCreate({ reservationId: 8, quantity: 1 } as any, warehouseHead));
+    await passed(h.returns.previewCreate({ reservationId: 8, quantity: 1 } as any, warehouseHead));
+    expect(h.isOnTask).not.toHaveBeenCalled();
   });
 
-  it('lets them request for company 6, where their role is', async () => {
+  it('and the storekeeper, with the act’s own grant, for company 4', async () => {
+    const h = reservations({ parties: { requester: 4, stockOwner: 1 } });
+    await passed(h.svc.previewCreate(emptyRequest(), storekeeper));
+    await passed(h.returns.previewCreate({ reservationId: 8, quantity: 1 } as any, storekeeper));
+  });
+
+  it('still lets them request for company 6, where their role is — the role is not what lets them', async () => {
     const h = reservations({ parties: { requester: 6, stockOwner: 1 } });
     await passed(h.svc.previewCreate(emptyRequest(), warehouseHead));
   });
@@ -401,16 +419,35 @@ describe('D · a warehouse permission is not requester authority for another com
 /* E                                                                         */
 /* ------------------------------------------------------------------------ */
 
-describe('E · requester-side acts work on authoritative requester or task standing', () => {
-  it('lets company 3 ask for company 3’s work, with no warehouse permission', async () => {
-    const h = reservations({ parties: { requester: 3, stockOwner: 1 } });
+describe('E · requester-side acts work on the CRM task relationship', () => {
+  it('lets company 3’s person on the task ask for company 3’s work, with no warehouse permission — CRM asked', async () => {
+    const h = reservations({ parties: { requester: 3, stockOwner: 1 }, onTask: [39] });
     await passed(h.svc.previewCreate(emptyRequest(), ordinary3));
+    expect(h.isOnTask).toHaveBeenCalledWith(12, 39);
   });
 
-  it('lets company 3 hand goods back against its own reservation, without asking CRM', async () => {
-    const h = reservations({ parties: { requester: 3, stockOwner: 1 } });
+  it('lets the task’s creator do the same — the creator is on the task', async () => {
+    const h = reservations({ parties: { requester: 3, stockOwner: 1 }, creator: 39 });
+    await passed(h.svc.previewCreate(emptyRequest(), ordinary3));
+    await notRefused(h.svc.previewUpdate(12, emptyRequest(), ordinary3));
     await passed(h.returns.previewCreate({ reservationId: 8, quantity: 1 } as any, ordinary3));
-    expect(h.isOnTask).not.toHaveBeenCalled();
+    await expect(h.svc.assertMay(ordinary3, 8, 'reservation.cancel')).resolves.toEqual({ requester: 3, stockOwner: 1 });
+  });
+
+  it('lets company 3 hand goods back against its own reservation from the task, and refuses it off the task', async () => {
+    const onIt = reservations({ parties: { requester: 3, stockOwner: 1 }, onTask: [39] });
+    await passed(onIt.returns.previewCreate({ reservationId: 8, quantity: 1 } as any, ordinary3));
+    const offIt = reservations({ parties: { requester: 3, stockOwner: 1 }, onTask: [32] });
+    await refused(offIt.returns.previewCreate({ reservationId: 8, quantity: 1 } as any, ordinary3));
+    expect(offIt.isOnTask).toHaveBeenCalledWith(12, 39);
+  });
+
+  it('refuses company 3’s person off the task, although it is company 3’s work — a role there is not the standing', async () => {
+    const h = reservations({ parties: { requester: 3, stockOwner: 1 }, onTask: [32] });
+    await refused(h.svc.previewCreate(emptyRequest(), ordinary3));
+    await refused(h.svc.previewUpdate(12, emptyRequest(), ordinary3));
+    await refused(h.svc.assertMay(ordinary3, 8, 'reservation.cancel'));
+    await refused(h.returns.cancel(2, ordinary3));
   });
 
   it('keeps accept on the CRM task relationship, as it was — no company involved', async () => {
@@ -441,22 +478,31 @@ describe('E · requester-side acts work on authoritative requester or task stand
 /* F                                                                         */
 /* ------------------------------------------------------------------------ */
 
-describe('F · a requester from company 3 cannot act as the requester for company 4', () => {
-  it('refuses asking for or changing company 4’s work', async () => {
+describe('F · the company is not the standing: company 3’s person on company 4’s task, and off it', () => {
+  it('may ask for, change, hand back against and call off company 4’s work from the task', async () => {
+    const h = reservations({ parties: { requester: 4, stockOwner: 1 }, onTask: [39] });
+    await passed(h.svc.previewCreate(emptyRequest(), ordinary3));
+    await notRefused(h.svc.previewUpdate(12, emptyRequest(), ordinary3));
+    await passed(h.returns.previewCreate({ reservationId: 8, quantity: 1 } as any, ordinary3));
+    await expect(h.svc.assertMay(ordinary3, 8, 'reservation.cancel')).resolves.toEqual({ requester: 4, stockOwner: 1 });
+    expect(h.isOnTask).toHaveBeenCalledWith(12, 39);
+  });
+
+  it('and off the task is refused, exactly like company 3’s own work', async () => {
     const h = reservations({ parties: { requester: 4, stockOwner: 1 } });
     await refused(h.svc.previewCreate(emptyRequest(), ordinary3));
     await refused(h.svc.previewUpdate(12, emptyRequest(), ordinary3));
-  });
-
-  it('refuses handing goods back against company 4’s reservation — even from the task', async () => {
-    const h = reservations({ parties: { requester: 4, stockOwner: 1 }, onTask: [39] });
     await refused(h.returns.previewCreate({ reservationId: 8, quantity: 1 } as any, ordinary3));
-    expect(h.isOnTask).not.toHaveBeenCalled();
   });
 
-  it('refuses reading company 4’s reservation without a warehouse permission or the task', async () => {
+  it('reading keeps the company rule: company 4’s reservation is not found for company 3 off the task, and seen by company 4 off it', async () => {
     const h = reservations({ parties: { requester: 4, stockOwner: 1 } });
     await expect(h.svc.assertMayRead(ordinary3, 8)).rejects.toBeInstanceOf(NotFoundException);
+    const ordinary4 = actor({ userId: 44, home: { wildcard: false, entityIds: [4] } });
+    await expect(h.svc.assertMayRead(ordinary4, 8)).resolves.toBeUndefined();
+    // …while acting on it is not theirs off the task.
+    await refused(h.svc.assertMay(ordinary4, 8, 'reservation.cancel'));
+    await refused(h.svc.previewCreate(emptyRequest(), ordinary4));
   });
 });
 
@@ -492,18 +538,20 @@ describe('G · a legacy reservation whose requester was never pinned', () => {
     await expect(h.svc.assertMayRead(ordinary3, 8)).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('refuses warehouse staff acting as its requester, when they are not on the task', async () => {
+  it('lets warehouse staff act as its requester, off the task — the warehouse is global', async () => {
     const h = reservations({ parties: legacy });
-    await refused(h.returns.previewCreate({ reservationId: 8, quantity: 1 } as any, warehouseHead));
+    await passed(h.returns.previewCreate({ reservationId: 8, quantity: 1 } as any, warehouseHead));
+    await passed(h.svc.previewCreate(emptyRequest(), storekeeper));
+    expect(h.isOnTask).not.toHaveBeenCalled();
   });
 
   it('never uses a request body’s entityId either way', async () => {
-    // Labelled with company 3, project in company 4: the label grants nothing.
+    // Labelled with company 3, project in company 4, off the task: the label grants nothing.
     await refused(reservations({ parties: { requester: 4, stockOwner: 1 } }).svc.previewCreate(emptyRequest(3), ordinary3));
-    // Labelled with company 4, project in company 3: the label refuses nothing.
-    await passed(reservations({ parties: { requester: 3, stockOwner: 1 } }).svc.previewCreate(emptyRequest(4), ordinary3));
+    // Labelled with company 4, project in company 3, on the task: the label refuses nothing.
+    await passed(reservations({ parties: { requester: 3, stockOwner: 1 }, onTask: [39] }).svc.previewCreate(emptyRequest(4), ordinary3));
     await notRefused(
-      reservations({ parties: { requester: 3, stockOwner: 1 } }).svc.previewUpdate(12, emptyRequest(4), ordinary3),
+      reservations({ parties: { requester: 3, stockOwner: 1 }, onTask: [39] }).svc.previewUpdate(12, emptyRequest(4), ordinary3),
     );
   });
 });
@@ -541,12 +589,13 @@ describe('H · the super admin continues to work', () => {
 
 describe('service-level standing does not open an HTTP route the guard still closes', () => {
   // E and F above are decided in the SERVICES. Over HTTP every reservation and
-  // return mutation also passes PermissionGuard first: company 3's person with
-  // no warehouse permission holds requester standing in the service and is
-  // still refused at the route. (Since the owner's decision of 2026-09-20 the
-  // asking routes also admit view_warehouse — the CRM task panel's right — so
-  // the route needs a warehouse permission, not necessarily the manage one;
-  // the exact lists are pinned in auth/write-route-permissions.spec.ts.)
+  // return mutation also passes PermissionGuard first: company 3's person ON
+  // THE TASK with no warehouse permission holds requester standing in the
+  // service and is still refused at the route. (Since the owner's decision of
+  // 2026-09-20 the asking routes also admit view_warehouse — the CRM task
+  // panel's right — so the route needs a warehouse permission, not necessarily
+  // the manage one; the exact lists are pinned in
+  // auth/write-route-permissions.spec.ts.)
   it.each([
     ['POST /reservations', ReservationsController.prototype, 'create', 'manage_reservations'],
     ['POST /reservations/preflight/create', ReservationsController.prototype, 'preflightCreate', 'manage_reservations'],
@@ -559,8 +608,8 @@ describe('service-level standing does not open an HTTP route the guard still clo
     expect(required.every((p) => ['view_warehouse', permission].includes(p))).toBe(true);
     expect(required.some((p) => ordinary3.permissionNames.includes(p))).toBe(false);
     await expect(guardFor(ordinary3)(required)).rejects.toBeInstanceOf(ForbiddenException);
-    // …while the same person passes the service's requester check for company 3.
-    await passed(reservations({ parties: { requester: 3, stockOwner: 1 } }).svc.previewCreate(emptyRequest(), ordinary3));
+    // …while the same person, on the task, passes the service's requester check.
+    await passed(reservations({ parties: { requester: 3, stockOwner: 1 }, onTask: [39] }).svc.previewCreate(emptyRequest(), ordinary3));
   });
 });
 
