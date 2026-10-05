@@ -5,6 +5,7 @@ import { UsersPrismaService } from '../common/users-prisma.service';
 import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
 import { CreateAssetRequestDto, DirectIssueDto, IssueAssetRequestDto, ObjectIssueDto, ReassignCustodyDto, ReleaseCondition, ReturnCustodyDto } from './dto/asset-custody.dto';
 import { ObjectsService } from '../objects/objects.service';
+import { holdsObjectRight, isResponsibleOf, OBJECT_PAGE_RIGHT } from '../objects/object-page-rights';
 import { TxClient } from '../common/operations/operations.service';
 
 /**
@@ -25,16 +26,6 @@ export const PERM = {
 } as const;
 
 type Actor = { userId: number; isSuperAdmin: boolean; permissions: string[] };
-
-/**
- * Where a custody read is asked from: the organisation acted in (X-Entity-ID,
- * already checked against the person's own by AuthGuard; null when none was
- * sent — the warehouse client sends none) and the caller's own token, for CRM.
- * The warehouse is global (owner decision 2026-10-05): the scope never filters
- * custody rows; it only lets CRM answer whether a person may open an object.
- */
-export type ReadScope = { declared: number | null; authorization?: string };
-const NO_SCOPE: ReadScope = { declared: null };
 
 const custodyInclude = {
   asset: { include: { item: true, warehouse: true } },
@@ -152,7 +143,10 @@ export class AssetCustodyService {
     if (query.status) where.status = query.status;
     if (query.forUserId) where.forUserId = query.forUserId;
     if (query.forObjectId) {
-      // An object's requests: its page shows them to anyone who may see the object's page.
+      // An object's requests: the CRM object page's «Պահեստային հայտեր» tab —
+      // its own right, the object's responsible person, or a super admin
+      // (owner 2026-10-05). The warehouse client never filters by object.
+      await this.assertMayReadObjectTab(Number(query.forObjectId), actor, OBJECT_PAGE_RIGHT.requests, 'Օբյեկտի հայտերը դիտելու իրավունք չկա');
       where.forObjectId = Number(query.forObjectId);
       return this.prisma.assetRequest.findMany({
         where,
@@ -405,41 +399,30 @@ export class AssetCustodyService {
   }
 
   /**
-   * May this person read what an object holds? The warehouse is global (owner
-   * decision 2026-10-05): an object is never held to the organisation acted
-   * in, whichever organisation CRM files it under, and CRM's catalogue is not
-   * consulted for that.
-   *
-   *   - A custody right (view / issue / approve) admits, for any object.
-   *   - Otherwise, in an organisation, CRM letting the person open the object
-   *     there (its own GET, with their token): the object page's «Գույք» tab
-   *     is shown to whoever sees the object in CRM, warehouse right or not.
-   *   - Otherwise 403. With no organisation sent only a custody right admits
-   *     (CRM answers nothing without one).
+   * May this person read one object's tab of the CRM object page (owner
+   * decision 2026-10-05, objects/object-page-rights.ts)? The tab's own right
+   * or a super admin — decided here, nothing asked; otherwise the object's
+   * responsible person, as CRM's internal card names them (the «Գույք» tab is
+   * where they confirm receipt, «Պահեստային հայտեր» where they ask). The
+   * custody rights (view / issue / approve) do NOT open an object's reads any
+   * more; they keep the register. The warehouse is global: no organisation is
+   * consulted, and CRM's catalogue cache is not either. CRM unreachable, or
+   * no such object, is "not the responsible person" — 403, never a guess.
    */
-  async assertMayReadObject(objectId: number, actor: Actor, scope: ReadScope = NO_SCOPE): Promise<void> {
-    if (this.has(actor, PERM.view, PERM.issue, PERM.approve)) return;
-    if (scope.declared !== null && (await this.crmMayOpenObject(objectId, scope))) return;
-    throw new ForbiddenException('Օբյեկտի գույքը դիտելու իրավունք չկա');
+  private async assertMayReadObjectTab(objectId: number, actor: Actor, right: string, refusal: string): Promise<void> {
+    if (holdsObjectRight(actor.permissions, actor.isSuperAdmin, right)) return;
+    const card = await this.objects.card(objectId).catch(() => null);
+    if (isResponsibleOf(card, actor.userId)) return;
+    throw new ForbiddenException(refusal);
   }
 
-  /** CRM's own answer: may this person open the object in this organisation? Unreachable is "no". */
-  private async crmMayOpenObject(objectId: number, scope: ReadScope): Promise<boolean> {
-    if (!scope.authorization || scope.declared === null) return false;
-    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
-    try {
-      const res = await fetch(`${crmUrl}/api/construction-objects/${objectId}`, {
-        headers: { Authorization: scope.authorization, 'x-entity-id': String(scope.declared) },
-        signal: AbortSignal.timeout(5000),
-      });
-      return res.ok;
-    } catch {
-      return false;
-    }
+  /** What an object holds: GET /custody/object/:objectId and GET /custody?holderObjectId=. */
+  async assertMayReadObject(objectId: number, actor: Actor): Promise<void> {
+    await this.assertMayReadObjectTab(objectId, actor, OBJECT_PAGE_RIGHT.assets, 'Օբյեկտի գույքը դիտելու իրավունք չկա');
   }
 
-  async forObject(objectId: number, actor?: Actor, scope: ReadScope = NO_SCOPE) {
-    if (actor) await this.assertMayReadObject(objectId, actor, scope);
+  async forObject(objectId: number, actor: Actor) {
+    await this.assertMayReadObject(objectId, actor);
     const rows = await this.prisma.assetCustody.findMany({
       where: { OR: [{ holderObjectId: objectId }, { originObjectId: objectId }] },
       include: custodyInclude,
@@ -572,10 +555,9 @@ export class AssetCustodyService {
   async list(
     query: { holderUserId?: number; holderObjectId?: number; open?: boolean; assetId?: number },
     actor: Actor,
-    scope: ReadScope = NO_SCOPE,
   ) {
     if (query.holderObjectId) {
-      await this.assertMayReadObject(query.holderObjectId, actor, scope);
+      await this.assertMayReadObject(query.holderObjectId, actor);
     } else if (query.holderUserId !== actor.userId && !this.has(actor, PERM.view, PERM.issue, PERM.approve)) {
       throw new ForbiddenException('Գույքի պատասխանատվությունները դիտելու իրավունք չկա');
     }

@@ -15,6 +15,8 @@ import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
 import { RESERVATION_STATUS_LABELS, reservationStatusLabel } from '../common/status-labels';
 import { WarehouseActor } from '../auth/actor';
+import { holdsObjectRight, isResponsibleOf, OBJECT_PAGE_RIGHT } from '../objects/object-page-rights';
+import { CrmObjectCard, fetchCrmObjectCard } from '../objects/objects.service';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 import { RequesterWorkspaceService } from '../common/workspace/requester-workspace.service';
 import { ReservationParties, SideVerdict, decideOperation, isReservationReader, mayRead } from './two-party';
@@ -2611,21 +2613,8 @@ export class ReservationsService {
   // ─── construction-object requests (2026-09-29) ────────────────────────────────
 
   /** The object as CRM knows it now (responsible person, project) — never cached: it decides who may ask. */
-  async objectCard(objectId: number): Promise<{
-    id: number; code: string; name: string; projectId: number | null; projectName: string | null; entityId: number | null; responsibleId: number | null;
-  }> {
-    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
-    let res: Response;
-    try {
-      res = await fetch(`${crmUrl}/api/construction-objects/internal/${objectId}/card`, {
-        headers: { 'x-internal-secret': requireInternalSecret() },
-      });
-    } catch {
-      throw new BadRequestException('Օբյեկտի տվյալները հասանելի չեն (CRM) — փորձեք կրկին');
-    }
-    if (res.status === 404) throw new NotFoundException('Օբյեկտը չի գտնվել');
-    if (!res.ok) throw new BadRequestException('Օբյեկտի տվյալները հասանելի չեն (CRM) — փորձեք կրկին');
-    return (await res.json()) as any;
+  objectCard(objectId: number): Promise<CrmObjectCard> {
+    return fetchCrmObjectCard(objectId);
   }
 
   /** Code + name of objects for the Reservations list. CRM down → empty labels, the list still works. */
@@ -2899,8 +2888,18 @@ export class ReservationsService {
   /**
    * An object's own requests for its page (2026-09-29): what was asked, issued,
    * accepted, and any purchase requisition filed for a short line.
+   *
+   * Who may read them (owner 2026-10-05, objects/object-page-rights.ts): the
+   * tab's right or a super admin — decided here, nothing asked — else the
+   * object's responsible person as CRM's internal card names them. The general
+   * warehouse rights do not open it. CRM unreachable, or no such object, is
+   * "not the responsible person": 403, never a guess.
    */
-  async forObject(objectId: number) {
+  async forObject(objectId: number, actor: WarehouseActor) {
+    if (!holdsObjectRight(actor.permissionNames, actor.isSuperAdmin, OBJECT_PAGE_RIGHT.requests)) {
+      const card = await this.objectCard(objectId).catch(() => null);
+      if (!isResponsibleOf(card, actor.userId)) throw new ForbiddenException('Օբյեկտի հայտերը դիտելու իրավունք չկա');
+    }
     const rows = await this.prisma.resourceReservation.findMany({
       where: { objectId, taskId: null },
       include: {

@@ -9,6 +9,31 @@ import { PrismaService } from 'prisma/prisma.service';
 
 import { ItemType } from '../common/enums/item-type.enum';
 
+export type CrmObjectCard = {
+  id: number; code: string; name: string; projectId: number | null; projectName: string | null; entityId: number | null; responsibleId: number | null;
+};
+
+/**
+ * One object's card as CRM's internal route answers it — never from the
+ * catalogue cache: for decisions (who is responsible), not labels. A missing
+ * object is a 404; CRM unreachable is a 400 the caller may retry. The one
+ * lookup behind ObjectsService.card and ReservationsService.objectCard.
+ */
+export async function fetchCrmObjectCard(objectId: number): Promise<CrmObjectCard> {
+  const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+  let res: Response;
+  try {
+    res = await fetch(`${crmUrl}/api/construction-objects/internal/${objectId}/card`, {
+      headers: { 'x-internal-secret': requireInternalSecret() },
+    });
+  } catch {
+    throw new BadRequestException('Օբյեկտի տվյալները հասանելի չեն (CRM) — փորձեք կրկին');
+  }
+  if (res.status === 404) throw new NotFoundException('Օբյեկտը չի գտնվել');
+  if (!res.ok) throw new BadRequestException('Օբյեկտի տվյալները հասանելի չեն (CRM) — փորձեք կրկին');
+  return (await res.json()) as CrmObjectCard;
+}
+
 /**
  * #2042 — the warehouse side of construction objects: materials actually
  * issued (one ledger, object + task lenses), frozen costs, estimate lines and
@@ -58,6 +83,11 @@ export class ObjectsService {
       row = all.find((o) => o.id === objectId);
     }
     return row;
+  }
+
+  /** One object's card, fresh from CRM (fetchCrmObjectCard) — for decisions, not labels. */
+  card(objectId: number): Promise<CrmObjectCard> {
+    return fetchCrmObjectCard(objectId);
   }
 
   /** The CRM object list, for pickers/labels on the warehouse side. */

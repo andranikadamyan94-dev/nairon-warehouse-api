@@ -16,7 +16,11 @@ import { ObjectsService } from './objects.service';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { Public } from '../auth/decorators/public.decorator';
 import { InternalGuard } from '../auth/guards/internal.guard';
+import { OBJECT_PAGE_RIGHT } from './object-page-rights';
 
+// The general warehouse rights: they open the object list (pickers/filters)
+// and nothing of one object's page (owner's decision 2026-10-05, see
+// object-page-rights.ts).
 const VIEW_PERMS = [
   'view_resources',
   'manage_inventory',
@@ -63,8 +67,12 @@ export class ObjectsController {
     return this.objectsService.list();
   }
 
+  // ── one object's page (CRM) ───────────────────────────────────────────────
+  // Each read below answers one tab of the CRM object page and is opened by
+  // that tab's right alone (super admins pass). The CRM page is the only caller.
+
   @UseGuards(PermissionGuard)
-  @Permissions(...VIEW_PERMS)
+  @Permissions(OBJECT_PAGE_RIGHT.materials)
   @Get(':objectId/materials')
   @ApiOperation({ summary: 'Per-item actuals at frozen costs' })
   materials(@Param('objectId', ParseIntPipe) objectId: number) {
@@ -72,23 +80,25 @@ export class ObjectsController {
   }
 
   @UseGuards(PermissionGuard)
-  @Permissions(...VIEW_PERMS)
+  @Permissions(OBJECT_PAGE_RIGHT.materials)
   @Get(':objectId/movements')
   @ApiOperation({ summary: 'Raw ledger rows of the object (paginated)' })
   movements(@Param('objectId', ParseIntPipe) objectId: number, @Query() query: any) {
     return this.objectsService.movements(objectId, query);
   }
 
+  // The summary feeds both the materials tab and the finance tab's cost cards.
   @UseGuards(PermissionGuard)
-  @Permissions(...VIEW_PERMS)
+  @Permissions(OBJECT_PAGE_RIGHT.materials, OBJECT_PAGE_RIGHT.finance)
   @Get(':objectId/summary')
   @ApiOperation({ summary: 'Planned vs actual comparison' })
   summary(@Param('objectId', ParseIntPipe) objectId: number) {
     return this.objectsService.summary(objectId);
   }
 
+  // Reading the estimate is the tab's right; editing it stays manage_warehouses.
   @UseGuards(PermissionGuard)
-  @Permissions(...VIEW_PERMS)
+  @Permissions(OBJECT_PAGE_RIGHT.estimate)
   @Get(':objectId/estimate')
   @ApiOperation({ summary: 'Estimate lines' })
   listEstimate(@Param('objectId', ParseIntPipe) objectId: number) {

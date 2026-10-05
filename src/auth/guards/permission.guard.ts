@@ -8,6 +8,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { WarehouseActor } from '../actor';
 import { WarehouseActorService } from '../actor.service';
+import { OBJECT_PAGE_RIGHTS } from '../../objects/object-page-rights';
 
 export const PERMISSIONS_KEY = 'permissions';
 export const Permissions = (...permissions: string[]) =>
@@ -31,10 +32,17 @@ const PROCUREMENT_ONLY = new Set([
 ]);
 
 /**
+ * Routes that only their own, named rights may open: the super-permission does
+ * not stand in for them. Procurement (above) and, since 2026-10-05, the CRM
+ * object page's tabs — see objects/object-page-rights.ts.
+ */
+const ownRightOnly = (permission: string) => PROCUREMENT_ONLY.has(permission) || OBJECT_PAGE_RIGHTS.has(permission);
+
+/**
  * Route-level permission check. Relies on the global AuthGuard having set
  * request.user and request.actor. `manage_warehouse` acts as the warehouse
  * super-permission and satisfies any requirement — except procurement-only
- * routes (see above).
+ * routes and the object page's tabs (see above).
  *
  * The permissions it tests are the actor's, resolved in the workspace the
  * caller declared. Before Warehouse Domain Hardening they were resolved with no
@@ -87,8 +95,8 @@ export class PermissionGuard implements CanActivate {
     request.isSuperAdmin = isSuperAdmin;
     request.permissionNames = permissionNames;
     if (isSuperAdmin) return true;
-    const procurementOnly = required.every((p) => PROCUREMENT_ONLY.has(p));
-    if (!procurementOnly && permissionNames.includes('manage_warehouse')) return true;
+    const exclusive = required.every(ownRightOnly);
+    if (!exclusive && permissionNames.includes('manage_warehouse')) return true;
 
     if (!required.some((p) => permissionNames.includes(p))) {
       throw new ForbiddenException('Պահեստի թույլտվությունները բավարար չեն');

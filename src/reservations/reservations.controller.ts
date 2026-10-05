@@ -213,11 +213,16 @@ export class ReservationsController {
 
   // ── construction objects (2026-09-29) ─────────────────────────────────────
 
-  /** An object's own requests. The object's page reads them; the service answers who may act. */
+  /**
+   * An object's own requests — the CRM object page's «Պահեստային հայտեր» tab,
+   * its only caller: view_object_requests, the object's responsible person,
+   * or a super admin (owner 2026-10-05; the service decides). Who may act on
+   * a row is still answered per row.
+   */
   @Get('object/:objectId')
   @ApiOperation({ summary: "An object's own warehouse requests" })
-  forObject(@Param('objectId') objectId: string) {
-    return this.reservationsService.forObject(+objectId);
+  forObject(@Param('objectId') objectId: string, @Actor() actor: WarehouseActor) {
+    return this.reservationsService.forObject(+objectId, actor);
   }
 
   /** The object's responsible person asks for goods (only they — checked against CRM). */

@@ -1,6 +1,6 @@
 import { Body, Controller, ForbiddenException, Get, Headers, Param, ParseIntPipe, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { AssetCustodyService, PERM, ReadScope } from './asset-custody.service';
+import { AssetCustodyService, PERM } from './asset-custody.service';
 import { CreateAssetRequestDto, DecideAssetRequestDto, DirectIssueDto, IssueAssetRequestDto, ObjectIssueDto, ReassignCustodyDto, ReturnCustodyDto } from './dto/asset-custody.dto';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { Public } from '../auth/decorators/public.decorator';
@@ -35,15 +35,6 @@ export class AssetCustodyController {
     const resolveIn = accessWorkspace(isDelegatedToken(req.user), readDeclaredWorkspace(req.headers?.['x-entity-id']));
     const info = await this.usersPrisma.getUserAccessInfo(userId, resolveIn);
     return { userId, isSuperAdmin: !!info.isSuperAdmin, permissions: info.permissionNames ?? [] };
-  }
-
-  /** The organisation as AuthGuard verified it (request.actor), and the caller's token for CRM. */
-  private scopeOf(req: any): ReadScope {
-    const auth = req.headers?.authorization;
-    return {
-      declared: req.actor?.declared ?? null,
-      authorization: typeof auth === 'string' ? auth : undefined,
-    };
   }
 
   private entityOf(req: any): number | null {
@@ -156,16 +147,17 @@ export class AssetCustodyController {
     return this.service.reassign(id, dto, await this.actor(req));
   }
 
+  /** The CRM object page's «Գույք» tab: view_object_assets, the object's responsible person, or a super admin (the service decides). */
   @Get('custody/object/:objectId')
   @ApiOperation({ summary: 'What an object holds and held' })
   async forObject(@Param('objectId', ParseIntPipe) objectId: number, @Req() req: any) {
-    return this.service.forObject(objectId, await this.actor(req), this.scopeOf(req));
+    return this.service.forObject(objectId, await this.actor(req));
   }
 
   @Get('custody')
   @ApiOperation({ summary: 'The custody register (filters: holderUserId, holderObjectId, assetId, open=1)' })
   async list(@Query() q: any, @Req() req: any) {
-    return this.service.list({ holderUserId: q.holderUserId ? Number(q.holderUserId) : undefined, holderObjectId: q.holderObjectId ? Number(q.holderObjectId) : undefined, assetId: q.assetId ? Number(q.assetId) : undefined, open: q.open === '1' || q.open === 'true' }, await this.actor(req), this.scopeOf(req));
+    return this.service.list({ holderUserId: q.holderUserId ? Number(q.holderUserId) : undefined, holderObjectId: q.holderObjectId ? Number(q.holderObjectId) : undefined, assetId: q.assetId ? Number(q.assetId) : undefined, open: q.open === '1' || q.open === 'true' }, await this.actor(req));
   }
 
   @Get('custody/mine')
