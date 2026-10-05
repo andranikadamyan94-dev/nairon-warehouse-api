@@ -4,6 +4,8 @@ import { AssetCustodyService, PERM, ReadScope } from './asset-custody.service';
 import { CreateAssetRequestDto, DecideAssetRequestDto, DirectIssueDto, IssueAssetRequestDto, ObjectIssueDto, ReassignCustodyDto, ReturnCustodyDto } from './dto/asset-custody.dto';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { Public } from '../auth/decorators/public.decorator';
+import { accessWorkspace, readDeclaredWorkspace } from '../auth/actor';
+import { isDelegatedToken } from '../auth/delegated-token.policy';
 import { UsersPrismaService } from '../common/users-prisma.service';
 import { OperationsService } from '../common/operations/operations.service';
 import { OperationKey } from '../common/operations/operation-key.decorator';
@@ -22,9 +24,16 @@ export class AssetCustodyController {
     private readonly operations: OperationsService,
   ) {}
 
+  /**
+   * Custody rights, resolved the way WarehouseActorService resolves the actor's
+   * ("the warehouse is global", 2026-10-05): across every organisation for a
+   * session, whatever the browser has selected; in its own one for a delegated
+   * AI token, whose header AuthGuard has already held to it.
+   */
   private async actor(req: any) {
     const userId = Number(req.user?.id);
-    const info = await this.usersPrisma.getUserAccessInfo(userId, Number(req.headers?.['x-entity-id'] ?? 0) || undefined);
+    const resolveIn = accessWorkspace(isDelegatedToken(req.user), readDeclaredWorkspace(req.headers?.['x-entity-id']));
+    const info = await this.usersPrisma.getUserAccessInfo(userId, resolveIn);
     return { userId, isSuperAdmin: !!info.isSuperAdmin, permissions: info.permissionNames ?? [] };
   }
 

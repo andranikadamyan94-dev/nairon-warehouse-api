@@ -1,9 +1,12 @@
 import {
+  EVERY_WORKSPACE,
   WarehouseActor,
+  accessWorkspace,
   boundedTo,
   decideWorkspace,
   mayDeclare,
   readDeclaredWorkspace,
+  settleDeclaration,
 } from './actor';
 
 const actor = (over: Partial<WarehouseActor> = {}): WarehouseActor => ({
@@ -54,14 +57,51 @@ describe('who may declare a workspace', () => {
   });
 });
 
+describe('the warehouse is global · where permissions are resolved (2026-10-05)', () => {
+  /** The keeper on real data: one warehouse role, in company 6, and company 1 open in the browser. */
+  const keeper = { wildcard: false, entityIds: [6] };
+
+  it('resolves a session across every organisation, whatever the browser has selected', () => {
+    expect(accessWorkspace(false, 1)).toBe(EVERY_WORKSPACE);
+    expect(accessWorkspace(false, 6)).toBe(EVERY_WORKSPACE);
+    expect(accessWorkspace(false, null)).toBe(EVERY_WORKSPACE);
+  });
+
+  it('resolves a delegated token in the one organisation it declared', () => {
+    expect(accessWorkspace(true, 6)).toBe(6);
+    expect(accessWorkspace(true, null)).toBe(EVERY_WORKSPACE);
+  });
+
+  it('keeps a session header the person can back as the label new records carry', () => {
+    expect(settleDeclaration(keeper, 6, false)).toEqual({ refused: false, declared: 6, resolveIn: EVERY_WORKSPACE });
+    expect(settleDeclaration({ wildcard: true, entityIds: [] }, 1, false)).toEqual({ refused: false, declared: 1, resolveIn: EVERY_WORKSPACE });
+  });
+
+  it('ignores — never refuses — a session header naming a company the person has no role in', () => {
+    expect(settleDeclaration(keeper, 1, false)).toEqual({ refused: false, declared: null, resolveIn: EVERY_WORKSPACE });
+    expect(settleDeclaration({ wildcard: false, entityIds: [] }, 1, false)).toEqual({ refused: false, declared: null, resolveIn: EVERY_WORKSPACE });
+  });
+
+  it('is "declared nothing" when no header came', () => {
+    expect(settleDeclaration(keeper, null, false)).toEqual({ refused: false, declared: null, resolveIn: EVERY_WORKSPACE });
+  });
+
+  it('holds a delegated token to the strict rule: its organisation only, and refused outside it', () => {
+    expect(settleDeclaration(keeper, 6, true)).toEqual({ refused: false, declared: 6, resolveIn: 6 });
+    expect(settleDeclaration(keeper, 1, true)).toEqual({ refused: true });
+    expect(settleDeclaration({ wildcard: true, entityIds: [] }, 1, true)).toEqual({ refused: false, declared: 1, resolveIn: 1 });
+    expect(settleDeclaration(keeper, null, true)).toEqual({ refused: false, declared: null, resolveIn: EVERY_WORKSPACE });
+  });
+});
+
 describe('the organization boundary — the companies somebody holds a role in', () => {
   it('is nothing at all for a wildcard holder who declared nothing', () => {
     expect(boundedTo(unbounded)).toBeNull();
   });
 
   it('stays nothing for a wildcard holder even when they declare a company', () => {
-    // A declaration narrows the permissions the actor holds — see
-    // WarehouseActorService — not the companies they hold a role in.
+    // A declaration is a label on a session (settleDeclaration); it says
+    // nothing about the companies they hold a role in.
     expect(boundedTo(actor({ declared: 4 }))).toBeNull();
   });
 

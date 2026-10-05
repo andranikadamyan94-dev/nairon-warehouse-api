@@ -50,10 +50,16 @@ const usersPrisma = {
     const ids = state.roleEntities.get(userId) ?? [];
     return { wildcard: ids.includes(0), entityIds: ids.filter((i) => i > 0) };
   },
+  // Entity 0 answers as the real query does: every organisation's grants, the
+  // union — what an ordinary session is resolved with since 2026-10-05 (the
+  // warehouse is global). A delegated token is resolved in its own entity.
   getUserAccessInfo: async (userId: number, entityId = 0) => ({
     isSuperAdmin: state.superAdmin.has(userId),
     isGlobalSuperAdmin: state.superAdmin.has(userId),
-    permissionNames: state.grants.get(`${userId}:${entityId}`) ?? [],
+    permissionNames:
+      entityId === 0
+        ? [...new Set([...state.grants.entries()].filter(([k]) => k.startsWith(`${userId}:`)).flatMap(([, v]) => v))]
+        : state.grants.get(`${userId}:${entityId}`) ?? [],
   }),
 };
 

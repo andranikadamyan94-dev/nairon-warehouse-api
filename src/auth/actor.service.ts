@@ -1,7 +1,8 @@
 import { ForbiddenException, Injectable, Logger } from '@nestjs/common';
 
 import { UsersPrismaService } from '../common/users-prisma.service';
-import { WarehouseActor, mayDeclare, readDeclaredWorkspace } from './actor';
+import { WarehouseActor, readDeclaredWorkspace, settleDeclaration } from './actor';
+import { isDelegatedToken } from './delegated-token.policy';
 
 /** Where the resolved actor is parked so one request costs one resolution. */
 const CACHE = Symbol('warehouseActor');
@@ -20,11 +21,20 @@ type RequestLike = {
  * Everything here comes from the token's subject and the users database. The
  * only thing the caller contributes is `x-entity-id`, and it is a request, not
  * a fact: it is checked against the person's own assignments before it is
- * allowed to mean anything, and a claim that fails is refused rather than
- * silently dropped — somebody asking to act as a company they have no role in
- * has made a mistake worth hearing about, and if it was not a mistake then a
- * silent downgrade to "everything you can do anywhere" is the worst possible
- * answer.
+ * allowed to mean anything.
+ *
+ * "The warehouse is global" (owner, 2026-10-05): for an ordinary session the
+ * header decides nothing about rights — permissions and super-admin status are
+ * resolved across every organisation, and a claim the person cannot back is
+ * dropped rather than refused, because the warehouse client has sent the
+ * browser's selected organisation on every request since 2026-10-02 and a
+ * keeper with another company open must not lose the warehouse. The header
+ * survives only as `declared`, the label new records are stamped with.
+ *
+ * A delegated AI token keeps the strict rule: resolved in its one organisation,
+ * and a claim that fails is refused rather than silently dropped — for a token
+ * minted for one company, a silent downgrade to "everything you can do
+ * anywhere" is the worst possible answer. See settleDeclaration in actor.ts.
  *
  * Resolved once per request, in AuthGuard, so the rest of the service can read
  * `request.actor` without paying for it again.
@@ -91,16 +101,19 @@ export class WarehouseActorService {
       entityIds: [...new Set([...roles.entityIds, ...member])].sort((x, y) => x - y),
     };
     const asked = readDeclaredWorkspace(request.headers?.['x-entity-id']);
+    // A session: the claim is a label, kept when it is theirs, dropped when it
+    // is not. A delegated token: held to it, refused when it is not theirs.
+    const settled = settleDeclaration(home, asked, isDelegatedToken(request.user));
 
-    if (asked !== null && !mayDeclare(home, asked)) {
+    if (settled.refused === true) {
       // Deliberately the same shape as any other refusal: it says the claim was
       // rejected, not which workspaces exist or which ones this person holds.
       throw new ForbiddenException('Դուք նշված կազմակերպությունում դեր չունեք');
     }
 
     const { isSuperAdmin, isGlobalSuperAdmin, permissionNames, readOnly } =
-      await this.usersPrisma.getUserAccessInfo(userId, asked ?? 0);
+      await this.usersPrisma.getUserAccessInfo(userId, settled.resolveIn);
 
-    return { userId, isSuperAdmin, isGlobalSuperAdmin, readOnly, permissionNames, home, declared: asked };
+    return { userId, isSuperAdmin, isGlobalSuperAdmin, readOnly, permissionNames, home, declared: settled.declared };
   }
 }
