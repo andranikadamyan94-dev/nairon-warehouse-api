@@ -7,6 +7,7 @@ import { ResourceReturnsController } from '../resource-returns/resource-returns.
 import { ProcurementController } from '../procurement/procurement.controller';
 import { MaintenanceController } from '../maintenance/maintenance.controller';
 import { AssetsController } from '../assets/assets.controller';
+import { ItemsController } from '../items/items.controller';
 
 /**
  * A viewing permission must not open a route that changes anything.
@@ -66,6 +67,7 @@ describe('warehouse write routes · no mutation behind a viewing permission', ()
     ['POST /procurement/:id/resubmit', ProcurementController.prototype, 'resubmit'],
     ['POST /maintenance/:id/finalize', MaintenanceController.prototype, 'finalize'],
     ['PATCH /assets/:id', AssetsController.prototype, 'update'],
+    ['POST /items/:id/assign-code', ItemsController.prototype, 'assignCode'],
   ];
 
   it.each(mutations)('%s requires no viewing permission', (_route, controller, method) => {

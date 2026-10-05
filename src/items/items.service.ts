@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
 
@@ -10,6 +10,20 @@ import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { WarehouseActor } from '../auth/actor';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 import { TxClient } from '../common/operations/operations.service';
+
+/**
+ * The system code of an item: RES- and the row id, six digits wide
+ * (RES-000042). Derived from the id, so it is unique and race-proof without a
+ * counter of its own. Create issues it; assignCode issues the same one to an
+ * item that predates auto-numbering and never got one.
+ */
+export const systemItemCode = (id: number) => `RES-${String(id).padStart(6, '0')}`;
+
+/** No code yet: never set, or left blank by the old free-text field. */
+export const hasNoCode = (code: string | null | undefined) => !code || !code.trim();
+
+/** The refusal when an item already carries a code — codes are never changed. */
+export const codeExistsMessage = (code: string) => `Կոդն արդեն կա՝ ${code}, այն փոխել հնարավոր չէ։`;
 
 @Injectable()
 export class ItemsService {
@@ -82,7 +96,7 @@ export class ItemsService {
       });
       return client.item.update({
         where: { id: created.id },
-        data: { code: `RES-${String(created.id).padStart(6, '0')}` },
+        data: { code: systemItemCode(created.id) },
       });
     };
     const item = tx ? await write(tx) : await this.prisma.$transaction((client) => write(client as TxClient));
@@ -230,6 +244,67 @@ export class ItemsService {
     // quantity directly, either of which can put the item below the line.
     this.stockAlerts.check([id]);
     return item;
+  }
+
+  /**
+   * Is this item still without a code? Asked by assignCode and by its
+   * preflight, so both refuse the same item the same way. Returns the item.
+   */
+  async assertMayAssignCode(actor: WarehouseActor, id: number) {
+    const item = await this.findOne(id, actor);
+    await this.assertMayEdit(actor, id);
+    if (!hasNoCode(item.code)) {
+      throw new ConflictException({
+        message: codeExistsMessage(item.code as string),
+        reason: 'ITEM_CODE_EXISTS',
+        itemId: id,
+        code: item.code,
+      });
+    }
+    return item;
+  }
+
+  /**
+   * Give an item that predates auto-numbering the system code create would
+   * have given it (owner, 2026-10-02). Only ever fills an EMPTY code: an
+   * existing code is never changed — that is still update()'s rule, and this
+   * is not a way around it.
+   *
+   * The write is conditional on the code read a moment ago, so two people (or
+   * a retry) racing on the same item cannot both win: the loser is refused
+   * with the code the winner set.
+   */
+  async assignCode(id: number, actor: WarehouseActor, tx?: TxClient) {
+    const before = await this.assertMayAssignCode(actor, id);
+    const db = tx ?? this.prisma;
+    const code = systemItemCode(id);
+    let count: number;
+    try {
+      ({ count } = await db.item.updateMany({ where: { id, code: before.code ?? null }, data: { code } }));
+    } catch (e: any) {
+      // Somebody typed this very code onto another item by hand, back when
+      // the field was free text. Do not guess another one.
+      if (e?.code === 'P2002') {
+        throw new ConflictException({
+          message: `Կոդը՝ ${code}, արդեն զբաղված է այլ ապրանքի կողմից։`,
+          reason: 'ITEM_CODE_TAKEN',
+          itemId: id,
+          code,
+        });
+      }
+      throw e;
+    }
+    if (count === 0) {
+      const now = await db.item.findFirst({ where: { id }, select: { code: true } });
+      if (!now) throw new NotFoundException({ message: 'Ռեսուրսը չի գտնվել', itemId: id });
+      throw new ConflictException({
+        message: codeExistsMessage(now.code ?? ''),
+        reason: 'ITEM_CODE_EXISTS',
+        itemId: id,
+        code: now.code,
+      });
+    }
+    return db.item.findFirst({ where: { id }, include: { category: true } });
   }
 
   async remove(id: number, actor: WarehouseActor) {

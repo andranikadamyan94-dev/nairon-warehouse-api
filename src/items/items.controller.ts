@@ -103,6 +103,36 @@ export class ItemsController {
     return PREFLIGHT_OK;
   }
 
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_items')
+  @Post('preflight/assign-code/:id')
+  @ApiOperation({ summary: 'Preflight: may this item get the next system code?' })
+  async preflightAssignCode(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    await this.itemsService.assertMayAssignCode(actor, id);
+    return PREFLIGHT_OK;
+  }
+
+  /**
+   * Give an item with no code the system code (RES-000151) — for items made
+   * before auto-numbering. Same permission as changing the item. An item that
+   * already has a code is refused with 409; its code is never changed.
+   */
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_items')
+  @Post(':id/assign-code')
+  @ApiOperation({ summary: 'Assign the next system code to an item whose code is empty' })
+  async assignCode(
+    @Param('id', ParseIntPipe) id: number,
+    @Actor() actor: WarehouseActor,
+    @OperationKey() operationKey?: string,
+  ) {
+    const { result } = await this.operations.runOnce(
+      { key: operationKey, actor, route: 'POST /items/:id/assign-code', body: { id } },
+      (tx) => this.itemsService.assignCode(id, actor, tx),
+    );
+    return result;
+  }
+
   @Get()
   @ApiOperation({
     summary: 'Get all items with category filter',
