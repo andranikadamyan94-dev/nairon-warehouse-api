@@ -35,6 +35,7 @@ import { StockTransfersModule } from './stock-transfers/stock-transfers.module';
 import { StockRequestsModule } from './stock-requests/stock-requests.module';
 import { PurchaseRequisitionsModule } from './purchase-requisitions/purchase-requisitions.module';
 import { ObjectsModule } from './objects/objects.module';
+import { CatalogModule } from './catalog/catalog.module';
 
 @Global()
 @Module({
@@ -68,6 +69,7 @@ import { ObjectsModule } from './objects/objects.module';
     StockRequestsModule,
     PurchaseRequisitionsModule,
     ObjectsModule,
+    CatalogModule,
   ],
   controllers: [SourceController],
   providers: [

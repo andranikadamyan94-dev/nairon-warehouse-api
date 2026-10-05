@@ -31,4 +31,10 @@ export class GetItemsQueryDto {
   @IsOptional()
   @IsString()
   warehouseId?: string;
+
+  /** '1' = list variant (child) items as well; by default only parents and standalone items. */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  includeVariants?: string;
 }

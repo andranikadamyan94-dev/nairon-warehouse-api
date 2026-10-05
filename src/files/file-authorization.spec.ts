@@ -26,6 +26,7 @@ function service(options: {
   orders?: { receiptUrl: string | null }[];
   deliveries?: { receiptUrl: string | null }[];
   attachments?: { url: string | null }[];
+  itemFiles?: { url: string | null }[];
   access?: { isSuperAdmin: boolean; permissionNames: string[] };
 }) {
   const prisma = {
@@ -42,6 +43,14 @@ function service(options: {
       findMany: async ({ where }: any) =>
         (options.attachments ?? []).filter((r) => r.url?.endsWith(where.url.endsWith)),
     },
+    // Catalog (2026-10-01): item images and documents.
+    itemImage: {
+      findMany: async ({ where }: any) =>
+        (options.itemFiles ?? []).filter((r) => r.url?.endsWith(where.url.endsWith)),
+    },
+    itemDocument: { findMany: async () => [] },
+    // Catalog phase C: a submission's own attachment (none in these worlds).
+    catalogSubmission: { findMany: async () => [], findFirst: async () => null },
   };
   const usersPrisma = {
     getUserAccessInfo: async () =>
@@ -153,6 +162,16 @@ describe('who may read a warehouse receipt', () => {
     await expect(receiver.upload(NAME, REQUESTER)).resolves.toBeNull();
   });
 
+  it('serves an item picture to any signed-in person (the catalogue is shared), and refuses one nothing references', async () => {
+    const files = service({
+      itemFiles: [{ url: `/uploads/${NAME}` }],
+      access: { isSuperAdmin: false, permissionNames: [] },
+    });
+    await expect(files.upload(NAME, REQUESTER)).resolves.toBe(fs.realpathSync(file));
+    const none = service({ access: { isSuperAdmin: false, permissionNames: [] } });
+    await expect(none.upload(NAME, REQUESTER)).resolves.toBeNull();
+  });
+
   it('refuses a malformed name without reading anything', async () => {
     let read = false;
     const prisma = {
@@ -169,6 +188,13 @@ describe('who may read a warehouse receipt', () => {
           return [];
         },
       },
+      itemImage: {
+        findMany: async () => {
+          read = true;
+          return [];
+        },
+      },
+      itemDocument: { findMany: async () => [] },
     };
     const files = new FilesService(prisma as never, { getUserAccessInfo: async () => ({}) } as never);
     await expect(files.upload('../../etc/passwd', REQUESTER)).resolves.toBeNull();

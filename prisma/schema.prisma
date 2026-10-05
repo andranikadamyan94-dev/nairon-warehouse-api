@@ -12,6 +12,13 @@ enum ItemType {
   ASSET
 }
 
+/// Catalog (2026-10-01): STOCKED = kept in the warehouse; ON_REQUEST =
+/// «Միայն հարցմամբ» — never stocked, every request becomes a purchase line.
+enum ItemStockingMode {
+  STOCKED
+  ON_REQUEST
+}
+
 enum ResourceReturnStatus {
   PENDING
   RECEIVED
@@ -135,10 +142,33 @@ model Item {
 
   notes String?
 
+  // Catalog (2026-10-01) — the item page: «Բրենդ», «Մոդել», the long
+  // «Նկարագրություն» (notes stays internal), the stocking mode, and whether
+  // employees see the item in the catalog at all.
+  brand          String?
+  model          String?
+  description    String?
+  stockingMode   ItemStockingMode @default(STOCKED)
+  catalogVisible Boolean          @default(true)
+
+  /// Variants are items. A child row carries parentItemId + variantLabel
+  /// («Գրաֆիտ», «Սև») and its own code, so stock, movements, reservations and
+  /// procurement keep working per item; the parent's quantity in responses is
+  /// the sum of its children's when it has any.
+  parentItemId Int?
+  variantLabel String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   // RELATIONS
+
+  parent   Item?  @relation("ItemVariants", fields: [parentItemId], references: [id], onDelete: Restrict)
+  variants Item[] @relation("ItemVariants")
+
+  attributes ItemAttribute[]
+  images     ItemImage[]
+  documents  ItemDocument[]
 
   assets Asset[]
 
@@ -161,8 +191,50 @@ model Item {
   category ItemCategory? @relation(fields: [categoryId], references: [id])
 
   @@index([type])
+  @@index([parentItemId])
 
   assetRequests AssetRequest[]
+}
+
+/// «Բնութագրեր» — RAM → 16 GB. Replaced as a whole on every item write.
+model ItemAttribute {
+  id     Int    @id @default(autoincrement())
+  itemId Int
+  name   String
+  value  String
+  order  Int    @default(0)
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([itemId])
+}
+
+/// Gallery. Stored under the uploads volume, served by the private file route.
+model ItemImage {
+  id      Int     @id @default(autoincrement())
+  itemId  Int
+  url     String
+  order   Int     @default(0)
+  isCover Boolean @default(false)
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([itemId])
+}
+
+/// «Փաստաթղթեր» — manuals and the like; same storage rules as attachments.
+model ItemDocument {
+  id     Int    @id @default(autoincrement())
+  itemId Int
+  url    String
+  name   String
+  size   Int
+  mime   String
+  order  Int    @default(0)
+
+  item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@index([itemId])
 }
 
 model Asset {
@@ -539,6 +611,11 @@ model ResourceReservation {
 
   replacedByReservationId Int?
 
+  /// Catalog (2026-10-01): the «Ուղարկել հարցումը» this row was made by, when
+  /// it came through the catalog. NULL for every other reservation, which
+  /// keeps working exactly as before.
+  submissionId Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -547,6 +624,8 @@ model ResourceReservation {
   item Item @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
   warehouse Warehouse? @relation(fields: [warehouseId], references: [id])
+
+  submission CatalogSubmission? @relation(fields: [submissionId], references: [id], onDelete: SetNull)
 
   replacedBy ResourceReservation?  @relation("ReservationReplacement", fields: [replacedByReservationId], references: [id])
   replaces   ResourceReservation[] @relation("ReservationReplacement")
@@ -566,6 +645,7 @@ model ResourceReservation {
   @@index([requesterWorkspaceId])
   @@index([status])
   @@index([startDate, endDate])
+  @@index([submissionId])
 }
 
 model ReservationStatusHistory {
@@ -925,17 +1005,66 @@ model PurchaseRequisition {
   rejectionConfirmedAt  DateTime?
   rejectionDeclineNote  String?
 
+  /// Catalog (2026-10-01): the catalog checkout this requisition carries the
+  /// unstocked / new-item lines of. NULL for a requisition filed directly.
+  submissionId Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   lines       PurchaseRequisitionLine[]
   comments    PurchaseRequisitionComment[]
   attachments PurchaseRequisitionAttachment[]
+  submission  CatalogSubmission? @relation(fields: [submissionId], references: [id], onDelete: SetNull)
 
   @@index([createdBy])
   @@index([status])
   @@index([taskId])
   @@index([orderId])
+  @@index([submissionId])
+}
+
+/// Catalog (2026-10-01): one «Ուղարկել հարցումը». «Իմ հարցումները» and the
+/// «Կատալոգի հարցումներ» queue show one row per submission (REQ-1048 · 3 items
+/// · 1/3 ready) over its N reservations + 1 purchase requisition. It has no
+/// status of its own — the shown status is derived from its lines. The open
+/// «Տեղեկություն է պետք» thread and the requester's cancellation are the only
+/// state kept here.
+model CatalogSubmission {
+  id     Int    @id @default(autoincrement())
+  /// REQ-#### from the CatalogSubmission_number_seq sequence (starts at 1001).
+  number String @unique
+
+  createdBy Int
+  /// The caller's active organization at checkout (x-entity-id).
+  entityId  Int?
+
+  projectId   Int?
+  projectName String?
+  costCenter  String?
+
+  purpose  String
+  neededBy DateTime @db.Date
+  comment  String?
+
+  attachmentUrl String?
+
+  /// «Պահանջել տեղեկություն»: the approver's open question, cleared by the reply.
+  infoRequestText String?
+  infoRequestBy   Int?
+  infoRequestAt   DateTime?
+
+  cancelledAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reservations ResourceReservation[]
+  requisitions PurchaseRequisition[]
+
+  @@index([createdBy])
+  @@index([entityId])
+  @@index([createdAt])
 }
 
 model PurchaseRequisitionLine {

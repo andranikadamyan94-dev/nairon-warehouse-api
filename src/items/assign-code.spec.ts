@@ -37,7 +37,9 @@ function world(rows: { id: number; code: string | null; name?: string }[]) {
     },
   };
   const workspaces: any = { of: jest.fn(async () => ({})), ofCategory: jest.fn(async () => ({})) };
-  const service = new ItemsService(prisma, {} as any, { check: jest.fn() } as any, workspaces);
+  // The catalog (2026-10) writes an item and its attributes/variants in one transaction.
+  prisma.$transaction = async (work: (tx: any) => Promise<unknown>) => work(prisma);
+  const service = new ItemsService(prisma, {} as any, { check: jest.fn() } as any, workspaces, {} as any /* files (catalog) */);
   const operations: any = {
     runOnce: jest.fn(async (_input: unknown, work: (tx: any) => Promise<unknown>) => ({
       result: await work(prisma),

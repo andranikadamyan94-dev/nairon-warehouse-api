@@ -1637,7 +1637,10 @@ export class ReservationsService {
       throw new BadRequestException(`Ամրագրումն արդեն «${reservationStatusLabel(reservation.status)}» կարգավիճակում է`);
     }
     const objectOwn = !reservation.taskId && !!(reservation as any).objectId;
-    if (!reservation.taskId && !objectOwn) {
+    // Catalog (2026-10-01): a row made by a catalog checkout is accepted by
+    // the person who filed the submission («Ստացել եմ» on a READY line).
+    const catalogOwn = !reservation.taskId && !objectOwn && (reservation as any).submissionId != null;
+    if (!reservation.taskId && !objectOwn && !catalogOwn) {
       throw new BadRequestException('Միայն առաջադրանքի ամրագրումները կարող են ընդունվել այս ձևով');
     }
     // Goods only. An asset reservation flipped COMPLETED while the asset is
@@ -1659,6 +1662,14 @@ export class ReservationsService {
         const card = await this.objectCard((reservation as any).objectId);
         if (card.responsibleId !== userId) {
           throw new ForbiddenException('Ստացումը հաստատում է օբյեկտի պատասխանատուն');
+        }
+      } else if (catalogOwn) {
+        const submission = await (this.prisma as any).catalogSubmission.findUnique({
+          where: { id: (reservation as any).submissionId },
+          select: { createdBy: true },
+        });
+        if (!submission || submission.createdBy !== userId) {
+          throw new ForbiddenException('Ստացումը հաստատում է հարցումը ներկայացնողը');
         }
       } else {
         await this.assertTaskRole(reservation.taskId!, userId);
@@ -2769,6 +2780,120 @@ export class ReservationsService {
       throw e;
     }
     return { issued: issued.length, reservationIds: issued };
+  }
+
+  /**
+   * Catalog checkout (2026-10-01, phase B): the stocked lines of one
+   * «Ուղարկել հարցումը», one reservation each, stamped with the submission.
+   *
+   * Modeled on createForObject — the task-less create path this service
+   * already has — rather than on create(): a catalog request names no task,
+   * so the warehouse is the main pool and the requester is read from the CRM
+   * project when one was chosen, else the organization the caller is verified
+   * to act in (the actor's declared workspace, checked against their roles by
+   * WarehouseActorService — not a body field). The end date is the day the
+   * goods are needed by rather than open-ended, because create() refuses a
+   * second open-ended row on the same item and a catalog is exactly many
+   * people asking for the same thing.
+   *
+   * The stock rule is the one every request gets: measured inside the
+   * transaction under the item lock, APPROVED when the shelf covers it,
+   * PENDING for the warehouse to decide when it does not, and the same alert
+   * to the people who decide.
+   */
+  async createForCatalog(input: {
+    submissionId: number;
+    number: string;
+    lines: { itemId: number; quantity: number }[];
+    projectId: number | null;
+    projectName: string | null;
+    entityId: number | null;
+    purpose: string;
+    neededBy: Date;
+    performedBy: number;
+    actor?: WarehouseActor;
+  }) {
+    const lines = input.lines.map((l) => ({ itemId: Number(l.itemId), quantity: Number(l.quantity) }));
+    if (!lines.length) return { created: [] as any[] };
+    const items = await this.prisma.item.findMany({
+      where: { id: { in: lines.map((l) => l.itemId) } },
+      select: { id: true, type: true, name: true },
+    });
+    const byId = new Map(items.map((i) => [i.id, i]));
+    for (const l of lines) {
+      if (!byId.has(l.itemId)) throw new NotFoundException(`Ռեսուրս #${l.itemId}-ը չի գտնվել`);
+    }
+    this.normalizeQuantities(lines, new Map(items.map((i) => [i.id, i.type])));
+
+    const requesterWorkspaceId =
+      (input.projectId ? await this.requesters.ofProject(input.projectId) : null) ?? input.entityId ?? null;
+    if (requesterWorkspaceId === null) {
+      throw new BadRequestException('Ընտրեք կազմակերպությունը, որի անունից ներկայացնում եք հարցումը');
+    }
+    if (input.actor) {
+      const verdict = decideOperation(
+        input.actor,
+        { requester: requesterWorkspaceId, stockOwner: null },
+        'reservation.create',
+      );
+      if (!verdict.allowed) {
+        throw new ForbiddenException('Այս նախագիծն այլ կազմակերպությանն է, դրա համար պահանջել հնարավոր չէ');
+      }
+    }
+
+    const warehouseId: number | null = null;
+    const startDate = new Date();
+    // The day the goods are needed by, to its end (Yerevan); never before the start.
+    const endOfDay = new Date(`${getYerevanDateKey(input.neededBy)}T23:59:59.999+04:00`);
+    const endDate = endOfDay.getTime() > startDate.getTime() + 3600_000 ? endOfDay : new Date(startDate.getTime() + 3600_000);
+
+    const created: any[] = [];
+    await this.prisma.$transaction(async (tx) => {
+      for (const l of lines) {
+        const free = await this.stillReservable(tx, l.itemId, l.quantity, startDate, endDate, warehouseId);
+        const status = free ? ResourceReservationStatus.APPROVED : ResourceReservationStatus.PENDING;
+        const row = await tx.resourceReservation.create({
+          data: {
+            itemId: l.itemId,
+            quantity: l.quantity,
+            taskId: null,
+            projectId: input.projectId ?? null,
+            projectName: input.projectName ?? null,
+            entityId: input.entityId ?? null,
+            entityName: null,
+            requesterWorkspaceId,
+            warehouseId,
+            objectId: null,
+            startDate,
+            endDate,
+            status,
+            notes: input.purpose,
+            submissionId: input.submissionId,
+          } as any,
+        });
+        await this.writeStatusHistory(tx, row.id, null, status, {
+          performedBy: input.performedBy,
+          reason: `Կատալոգի հարցում ${input.number}`,
+        });
+        created.push({ ...row, itemName: byId.get(l.itemId)?.name });
+      }
+    });
+
+    const short = created.filter((c) => c.status === ResourceReservationStatus.PENDING);
+    if (short.length) {
+      void this.notifications.send({
+        permissions: ['receive_reservation_alerts', 'manage_warehouse'],
+        title: 'Ամրագրում սպասում է հաստատման',
+        body: `Կատալոգի հարցում ${input.number}՝ պաշարը չի բավարարում ${short.map((c) => c.itemName).join(', ')} տողերի համար և սպասում է ձեր որոշմանը։`,
+        path: '/catalog/requests',
+        details: [
+          { label: 'Հարցում', value: input.number },
+          { label: 'Պաշարը չի բավարարում', value: short.map((c) => `${c.itemName} × ${c.quantity}`).join(', ') },
+          ...(input.projectName ? [{ label: 'Նախագիծ', value: input.projectName }] : []),
+        ],
+      });
+    }
+    return { created };
   }
 
   /**

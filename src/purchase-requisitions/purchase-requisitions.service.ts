@@ -55,6 +55,14 @@ export type CreateRequisitionInput = {
   taskId?: number;
 };
 
+/**
+ * Catalog (2026-10-01): a requisition filed by a catalog checkout. The filing
+ * permission is not asked (D2 — any employee may describe what the warehouse
+ * lacks; the organization's approver decides), and the row carries the
+ * submission it belongs to. Absent, create() behaves exactly as before.
+ */
+export type CreateOptions = { catalog?: { submissionId: number } };
+
 // A requester may still change the lines while the organization is deciding;
 // once approved, what procurement receives is what was approved.
 const EDITABLE = ['DRAFT', 'PENDING_APPROVAL'];
@@ -226,8 +234,15 @@ export class PurchaseRequisitionsService {
    * the right to file in this organization, the lines, the period. Shared with
    * previewCreate() so the preflight cannot drift from the mutation.
    */
-  private async assertMayCreate(dto: CreateRequisitionInput, userId: number, entityId: number | null) {
-    await this.assertMayFile(userId, entityId);
+  private async assertMayCreate(dto: CreateRequisitionInput, userId: number, entityId: number | null, opts?: CreateOptions) {
+    if (opts?.catalog) {
+      // Catalog (D2): any employee describes what the warehouse lacks; the
+      // organization's approver still decides. The organization is still
+      // required — it is who the approval is asked of.
+      if (!entityId) throw new BadRequestException('Ընտրեք կազմակերպությունը, որի անունից ներկայացնում եք հարցումը');
+    } else {
+      await this.assertMayFile(userId, entityId);
+    }
     const lines = await this.buildLines(dto?.lines);
     this.assertPeriod(dto?.periodStart, dto?.periodEnd);
     return lines;
@@ -244,8 +259,8 @@ export class PurchaseRequisitionsService {
    * visibility check findOne() would make is moot here: the filer is the
    * creator, and a creator always sees their own.
    */
-  async create(dto: CreateRequisitionInput, userId: number, entityId: number | null, tx?: TxClient) {
-    const lines = await this.assertMayCreate(dto, userId, entityId);
+  async create(dto: CreateRequisitionInput, userId: number, entityId: number | null, tx?: TxClient, opts?: CreateOptions) {
+    const lines = await this.assertMayCreate(dto, userId, entityId, opts);
     const created = await (tx ?? this.prisma).purchaseRequisition.create({
       data: {
         status: dto.draft ? 'DRAFT' : 'PENDING_APPROVAL',
@@ -256,6 +271,8 @@ export class PurchaseRequisitionsService {
         entityId: entityId || null,
         createdBy: userId,
         ...(dto.taskId ? { taskId: Number(dto.taskId), taskOrigin: 'ATTACHED' } : {}),
+        // Catalog (2026-10-01): the checkout this requisition belongs to.
+        ...(opts?.catalog ? { submissionId: opts.catalog.submissionId } : {}),
         lines: { create: lines },
       },
       include: this.include,

@@ -1,4 +1,7 @@
 import {
+  ArrayMaxSize,
+  IsArray,
+  IsBoolean,
   IsEnum,
   IsInt,
   IsNumber,
@@ -6,6 +9,7 @@ import {
   IsString,
   Min,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
 
 import { Type, Transform } from 'class-transformer';
@@ -14,6 +18,8 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 import { ItemType } from '../../common/enums/item-type.enum';
 import { ItemUnit } from '../../common/enums/item-unit.enum';
+import { ItemStockingMode } from '../../common/enums/item-stocking-mode.enum';
+import { ItemAttributeDto } from './item-attribute.dto';
 
 export class CreateItemDto {
   @ApiProperty()
@@ -78,4 +84,43 @@ export class CreateItemDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  // ── Catalog (2026-10-01) ──────────────────────────────────────────────────
+
+  @ApiPropertyOptional({ description: '«Բրենդ»; null clears it' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  brand?: string | null;
+
+  @ApiPropertyOptional({ description: '«Մոդել»; null clears it' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  model?: string | null;
+
+  @ApiPropertyOptional({ description: 'Long «Նկարագրություն» for the item page; notes stays internal' })
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsString()
+  description?: string | null;
+
+  @ApiPropertyOptional({ enum: ItemStockingMode, description: 'STOCKED (default) or ON_REQUEST («Միայն հարցմամբ»)' })
+  @IsOptional()
+  @IsEnum(ItemStockingMode)
+  stockingMode?: ItemStockingMode;
+
+  @ApiPropertyOptional({ description: 'false hides the item from the employee catalog without deleting it' })
+  @IsOptional()
+  @IsBoolean()
+  catalogVisible?: boolean;
+
+  /** «Բնութագրեր» — replace-all; order = array order. */
+  @ApiPropertyOptional({ type: [ItemAttributeDto] })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => ItemAttributeDto)
+  attributes?: ItemAttributeDto[];
 }

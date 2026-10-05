@@ -23,7 +23,21 @@ import {
  * the answer never distinguishes them.
  */
 
-type StoredFileKind = 'receipt' | 'requisition-attachment';
+type StoredFileKind = 'receipt' | 'requisition-attachment' | 'item-file' | 'catalog-attachment';
+
+/**
+ * Reading a catalog submission's attachment (2026-10-01): the requester who
+ * filed it (checked by row), the queue, and the people who decide on or buy
+ * for it.
+ */
+const READ_CATALOG = [
+  'view_catalog_requests',
+  'manage_reservations',
+  'manage_warehouse',
+  'approve_purchase_requisition',
+  'view_procurement',
+  'manage_procurement',
+];
 
 /**
  * Reading a receipt. Procurement's own people, and — since 2026-09-20 — the
@@ -59,7 +73,7 @@ export class FilesService {
     if (!file) return null;
     const kind = await this.referenced(name);
     if (!kind) return null;
-    return (await this.mayRead(who, kind)) ? file : null;
+    return (await this.mayRead(who, kind, name)) ? file : null;
   }
 
   /**
@@ -73,7 +87,7 @@ export class FilesService {
    */
   private async referenced(name: string): Promise<StoredFileKind | null> {
     const suffix = { endsWith: `/uploads/${name}` };
-    const [orders, deliveries, attachments] = await Promise.all([
+    const [orders, deliveries, attachments, images, documents, submissions] = await Promise.all([
       this.prisma.procurementOrder.findMany({
         where: { receiptUrl: suffix },
         select: { receiptUrl: true },
@@ -86,9 +100,18 @@ export class FilesService {
         where: { url: suffix },
         select: { url: true },
       }),
+      // Catalog (2026-10-01): an item's gallery image or document.
+      this.prisma.itemImage.findMany({ where: { url: suffix }, select: { url: true } }),
+      this.prisma.itemDocument.findMany({ where: { url: suffix }, select: { url: true } }),
+      // Catalog (2026-10-01): a submission's own attachment.
+      this.prisma.catalogSubmission.findMany({ where: { attachmentUrl: suffix }, select: { attachmentUrl: true } }),
     ]);
     if ([...orders, ...deliveries].some((row) => storedNameOf(row.receiptUrl) === name)) return 'receipt';
+    // A catalog attachment is also copied onto its requisition for procurement;
+    // the submission row is the one that says who filed it, so it decides first.
+    if (submissions.some((row) => storedNameOf(row.attachmentUrl) === name)) return 'catalog-attachment';
     if (attachments.some((row) => storedNameOf(row.url) === name)) return 'requisition-attachment';
+    if ([...images, ...documents].some((row) => storedNameOf(row.url) === name)) return 'item-file';
     return null;
   }
 
@@ -105,10 +128,23 @@ export class FilesService {
    * Read with no entity context (0), so a grant made in any single workspace
    * still counts — the same answer the procurement routes themselves give.
    */
-  private async mayRead(who: FileRequester, kind: StoredFileKind): Promise<boolean> {
+  private async mayRead(who: FileRequester, kind: StoredFileKind, name?: string): Promise<boolean> {
+    // An item's picture or manual describes the shared catalogue, which every
+    // signed-in person reads (GET /items carries no permission: the CRM task
+    // screen and the employee catalog both open it). The controller has
+    // already refused anyone without a live credential.
+    if (kind === 'item-file') return true;
+    if (kind === 'catalog-attachment' && name) {
+      // The requester reads their own, whatever their permissions.
+      const own = await this.prisma.catalogSubmission.findFirst({
+        where: { attachmentUrl: { endsWith: `/uploads/${name}` }, createdBy: who.userId },
+        select: { id: true },
+      });
+      if (own) return true;
+    }
     const info = await this.usersPrisma.getUserAccessInfo(who.userId, 0);
     if (info.isSuperAdmin) return true;
-    const allowed = kind === 'receipt' ? READ_RECEIPT : READ_REQUISITION;
+    const allowed = kind === 'receipt' ? READ_RECEIPT : kind === 'catalog-attachment' ? READ_CATALOG : READ_REQUISITION;
     return allowed.some((permission) => info.permissionNames.includes(permission));
   }
 }

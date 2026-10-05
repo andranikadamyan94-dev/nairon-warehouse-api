@@ -28,14 +28,37 @@ const SAFE_EXT_RE = /^\.[a-z0-9]+$/i;
  */
 const UPLOADS_PATH = '/uploads';
 
+/**
+ * What a route accepts. `attachment` is the historical rule (receipts and
+ * requisition attachments); the catalog (2026-10-01) adds a gallery image and
+ * an item document, each narrower than it.
+ */
+export type UploadKind = 'attachment' | 'image' | 'document';
+
+const RULES: Record<UploadKind, { mimeTypes: Set<string>; maxSize: number }> = {
+  attachment: { mimeTypes: ALLOWED_MIME_TYPES, maxSize: MAX_FILE_SIZE },
+  image: { mimeTypes: new Set(['image/jpeg', 'image/png', 'image/webp']), maxSize: 5 * 1024 * 1024 },
+  document: {
+    mimeTypes: new Set([
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ]),
+    maxSize: 10 * 1024 * 1024,
+  },
+};
+
 @Injectable()
 export class FileService {
-  upload(file: Express.Multer.File): string {
-    if (!ALLOWED_MIME_TYPES.has(file.mimetype)) {
+  upload(file: Express.Multer.File, kind: UploadKind = 'attachment'): string {
+    const rule = RULES[kind];
+    if (!rule.mimeTypes.has(file.mimetype)) {
       throw new BadRequestException(`Ֆայլի տեսակը թույլատրված չէ՝ ${file.mimetype}`);
     }
-    if (file.size > MAX_FILE_SIZE) {
-      throw new BadRequestException(`Ֆայլը չափազանց մեծ է (առավելագույնը ${MAX_FILE_SIZE / 1024 / 1024} ՄԲ)`);
+    if (file.size > rule.maxSize) {
+      throw new BadRequestException(`Ֆայլը չափազանց մեծ է (առավելագույնը ${rule.maxSize / 1024 / 1024} ՄԲ)`);
     }
     const ext = path.extname(file.originalname).toLowerCase();
     if (ext && !SAFE_EXT_RE.test(ext)) {
@@ -45,5 +68,20 @@ export class FileService {
     const filename = `${crypto.randomUUID()}${ext}`;
     fs.writeFileSync(path.join(UPLOADS_DIR, filename), file.buffer);
     return `${UPLOADS_PATH}/${filename}`;
+  }
+
+  /**
+   * Remove a stored file nothing points at any more. Best effort: a missing
+   * file is already gone, and the row is what grants access, so a leftover
+   * file is unreachable either way.
+   */
+  remove(url: string | null | undefined): void {
+    const name = typeof url === 'string' ? url.slice(url.lastIndexOf('/') + 1) : '';
+    if (!name || name.includes('..') || /[\\/\0]/.test(name)) return;
+    try {
+      fs.unlinkSync(path.join(UPLOADS_DIR, name));
+    } catch {
+      /* already gone */
+    }
   }
 }
