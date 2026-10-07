@@ -8,6 +8,7 @@ import { UsersPrismaService } from '../common/users-prisma.service';
 import { FileRequester, requestToken, sendStoredFile } from '../common/stored-files';
 import { FilesService } from './files.service';
 import { isDelegatedToken } from '../auth/delegated-token.policy';
+import { isOneTimePasswordToken } from '../auth/one-time-password.policy';
 
 /**
  * Receipts, answered by asking.
@@ -49,6 +50,8 @@ export class FilesController {
       // A delegated AI token (carrying `act`) is not a person at a browser:
       // it opens no file by link or cookie.
       if (isDelegatedToken(payload)) return null;
+      // A one-time-password session opens no file either: it may only replace its password.
+      if (isOneTimePasswordToken(payload)) return null;
       const userId = Number(payload?.id);
       if (!Number.isInteger(userId) || userId <= 0) return null;
       if (await this.usersPrisma.isDeactivated(userId)) return null;

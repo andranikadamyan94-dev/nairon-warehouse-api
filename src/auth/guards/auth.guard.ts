@@ -13,6 +13,7 @@ import { jwtConstants } from '../constants';
 import { UsersPrismaService } from '../../common/users-prisma.service';
 import { WarehouseActorService } from '../actor.service';
 import { NOT_FOR_DELEGATED_KEY, delegatedForbidden, delegatedRefusal } from '../delegated-token.policy';
+import { ONE_TIME_PASSWORD_ALLOWED_KEY, oneTimePasswordForbidden, oneTimePasswordRefused } from '../one-time-password.policy';
 import { readOnlyForbidden, readOnlyRefused, routeKey } from '../read-only.policy';
 import {
   DELEGATED_WRITE_ROUTE_KEY,
@@ -66,6 +67,16 @@ export class AuthGuard implements CanActivate {
     if (await this.usersPrisma.isDeactivated(request['user'].id)) {
       throw new UnauthorizedException('Այս հաշիվը ապաակտիվացված է');
     }
+
+    // A one-time-password session (`otp` claim) may only replace its password,
+    // which is done in hr-api or crm-api: no warehouse route is marked
+    // @OneTimePasswordAllowed(), so here it is a 403 everywhere. See
+    // one-time-password.policy.ts. Always passes a normal token.
+    const otpRouteAllowed = !!this.reflector.getAllAndOverride<boolean>(ONE_TIME_PASSWORD_ALLOWED_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (oneTimePasswordRefused(request['user'], otpRouteAllowed)) throw oneTimePasswordForbidden();
 
     // Delegated WRITE tokens (V3.4 standing approvals), with
     // DELEGATED_TOKENS_WRITE on: one tool's marked route, re-checked here.
