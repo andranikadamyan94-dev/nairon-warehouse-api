@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { CatalogController } from './catalog.controller';
 import { CatalogService } from './catalog.service';
+import { AssetsModule } from '../assets/assets.module';
 import { CategoriesModule } from '../categories/categories.module';
 import { FileService } from '../common/file.service';
 import { PurchaseRequisitionsModule } from '../purchase-requisitions/purchase-requisitions.module';
@@ -13,7 +14,7 @@ import { ReservationsModule } from '../reservations/reservations.module';
  * re-implemented — the catalog only groups what they make.
  */
 @Module({
-  imports: [ReservationsModule, PurchaseRequisitionsModule, CategoriesModule],
+  imports: [ReservationsModule, PurchaseRequisitionsModule, CategoriesModule, AssetsModule],
   controllers: [CatalogController],
   providers: [CatalogService, FileService],
 })

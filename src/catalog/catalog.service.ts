@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -25,6 +26,7 @@ import {
   PurchaseRequisitionsService,
 } from '../purchase-requisitions/purchase-requisitions.service';
 import { ReservationsService } from '../reservations/reservations.service';
+import { AssetsService } from '../assets/assets.service';
 
 import {
   ApprovalRights,
@@ -35,15 +37,18 @@ import {
   SUBMISSION_STATUSES,
   approvalRights,
   availabilityOf,
+  availableForLine,
   deriveStatus,
   formatSubmissionNumber,
   lineIdOf,
+  ownClaim,
   parseLineId,
   partitionByRights,
   progressOf,
   splitCheckout,
   stageOf,
   stillEditable,
+  stockLineLabel,
 } from './catalog.rules';
 import { CheckoutDto } from './dto/checkout.dto';
 import { ApproveSubmissionDto, EditSubmissionDto } from './dto/submission-actions.dto';
@@ -52,6 +57,14 @@ import { ApproveSubmissionDto, EditSubmissionDto } from './dto/submission-action
 export const QUEUE_PERMISSION = 'view_catalog_requests';
 
 const PAGE = 20;
+
+/** One reminder per request per hour. */
+export const REMINDER_INTERVAL_MS = 60 * 60 * 1000;
+
+/** HH:mm in Yerevan — what the refusal names. */
+export function yerevanClock(d: Date): string {
+  return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Yerevan', hour: '2-digit', minute: '2-digit', hour12: false }).format(d);
+}
 
 /** What a purchase-requisition status means to the person who asked through the catalog. */
 const REQUISITION_LABELS: Record<string, string> = {
@@ -79,7 +92,12 @@ export type SubmissionLine = {
   unit: string | null;
   quantity: number;
   approvedQuantity: number | null;
+  /** What the shelf offers this line — the free count plus the line's own claim (REQ-1015). */
   inStock: number | null;
+  /** Asset lines go out unit by unit: approving one picks the units (2026-10-07). */
+  isAsset: boolean;
+  /** Issued so far — for an asset line, the units already allocated. */
+  issuedQuantity: number;
   status: string;
   statusLabel: string;
   reservationId: number | null;
@@ -112,6 +130,8 @@ export type SubmissionView = {
   lines: Omit<SubmissionLine, 'stage'>[];
   timeline: { at: string; kind: string; by: Person; text: string }[];
   infoRequest: { at: string; by: Person; text: string } | null;
+  /** «Հիշեցնել աշխատակցին» (2026-10-07): the last reminder and when the next one is allowed. */
+  reminder: { lastAt: string; by: Person; nextAt: string } | null;
   approver: Person;
 };
 
@@ -151,6 +171,8 @@ export class CatalogService {
     private readonly categories: CategoriesService,
     private readonly fileService: FileService,
     @Optional() private readonly notifications?: WarehouseNotificationsService,
+    /** The Reservations page's free-unit list, reused for the asset unit picker (REQ-1015). */
+    @Optional() private readonly assets?: AssetsService,
   ) {}
 
   // ── Notifications (phase 2, 2026-10-06) ───────────────────────────────────
@@ -351,7 +373,7 @@ export class CatalogService {
    * binds a request to a project warehouse today. The list has no project
    * context to measure a sub-warehouse against.
    */
-  private async freeStock(itemIds: number[]): Promise<Map<number, number>> {
+  private async freeStock(itemIds: number[], opts: { raw?: boolean } = {}): Promise<Map<number, number>> {
     const ids = [...new Set(itemIds)];
     const result = new Map<number, number>();
     if (!ids.length) return result;
@@ -369,12 +391,24 @@ export class CatalogService {
           })
         : [],
       assetIds.length
-        ? this.prisma.asset.groupBy({ by: ['itemId'], where: { itemId: { in: assetIds }, status: 'AVAILABLE', warehouseId: null }, _count: { id: true } })
+        ? this.prisma.asset.groupBy({
+            by: ['itemId'],
+            // Only units that can actually be handed out — the same rule as the
+            // unit picker / Reservations page (a responsible person on record),
+            // so «պահեստում կա» and the picker always agree (owner 2026-10-07).
+            where: {
+              itemId: { in: assetIds },
+              status: 'AVAILABLE',
+              warehouseId: null,
+              custodies: { some: { releasedAt: null, holderType: 'USER' } },
+            },
+            _count: { id: true },
+          })
         : [],
       assetIds.length
         ? this.prisma.resourceReservation.groupBy({
             by: ['itemId'],
-            where: { itemId: { in: assetIds }, status: { in: ['PENDING', 'APPROVED', 'PARTIALLY_ALLOCATED', 'ALLOCATED'] }, ...current },
+            where: { itemId: { in: assetIds }, warehouseId: null, status: { in: ['PENDING', 'APPROVED', 'PARTIALLY_ALLOCATED', 'ALLOCATED'] }, ...current },
             _sum: { quantity: true },
           })
         : [],
@@ -387,7 +421,8 @@ export class CatalogService {
         item.type === ItemType.ASSET
           ? (units.get(item.id) ?? 0) - (assetClaimed.get(item.id) ?? 0)
           : roundQty(Number(item.quantity ?? 0) - (claimed.get(item.id) ?? 0));
-      result.set(item.id, Math.max(0, free));
+      // raw: a request page adds each line's own claim back before clamping (REQ-1015).
+      result.set(item.id, opts.raw ? free : Math.max(0, free));
     }
     return result;
   }
@@ -651,7 +686,7 @@ export class CatalogService {
         where: { submissionId: { in: ids } },
         include: {
           item: { select: { id: true, name: true, unit: true, code: true, variantLabel: true, type: true } },
-          allocations: { where: { releasedAt: null }, select: { quantity: true } },
+          allocations: { where: { releasedAt: null }, select: { quantity: true, assetId: true } },
           statusHistory: { orderBy: { performedAt: 'asc' } },
         },
         orderBy: { id: 'asc' },
@@ -690,9 +725,11 @@ export class CatalogService {
       l.requisition?.rejectionRequestedBy,
       ...((l.requisition?.comments ?? []) as any[]).map((c) => c.userId),
       ...l.reservations.flatMap((r) => (r.statusHistory as any[]).map((h) => h.performedBy)),
+      l.sub.lastReminderBy,
+      ...this.remindersOf(l.sub).map((x) => x.by),
     ]);
     const [free, users, dir] = await Promise.all([
-      this.freeStock(itemIds),
+      this.freeStock(itemIds, { raw: true }),
       this.usersPrisma.getUsersByIds([...new Set(userIds.filter((x): x is number => typeof x === 'number'))]),
       this.directory(),
     ]);
@@ -708,6 +745,8 @@ export class CatalogService {
   private lineOfReservation(r: any, free: Map<number, number>): SubmissionLine {
     const issued = roundQty((r.allocations ?? []).reduce((s: number, a: any) => s + (a.quantity ?? 0), 0));
     const stage = stageOf('STOCK', r.status, { issued });
+    const isAsset = r.item?.type === ItemType.ASSET;
+    const inStock = availableForLine(free.get(r.itemId) ?? 0, ownClaim({ ...r, type: r.item?.type }));
     return {
       id: lineIdOf('STOCK', r.id),
       kind: 'STOCK',
@@ -718,9 +757,11 @@ export class CatalogService {
       unit: r.item?.unit ?? null,
       quantity: r.quantity,
       approvedQuantity: stage === 'REJECTED' ? 0 : stage === 'PENDING' || stage === 'CANCELLED' ? null : r.quantity,
-      inStock: free.get(r.itemId) ?? 0,
+      inStock,
+      isAsset,
+      issuedQuantity: issued,
       status: r.status,
-      statusLabel: reservationStatusLabel(r.status),
+      statusLabel: stockLineLabel(stage, inStock, r.quantity, reservationStatusLabel(r.status)),
       reservationId: r.id,
       requisitionId: null,
       requisitionLineId: null,
@@ -741,7 +782,9 @@ export class CatalogService {
       unit: line.unit ?? line.item?.unit ?? null,
       quantity: line.quantity,
       approvedQuantity: stage === 'REJECTED' ? 0 : stage === 'PENDING' || stage === 'CANCELLED' ? null : line.quantity,
-      inStock: line.itemId ? free.get(line.itemId) ?? 0 : null,
+      inStock: line.itemId ? Math.max(0, free.get(line.itemId) ?? 0) : null,
+      isAsset: false,
+      issuedQuantity: 0,
       status: req.status,
       statusLabel: REQUISITION_LABELS[req.status] ?? req.status,
       reservationId: null,
@@ -819,6 +862,9 @@ export class CatalogService {
     if (sub.cancelledAt) {
       timeline.push({ at: iso(sub.cancelledAt)!, kind: 'cancelled', by: ctx.person(sub.createdBy), text: 'Հարցումը չեղարկվել է' });
     }
+    for (const r of this.remindersOf(sub)) {
+      timeline.push({ at: r.at, kind: 'info_reminder', by: ctx.person(r.by), text: 'Հիշեցում ուղարկվեց' });
+    }
     timeline.sort((a, b) => a.at.localeCompare(b.at));
 
     // Who decided: the organization's approver on the requisition, else the
@@ -869,8 +915,23 @@ export class CatalogService {
       infoRequest: sub.infoRequestAt
         ? { at: iso(sub.infoRequestAt)!, by: ctx.person(sub.infoRequestBy), text: sub.infoRequestText ?? '' }
         : null,
+      reminder: sub.lastReminderAt
+        ? {
+            lastAt: iso(sub.lastReminderAt)!,
+            by: ctx.person(sub.lastReminderBy),
+            nextAt: new Date(new Date(sub.lastReminderAt).getTime() + REMINDER_INTERVAL_MS).toISOString(),
+          }
+        : null,
       approver,
     };
+  }
+
+  /** The reminders kept on a submission, [{ at, by }], whatever shape the column holds. */
+  private remindersOf(sub: any): { at: string; by: number | null }[] {
+    const raw = Array.isArray(sub?.reminders) ? sub.reminders : [];
+    return raw
+      .filter((x: any) => x && typeof x.at === 'string')
+      .map((x: any) => ({ at: x.at, by: typeof x.by === 'number' ? x.by : null }));
   }
 
   /**
@@ -1134,30 +1195,50 @@ export class CatalogService {
     const asked = dto.lines.map((d) => {
       const line = byId.get(d.id);
       if (!line) throw new NotFoundException(`Տողը չի գտնվել (${d.id})`);
-      return { ...line, approvedQuantity: roundQty(Number(d.approvedQuantity)) };
+      return { ...line, approvedQuantity: roundQty(Number(d.approvedQuantity)), assetIds: d.assetIds };
     });
     const { allowed, skipped } = partitionByRights(asked, rights);
     if (!allowed.length) throw new ForbiddenException('Դուք այս հարցման տողերը հաստատելու թույլտվություն չունեք');
     const comment = dto.comment?.trim() || undefined;
 
     // Stock lines first: they can fail on the shelf, and a refused issuance
-    // should not leave purchase lines approved behind it.
-    for (const line of allowed.filter((x) => x.kind === 'STOCK')) {
+    // should not leave purchase lines approved behind it. Every stock line is
+    // checked before anything moves — an asset line's picked units included
+    // (REQ-1015), so a wrong pick refuses the whole decision untouched.
+    const stock = allowed.filter((x) => x.kind === 'STOCK');
+    const picks = new Map<number, number[]>();
+    const pickedAnywhere = new Set<number>();
+    for (const line of stock) {
       const r = loaded.reservations.find((x) => x.id === line.reservationId)!;
       if (!RESERVATION_LIVE.includes(r.status) || line.stage === 'READY') {
         throw new BadRequestException(`«${line.itemName}» — տողն արդեն «${reservationStatusLabel(r.status)}» կարգավիճակում է`);
       }
-      if (line.approvedQuantity === 0) {
-        await this.reservations.reject(r.id, userId, comment ?? 'Մերժված է հաստատողի կողմից', actor, { quiet: true });
-        continue;
-      }
+      if (line.approvedQuantity === 0) continue;
       if (line.approvedQuantity > r.quantity) {
         throw new BadRequestException(`«${line.itemName}» — հաստատվող քանակը (${line.approvedQuantity}) գերազանցում է պահանջվածը (${r.quantity})`);
       }
       if (r.item?.type === ItemType.ASSET && !Number.isInteger(line.approvedQuantity)) {
         throw new BadRequestException('Ակտիվների քանակը պետք է լինի ամբողջ թիվ');
       }
+      if (r.item?.type !== ItemType.ASSET) continue;
+      const ids = await this.checkPicks(r, line, line.assetIds);
+      for (const assetId of ids) {
+        if (pickedAnywhere.has(assetId)) throw new BadRequestException(`Միավոր #${assetId}-ը ընտրված է երկու տողի համար`);
+        pickedAnywhere.add(assetId);
+      }
+      picks.set(r.id, ids);
+    }
+
+    let changed = 0;
+    for (const line of stock) {
+      const r = loaded.reservations.find((x) => x.id === line.reservationId)!;
+      if (line.approvedQuantity === 0) {
+        await this.reservations.reject(r.id, userId, comment ?? 'Մերժված է հաստատողի կողմից', actor, { quiet: true });
+        changed++;
+        continue;
+      }
       if (line.approvedQuantity !== r.quantity) {
+        changed++;
         await this.prisma.resourceReservation.update({ where: { id: r.id }, data: { quantity: line.approvedQuantity } });
         await this.noteOnReservation(r, userId, comment ?? 'Քանակը ճշգրտվել է հաստատման ժամանակ', {
           previousQuantity: r.quantity,
@@ -1165,18 +1246,27 @@ export class CatalogService {
         });
       }
       if (r.item?.type === ItemType.ASSET) {
-        // A unit is allocated on the Reservations page; here the request is let through.
-        if (r.status === 'PENDING') {
+        // REQ-1015: approving an asset line hands out the picked units through
+        // the Reservations page's own allocation — custody check, history and
+        // the line's status follow the normal path.
+        const ids = picks.get(r.id) ?? [];
+        if (ids.length) {
+          await this.reservations.allocate({ allocations: ids.map((assetId) => ({ reservationId: r.id, assetId })) }, userId, { quiet: true });
+          changed++;
+        } else if (r.status === 'PARTIALLY_ALLOCATED' && line.issuedQuantity >= line.approvedQuantity) {
+          // Cut down to what is already out: the line is complete as it stands.
           await this.prisma.$transaction([
-            this.prisma.resourceReservation.update({ where: { id: r.id }, data: { status: 'APPROVED' } }),
+            this.prisma.resourceReservation.update({ where: { id: r.id }, data: { status: 'ALLOCATED' } }),
             this.prisma.reservationStatusHistory.create({
-              data: { reservationId: r.id, fromStatus: 'PENDING', toStatus: 'APPROVED', performedBy: userId, reason: comment ?? 'Հաստատված է կատալոգի հարցումների էջից' },
+              data: { reservationId: r.id, fromStatus: 'PARTIALLY_ALLOCATED', toStatus: 'ALLOCATED', performedBy: userId, reason: comment ?? 'Հաստատված է կատալոգի հարցումների էջից' },
             }),
           ]);
+          changed++;
         }
       } else {
         // The existing approval: everything still outstanding is issued.
         await this.reservations.approveConsumable(r.id, userId, undefined, actor, { quiet: true });
+        changed++;
       }
     }
 
@@ -1213,14 +1303,98 @@ export class CatalogService {
         }
         await this.requisitions.orgApprove(req.id, userId);
       }
+      changed++;
       // The approver has taken the open question over.
       if (loaded.sub.infoRequestAt) {
         await this.prisma.catalogSubmission.update({ where: { id }, data: { infoRequestText: null, infoRequestBy: null, infoRequestAt: null } });
       }
     }
+    // Nothing moved: no success, and nobody is told anything was approved.
+    if (!changed) throw new BadRequestException('Ոչինչ չի փոխվել — ընտրեք տրվող միավորները կամ մերժեք տողը');
     const allRejected = allowed.every((x) => x.approvedQuantity === 0);
     void this.announceToSubmitter(id, actor, { kind: allRejected ? 'rejected' : 'approved', text: comment });
     return { ...(await this.getOne(id, actor)), skipped };
+  }
+
+  // ── Asset units (REQ-1015) ────────────────────────────────────────────────
+
+  private assetReservationOf(loaded: Loaded, lineId: string) {
+    const parsed = parseLineId(lineId);
+    const r = parsed?.table === 'reservation' ? loaded.reservations.find((x) => x.id === parsed.rowId) : undefined;
+    if (!r) throw new NotFoundException(`Տողը չի գտնվել (${lineId})`);
+    if (r.item?.type !== ItemType.ASSET) throw new BadRequestException('Տողը ակտիվ չէ — միավորներ ընտրել պետք չէ');
+    return r;
+  }
+
+  /**
+   * The units this asset line may take: the Reservations page's own list
+   * (GET /assets/available — the line's pool, no overlapping allocation or
+   * maintenance, a responsible person on record), kept to units AVAILABLE
+   * right now and not already on this very line.
+   */
+  private async freeUnitsOf(r: any): Promise<any[]> {
+    if (!this.assets) throw new BadRequestException('Միավորների ցանկը հասանելի չէ');
+    const rows = await this.assets.getAvailableAssets({
+      itemId: r.itemId,
+      startDate: new Date(r.startDate).toISOString(),
+      endDate: r.endDate ? new Date(r.endDate).toISOString() : undefined,
+      reservationId: r.id,
+    });
+    const mine = new Set(((r.allocations ?? []) as any[]).map((a) => a.assetId));
+    return rows.filter((a: any) => a.status === 'AVAILABLE' && a.itemId === r.itemId && !mine.has(a.id));
+  }
+
+  /** The approver's pick for one asset line, refused unless every unit is free and of this item. */
+  private async checkPicks(r: any, line: { itemName: string; approvedQuantity: number; issuedQuantity: number }, wanted?: number[]): Promise<number[]> {
+    const ids = (wanted ?? []).map(Number);
+    if (new Set(ids).size !== ids.length) throw new BadRequestException(`«${line.itemName}» — նույն միավորն ընտրված է երկու անգամ`);
+    const need = line.approvedQuantity - line.issuedQuantity;
+    if (need < 0) {
+      throw new BadRequestException(`«${line.itemName}» — արդեն տրված է ${line.issuedQuantity} միավոր, հաստատվող քանակը չի կարող դրանից պակաս լինել`);
+    }
+    if (need === 0) {
+      if (ids.length) throw new BadRequestException(`«${line.itemName}» — այլ միավոր տալ պետք չէ`);
+      return [];
+    }
+    const free = await this.freeUnitsOf(r);
+    if (!free.length) throw new BadRequestException(`«${line.itemName}» — Ազատ միավոր չկա․ մերժեք տողը կամ թողեք այն`);
+    if (ids.length !== need) throw new BadRequestException(`«${line.itemName}» — ընտրեք ${need} միավոր (ընտրված է ${ids.length})`);
+    const freeIds = new Set(free.map((a) => a.id));
+    const bad = ids.filter((x) => !freeIds.has(x));
+    if (bad.length) {
+      throw new BadRequestException(`«${line.itemName}» — միավոր #${bad.join(', #')}-ը ազատ չէ կամ այս ապրանքից չէ`);
+    }
+    return ids;
+  }
+
+  /** GET …/lines/:lineId/units — what the approver picks from: serial, warehouse, condition, holder. */
+  async unitsForLine(id: number, lineId: string, actor: WarehouseActor) {
+    const loaded = await this.loadOne(id);
+    const rights = await this.rightsOf(actor, loaded);
+    if (!rights.stock) throw new ForbiddenException('Դուք պահեստային տողերը հաստատելու թույլտվություն չունեք');
+    const r = this.assetReservationOf(loaded, lineId);
+    const units = await this.freeUnitsOf(r);
+    const whIds = [...new Set(units.map((u) => u.warehouseId).filter((x): x is number => typeof x === 'number'))];
+    const whs = whIds.length ? await this.prisma.warehouse.findMany({ where: { id: { in: whIds } }, select: { id: true, name: true } }) : [];
+    const whName = new Map(whs.map((w) => [w.id, w.name]));
+    const issued = ((r.allocations ?? []) as any[]).length;
+    return {
+      lineId,
+      itemId: r.itemId,
+      itemName: r.item?.name ?? `#${r.itemId}`,
+      quantity: r.quantity,
+      issued,
+      units: units.map((u) => ({
+        id: u.id,
+        serialNumber: u.serialNumber ?? null,
+        name: u.name ?? null,
+        warehouseId: u.warehouseId ?? null,
+        warehouseName: u.warehouseId ? whName.get(u.warehouseId) ?? `#${u.warehouseId}` : 'Գլխավոր պահեստ',
+        status: u.status,
+        notes: u.notes ?? null,
+        responsibleName: u.responsibleName ?? null,
+      })),
+    };
   }
 
   async reject(id: number, reason: string, userId: number, actor: WarehouseActor) {
@@ -1280,5 +1454,71 @@ export class CatalogService {
     });
     void this.announceToSubmitter(id, actor, { kind: 'info', text: question });
     return { ...(await this.getOne(id, actor)), skipped };
+  }
+
+  /**
+   * «Հիշեցնել աշխատակցին» (2026-10-07): while the submitter has not answered
+   * the desk's question, the catalog desk may remind them — once per request
+   * per hour. The claim is one conditional update, so two presses at once send
+   * one notice; the notice carries the original question, who reminds, and a
+   * link to the submitter's own request page. Each reminder is kept for the
+   * history («Հիշեցում ուղարկվեց»).
+   */
+  async remind(id: number, actor: WarehouseActor): Promise<SubmissionView> {
+    if (!this.isQueueViewer(actor)) throw new ForbiddenException('Հիշեցնել կարող է միայն կատալոգի հարցումների պատասխանատուն');
+    const loaded = await this.loadOne(id);
+    this.assertDecidable(loaded);
+    const sub = loaded.sub;
+    if (!sub.infoRequestAt) throw new BadRequestException('Հարցումը չի սպասում աշխատակցի պատասխանին');
+    if (sub.createdBy === actor.userId) throw new BadRequestException('Դուք ինքներդ եք այս հարցման ներկայացնողը');
+
+    const now = new Date();
+    const cutoff = new Date(now.getTime() - REMINDER_INTERVAL_MS);
+    const reminders = [...this.remindersOf(sub), { at: now.toISOString(), by: actor.userId }];
+    const claimed = await this.prisma.catalogSubmission.updateMany({
+      where: {
+        id,
+        infoRequestAt: { not: null },
+        cancelledAt: null,
+        OR: [{ lastReminderAt: null }, { lastReminderAt: { lte: cutoff } }],
+      },
+      data: { lastReminderAt: now, lastReminderBy: actor.userId, reminders },
+    });
+    if (!claimed.count) {
+      const fresh = await this.prisma.catalogSubmission.findUnique({ where: { id }, select: { lastReminderAt: true, infoRequestAt: true } });
+      if (!fresh?.infoRequestAt) throw new BadRequestException('Հարցումը չի սպասում աշխատակցի պատասխանին');
+      const last = fresh.lastReminderAt ?? sub.lastReminderAt ?? now;
+      throw new ConflictException(`Հիշեցումն արդեն ուղարկվել է ${yerevanClock(new Date(last))}-ին`);
+    }
+
+    const [me] = await this.usersPrisma.getUsersByIds([actor.userId]).catch(() => []);
+    const who = me ? `${me.firstName} ${me.lastName}`.trim() : 'Կատալոգի պատասխանատուն';
+    const asked = this.armenianStamp(new Date(sub.infoRequestAt));
+    const question = sub.infoRequestText ?? '';
+    this.notify({
+      type: WAREHOUSE_TYPES.catalogInfoReminder,
+      userIds: [sub.createdBy],
+      actorId: actor.userId,
+      title: 'Հիշեցում՝ պատասխանեք կատալոգային հարցմանը',
+      body: `Հարցում ${sub.number}՝ ${who} հիշեցնում է, որ սպասում են Ձեր պատասխանին ${asked}-ի հարցին՝ «${question}»։`,
+      path: `/catalog/my-requests/${id}`,
+      details: [
+        { label: 'Հարցում', value: sub.number },
+        { label: 'Հարց', value: question },
+        { label: 'Հարցը տրվել է', value: asked },
+        { label: 'Հիշեցնում է', value: who },
+      ],
+    });
+    return this.getOne(id, actor);
+  }
+
+  /** DD.MM.YYYY, HH:mm in Yerevan. */
+  private armenianStamp(d: Date): string {
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Yerevan', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false,
+      }).formatToParts(d).map((p) => [p.type, p.value]),
+    );
+    return `${parts.day}.${parts.month}.${parts.year}, ${parts.hour}:${parts.minute}`;
   }
 }

@@ -3,6 +3,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsDateString,
+  IsInt,
   IsNotEmpty,
   IsNumber,
   IsOptional,
@@ -68,6 +69,14 @@ export class ApproveLineDto {
   @IsNumber({}, { message: 'Հաստատվող քանակը պետք է լինի թիվ' })
   @Min(0, { message: 'Հաստատվող քանակը չի կարող բացասական լինել' })
   approvedQuantity: number;
+
+  /** Asset lines (REQ-1015): the units handed out — as many as approvedQuantity less those already out. */
+  @ApiPropertyOptional({ type: [Number] })
+  @IsOptional()
+  @IsArray({ message: 'Միավորների ցանկը սխալ է' })
+  @ArrayMaxSize(500, { message: 'Չափազանց շատ միավորներ' })
+  @IsInt({ each: true, message: 'Միավորը նշված չէ' })
+  assetIds?: number[];
 }
 
 /** PATCH /catalog/submissions/:id/approve — full or partial, per line. */

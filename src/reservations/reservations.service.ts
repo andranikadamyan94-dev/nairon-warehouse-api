@@ -1344,7 +1344,8 @@ export class ReservationsService {
 
   // ─── allocate (assets) ───────────────────────────────────────────────────────
 
-  async allocate(dto: AllocateReservationDto, allocatedBy?: number) {
+  /** quiet: the catalog page tells its submitter itself, in one notice for the whole decision. */
+  async allocate(dto: AllocateReservationDto, allocatedBy?: number, opts: { quiet?: boolean } = {}) {
     // Only reservations that reached ALLOCATED are worth telling the requester
     // about — a partial allocation isn't yet a usable outcome.
     // Phase 2: the whole row — object and catalog rows have no taskId, and
@@ -1448,7 +1449,7 @@ export class ReservationsService {
       return { success: true };
     });
 
-    for (const r of fullyAllocated) {
+    for (const r of opts.quiet ? [] : fullyAllocated) {
       void this.notifyRequesters(r, {
         title: 'Ամրագրումը հաստատվել է',
         type: WAREHOUSE_TYPES.reservationApproved,

@@ -163,6 +163,14 @@ export class CatalogController {
     return this.catalog.approve(id, dto, userId, actor);
   }
 
+  @Get('submissions/:id/lines/:lineId/units')
+  @UseGuards(PermissionGuard)
+  @Permissions('manage_reservations', 'approve_purchase_requisition')
+  @ApiOperation({ summary: 'Free units an asset line may take (the Reservations page list) — REQ-1015' })
+  units(@Param('id', ParseIntPipe) id: number, @Param('lineId') lineId: string, @Actor() actor: WarehouseActor) {
+    return this.catalog.unitsForLine(id, lineId, actor);
+  }
+
   @Patch('submissions/:id/reject')
   @UseGuards(PermissionGuard)
   @Permissions('manage_reservations', 'approve_purchase_requisition')
@@ -187,5 +195,13 @@ export class CatalogController {
     @Actor() actor: WarehouseActor,
   ) {
     return this.catalog.requestInfo(id, dto.text, userId, actor);
+  }
+
+  @Post('submissions/:id/remind')
+  @UseGuards(PermissionGuard)
+  @Permissions(QUEUE_PERMISSION)
+  @ApiOperation({ summary: '«Հիշեցնել աշխատակցին» — remind the submitter of the unanswered question (once per hour)' })
+  remind(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    return this.catalog.remind(id, actor);
   }
 }

@@ -45,6 +45,8 @@ export const WAREHOUSE_TYPES = {
   catalogRequestDecided: 'warehouse.catalog_request_decided',
   /** Y — ready to collect. */
   catalogReady: 'warehouse.catalog_ready',
+  /** Y — the desk reminds the submitter of an unanswered information request (2026-10-07). */
+  catalogInfoReminder: 'warehouse.catalog_info_reminder',
   stockRequestCreated: 'warehouse.stock_request_created',
   stockRequestDecided: 'warehouse.stock_request_decided',
   stockTransferIncoming: 'warehouse.stock_transfer_incoming',

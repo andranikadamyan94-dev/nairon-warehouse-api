@@ -222,3 +222,49 @@ export function parseLineId(id: string): { table: 'reservation' | 'requisitionLi
   if (!m) return null;
   return { table: m[1] === 'r' ? 'reservation' : 'requisitionLine', rowId: Number(m[2]) };
 }
+
+// ── Shelf figures for one line (2026-10-07, REQ-1015) ───────────────────────
+
+/** The reservation fields the catalog's free-stock count reads. */
+export type ClaimRow = {
+  type: string | null | undefined;
+  status: string;
+  quantity: number;
+  warehouseId?: number | null;
+  endDate?: Date | string | null;
+};
+
+/**
+ * How much of the shelf this reservation itself holds in the free-stock count
+ * (freeStock): consumables — PENDING / APPROVED main-pool claims; assets —
+ * every live main-pool claim. Both only while not expired. The «Հասանելի»
+ * column adds this back, so a line's own claim never reads as a shortage
+ * against itself.
+ */
+export function ownClaim(r: ClaimRow, now: Date = new Date()): number {
+  if ((r.warehouseId ?? null) !== null) return 0;
+  if (r.endDate && new Date(r.endDate) < now) return 0;
+  const live = r.type === 'ASSET'
+    ? ['PENDING', 'APPROVED', 'PARTIALLY_ALLOCATED', 'ALLOCATED']
+    : ['PENDING', 'APPROVED'];
+  return live.includes(r.status) ? Number(r.quantity) || 0 : 0;
+}
+
+/** What the shelf offers this line: the free count plus the line's own claim. */
+export function availableForLine(freeCount: number, own: number): number {
+  return Math.max(0, Math.round((freeCount + own) * 1000) / 1000);
+}
+
+export const UNDECIDED_IN_STOCK = 'Սպասում է որոշման · պահեստում կա';
+export const UNDECIDED_SHORT = 'Սպասում է որոշման · պահեստում չկա';
+
+/**
+ * A stock line nobody has decided yet does not wear its raw reservation
+ * status («Հասանելի» only says the shelf could cover it at checkout); it
+ * reads «Սպասում է որոշման» with whether the shelf covers it now. Once
+ * decided, the real state shows.
+ */
+export function stockLineLabel(stage: LineStage, available: number, quantity: number, decidedLabel: string): string {
+  if (stage !== 'PENDING') return decidedLabel;
+  return available >= quantity ? UNDECIDED_IN_STOCK : UNDECIDED_SHORT;
+}

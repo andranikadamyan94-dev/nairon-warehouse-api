@@ -1081,6 +1081,12 @@ model CatalogSubmission {
   infoRequestBy   Int?
   infoRequestAt   DateTime?
 
+  /// «Հիշեցնել աշխատակցին» (2026-10-07): the last reminder (one per hour) and
+  /// every reminder sent, [{ at, by }], for the history.
+  lastReminderAt DateTime?
+  lastReminderBy Int?
+  reminders      Json      @default("[]")
+
   cancelledAt DateTime?
 
   createdAt DateTime @default(now())
