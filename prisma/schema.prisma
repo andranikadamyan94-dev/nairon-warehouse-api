@@ -393,6 +393,12 @@ model WarehouseProject {
   warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
 
   @@index([warehouseId])
+
+  /// Project duplicate (2026-10-07): the crm ProjectCopyJob that made this row;
+  /// null for every row made any other way. Idempotency and exact rollback.
+  copyJobId String? @db.Uuid
+
+  @@index([copyJobId])
 }
 
 /// Consumable stock held by a PROJECT warehouse (main = Item.quantity).
@@ -541,6 +547,12 @@ model ObjectEstimateLine {
 
   @@unique([objectId, itemId])
   @@index([objectId])
+
+  /// Project duplicate (2026-10-07): the crm ProjectCopyJob that made this row;
+  /// null for every row made any other way. Idempotency and exact rollback.
+  copyJobId String? @db.Uuid
+
+  @@index([copyJobId])
 }
 
 model ResourceReservation {
@@ -649,6 +661,12 @@ model ResourceReservation {
   @@index([status])
   @@index([startDate, endDate])
   @@index([submissionId])
+
+  /// Project duplicate (2026-10-07): the crm ProjectCopyJob that made this row;
+  /// null for every row made any other way. Idempotency and exact rollback.
+  copyJobId String? @db.Uuid
+
+  @@index([copyJobId])
 }
 
 model ReservationStatusHistory {
@@ -1025,6 +1043,12 @@ model PurchaseRequisition {
   @@index([taskId])
   @@index([orderId])
   @@index([submissionId])
+
+  /// Project duplicate (2026-10-07): the crm ProjectCopyJob that made this row;
+  /// null for every row made any other way. Idempotency and exact rollback.
+  copyJobId String? @db.Uuid
+
+  @@index([copyJobId])
 }
 
 /// Catalog (2026-10-01): one «Ուղարկել հարցումը». «Իմ հարցումները» and the
@@ -1068,6 +1092,12 @@ model CatalogSubmission {
   @@index([createdBy])
   @@index([entityId])
   @@index([createdAt])
+
+  /// Project duplicate (2026-10-07): the crm ProjectCopyJob that made this row;
+  /// null for every row made any other way. Idempotency and exact rollback.
+  copyJobId String? @db.Uuid
+
+  @@index([copyJobId])
 }
 
 model PurchaseRequisitionLine {
@@ -1396,6 +1426,12 @@ model AssetRequest {
   @@index([forObjectId])
   @@index([status])
   @@index([requestedBy])
+
+  /// Project duplicate (2026-10-07): the crm ProjectCopyJob that made this row;
+  /// null for every row made any other way. Idempotency and exact rollback.
+  copyJobId String? @db.Uuid
+
+  @@index([copyJobId])
 }
 
 model AssetCustody {
@@ -1448,4 +1484,16 @@ model WarehouseReminderMarker {
 
   @@unique([kind, refId, day])
   @@index([day])
+}
+
+/// Project duplicate (2026-10-07): one row per crm ProjectCopyJob that reached
+/// this service. Written in the copy's own transaction, so a repeat with the
+/// same jobId answers the stored result instead of copying twice.
+model WarehouseProjectCopy {
+  jobId     String   @id @db.Uuid
+  counts    Json
+  reset     Json
+  /// Stored names of the files this copy wrote, unlinked by the rollback.
+  files     Json     @default("[]")
+  createdAt DateTime @default(now())
 }

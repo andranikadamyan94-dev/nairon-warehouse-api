@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { storedNameOf, storedPath } from './stored-files';
 
 const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
@@ -67,6 +68,24 @@ export class FileService {
     if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
     const filename = `${crypto.randomUUID()}${ext}`;
     fs.writeFileSync(path.join(UPLOADS_DIR, filename), file.buffer);
+    return `${UPLOADS_PATH}/${filename}`;
+  }
+
+  /**
+   * A physical copy of a stored file under a new name (project duplicate,
+   * 2026-10-07): `/uploads/<uuid><ext>` → `/uploads/<new uuid><ext>`. Null when
+   * the url is not a stored file or the file is missing on disk — the caller
+   * then keeps the old url and counts it as missing.
+   */
+  copy(url: string | null | undefined): string | null {
+    const name = storedNameOf(url);
+    const src = name ? storedPath(UPLOADS_DIR, name) : null;
+    if (!src) return null;
+    const ext = path.extname(name!).toLowerCase();
+    const filename = `${crypto.randomUUID()}${SAFE_EXT_RE.test(ext) ? ext : ''}`;
+    const tmp = path.join(UPLOADS_DIR, `.${filename}.part`);
+    fs.copyFileSync(src, tmp);
+    fs.renameSync(tmp, path.join(UPLOADS_DIR, filename));
     return `${UPLOADS_PATH}/${filename}`;
   }
 

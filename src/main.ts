@@ -1,5 +1,6 @@
 import { assertJwtConfigured } from './auth/constants';
 import * as path from 'path';
+import { createRequire } from 'module';
 import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
@@ -33,6 +34,17 @@ async function bootstrap() {
     if (typeof req.url === 'string' && req.url.startsWith('/uploads/')) req.url = `/api${req.url}`;
     next();
   });
+
+  /*
+   * Project duplicate (2026-10-07): crm sends a whole tree's id maps in one
+   * body, past express's 100 kB default. Raised for this one internal path only,
+   * registered before Nest's own parser (which then leaves the parsed body
+   * alone). body-parser is resolved through platform-express, its owner here.
+   * Wrapped in an anonymous function on purpose: Nest skips its global JSON
+   * parser when any middleware named "jsonParser" is already mounted.
+   */
+  const bigJson = createRequire(require.resolve('@nestjs/platform-express'))('body-parser').json({ limit: '25mb' });
+  app.use('/api/internal/project-copies', (req: any, res: any, next: any) => bigJson(req, res, next));
 
   app.enableCors({
     origin: [

@@ -38,6 +38,7 @@ import { PurchaseRequisitionsModule } from './purchase-requisitions/purchase-req
 import { ObjectsModule } from './objects/objects.module';
 import { CatalogModule } from './catalog/catalog.module';
 import { RemindersModule } from './reminders/reminders.module';
+import { ProjectCopiesModule } from './project-copies/project-copies.module';
 
 @Global()
 @Module({
@@ -75,6 +76,7 @@ import { RemindersModule } from './reminders/reminders.module';
     ObjectsModule,
     CatalogModule,
     RemindersModule,
+    ProjectCopiesModule,
   ],
   controllers: [SourceController],
   providers: [

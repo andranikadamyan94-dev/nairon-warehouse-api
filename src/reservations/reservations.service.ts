@@ -1022,6 +1022,7 @@ export class ReservationsService {
     startDate: Date,
     endDate: Date | null,
     warehouseId: number | null,
+    opts: { assetShortIsPending?: boolean } = {},
   ): Promise<boolean> {
     /*
      * Before counting anything. Two transactions asking "how much is free?" at
@@ -1090,12 +1091,41 @@ export class ReservationsService {
       _sum: { quantity: true },
     });
     const free = units - (claimed._sum.quantity ?? 0);
+    if (wanted > free && opts.assetShortIsPending) return false;
     if (wanted > free) {
       throw new BadRequestException(
         `«${item.name}» — այդ ժամկետում ազատ է ${Math.max(0, free)}, պահանջվում է ${wanted}`,
       );
     }
     return true;
+  }
+
+  /**
+   * The create rule, for a project duplicate (2026-10-07, owner decision 11.1):
+   * which status would this row get if it were sent fresh right now — APPROVED
+   * («Հասանելի») when its pool still covers it for its dates, else PENDING.
+   *
+   * The same measurement `create` makes inside its transaction (`stillReservable`,
+   * under the same item lock) plus `create`'s open-ended rule. Two differences,
+   * both because a copy must never be refused half-way: a short asset and a
+   * second open-ended claim become PENDING instead of an error. Writes nothing
+   * and notifies nobody — the caller inserts the row in the same transaction.
+   */
+  async statusForCopiedReservation(
+    tx: any,
+    row: { itemId: number; quantity: number; startDate: Date; endDate: Date | null; warehouseId: number | null },
+  ): Promise<ResourceReservationStatus> {
+    const free = await this.stillReservable(tx, row.itemId, row.quantity, row.startDate, row.endDate, row.warehouseId, {
+      assetShortIsPending: true,
+    });
+    if (!free) return ResourceReservationStatus.PENDING;
+    if (!row.endDate) {
+      const openEnded = await tx.resourceReservation.count({
+        where: { itemId: row.itemId, endDate: null, status: { notIn: INACTIVE_STATUSES } },
+      });
+      if (openEnded > 0) return ResourceReservationStatus.PENDING;
+    }
+    return ResourceReservationStatus.APPROVED;
   }
 
   /**
