@@ -13,7 +13,7 @@ import { CreateProcurementDto } from './dto/create-procurement.dto';
 import { UpdateProcurementDto } from './dto/update-procurement.dto';
 import { FileService } from '../common/file.service';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
-import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService, crmLinks } from '../common/notifications/notifications.service';
 import { ReceiveDeliveryDto } from './dto/receive-delivery.dto';
 import { requireInternalSecret } from '../common/internal-headers';
 import { requireFinanceUrl } from '../common/finance-url';
@@ -275,18 +275,55 @@ export class ProcurementService {
    * transition may set ORDERED; the old free-form marking allowed it from any
    * state, which let orders skip finance entirely.
    */
-  async confirmOrdered(id: number) {
+  async confirmOrdered(id: number, userId?: number) {
     const order = await this.findOne(id);
     if (order.status !== ProcurementOrderStatus.FINANCE_APPROVED) {
       throw new BadRequestException(
         'Միայն ֆինանսների կողմից հաստատված պատվերը կարող է հաստատվել որպես պատվիրված',
       );
     }
-    return this.prisma.procurementOrder.update({
+    const updated = await this.prisma.procurementOrder.update({
       where: { id },
       data: { status: ProcurementOrderStatus.ORDERED },
       include,
     });
+    void this.announceOrderPlaced(order, userId ?? null);
+    return updated;
+  }
+
+  /**
+   * Phase 3 (2026-10-07): the order is with the supplier — receiving
+   * (manage_warehouse in the order's organisation) knows a delivery is coming,
+   * the people whose requisitions it serves and its submitter that it is placed.
+   */
+  private async announceOrderPlaced(order: any, actorId: number | null) {
+    try {
+      const reqs = await this.linkedRequisitions(order.id);
+      const lines = (order.items ?? []).map((l: any) => `${l.item?.name ?? `#${l.itemId}`} × ${l.quantity}`).join(', ');
+      await this.notifications.send({
+        type: WAREHOUSE_TYPES.orderPlaced,
+        permissions: ['manage_warehouse'],
+        entityIds: [order.entityId],
+        userIds: [this.submitterOf(order), ...reqs.map((r) => r.createdBy)],
+        actorId,
+        title: 'Գնման պատվերը պատվիրված է',
+        body: `Գնման պատվեր #${order.id}-ը տեղադրվել է մատակարարի մոտ${lines ? `՝ ${lines}` : ''}։ Սպասվում է առաքում։`,
+        path: '/procurement',
+        details: [
+          ...this.orderDetails(order),
+          ...reqs.map((r) => ({ label: 'Գնման հայտ', value: `#${r.id}${r.title ? ` «${r.title}»` : ''}` })),
+        ],
+      });
+    } catch (e: any) {
+      this.logger.warn(`order placed notification failed: ${e?.message ?? e}`);
+    }
+  }
+
+  /** The requisitions an order was raised for. Never throws. */
+  private async linkedRequisitions(orderId: number): Promise<{ id: number; title: string | null; createdBy: number }[]> {
+    return this.prisma.purchaseRequisition
+      .findMany({ where: { orderId }, select: { id: true, title: true, createdBy: true } })
+      .catch(() => []);
   }
 
   /**
@@ -559,12 +596,29 @@ export class ProcurementService {
     const complete = result.status === ProcurementOrderStatus.RECEIVED;
     // #1885: requisitions this order was raised for are now satisfied.
     if (complete) {
+      const fulfilled = await this.prisma.purchaseRequisition
+        .findMany({ where: { orderId: id, status: 'APPROVED' }, select: { id: true, title: true, createdBy: true } })
+        .catch(() => [] as { id: number; title: string | null; createdBy: number }[]);
       await this.prisma.purchaseRequisition
         .updateMany({
           where: { orderId: id, status: 'APPROVED' },
           data: { status: 'FULFILLED' },
         })
         .catch(() => {});
+      // Phase 2 (2026-10-06): the requester learns the goods are here.
+      for (const r of fulfilled ?? []) {
+        void this.notifications.sendToUsers([r.createdBy], {
+          type: WAREHOUSE_TYPES.requisitionFulfilled,
+          actorId: receivedBy ?? null,
+          title: 'Գնման հայտը կատարվել է',
+          body: `Գնման հայտ #${r.id}${r.title ? ` («${r.title}»)` : ''}՝ ապրանքները ստացվել են պահեստում (գնման պատվեր #${id})։`,
+          path: crmLinks.requisition(r.id),
+          details: [
+            { label: 'Հայտ', value: `#${r.id}` },
+            { label: 'Գնման պատվեր', value: `#${id}` },
+          ],
+        });
+      }
     }
 
     // On completion, reconcile finance against what actually arrived. Normally
@@ -579,7 +633,10 @@ export class ProcurementService {
       );
     }
     void this.notifications.send({
+      type: WAREHOUSE_TYPES.procurementReceived,
       permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+      entityIds: [order.entityId],
+      actorId: receivedBy ?? null,
       title: complete
         ? 'Գնման պատվերը ստացվել է'
         : 'Գնման պատվերը ստացվել է մասնակի',
@@ -652,7 +709,9 @@ export class ProcurementService {
     );
     if (prepaid > 0 && invoicedValue < prepaid - 0.005) {
       void this.notifications.send({
+        type: WAREHOUSE_TYPES.procurementPrepaymentExcess,
         permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+        entityIds: [order.entityId],
         path: '/procurement',
         title: 'Կանխավճարը գերազանցում է ստացվածը',
         body:
@@ -669,7 +728,9 @@ export class ProcurementService {
           `Ֆինանսի հետ ճշգրտումը չհաջողվեց — ${detail}`,
         );
       void this.notifications.send({
+        type: WAREHOUSE_TYPES.procurementAmountMismatch,
         permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+        entityIds: [order.entityId],
         title: 'Ֆինանսական գումարը չհամապատասխանեց',
         body:
           `Գնման պատվեր #${order.id}-ի գումարը չհաջողվեց ճշգրտել։ ` +
@@ -848,7 +909,9 @@ export class ProcurementService {
     if (!changed.length) return this.findOne(order.id);
     this.logger.warn(`Order #${order.id}: settled order edited by super-admin ${userId ?? '?'} — ${changed.join(', ')}`);
     void this.notifications.send({
+      type: WAREHOUSE_TYPES.procurementEdited,
       permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+      entityIds: [order.entityId],
       title: 'Ստացված պատվերը խմբագրվել է',
       body: `Գնման պատվեր #${order.id}-ը փոփոխվել է սուպեր-ադմինի կողմից՝ ${changed.join(', ')}։`,
       path: '/procurement',
@@ -955,6 +1018,27 @@ export class ProcurementService {
     );
     if (!changes.size && result.action === 'none')
       throw new BadRequestException('Գները չեն փոխվել և ճշգրտելու բան չկա');
+    // Phase 3 (2026-10-07): the procurement desk and the order's submitter hear the prices moved.
+    const moved = [...changes].map(([orderItemId, price]) => {
+      const l: any = byId.get(orderItemId);
+      return `${l?.item?.name ?? `#${l?.itemId}`}: ${l?.invoicedUnitPrice ?? l?.unitPrice ?? '—'} → ${price}`;
+    });
+    void this.notifications.send({
+      type: WAREHOUSE_TYPES.priceAmended,
+      permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+      entityIds: [order.entityId],
+      userIds: [this.submitterOf(order)],
+      actorId: userId ?? null,
+      title: 'Գնման պատվերի գները ճշգրտվել են',
+      body: `Գնման պատվեր #${id}՝ ${moved.length ? moved.join(', ') : 'ֆինանսական ճշգրտում'} — ${reason}։`,
+      path: '/procurement',
+      details: [
+        ...this.orderDetails(order),
+        ...(result.delta ? [{ label: 'Տարբերություն', value: this.money(result.delta) }] : []),
+        { label: 'Պատճառ', value: reason },
+        ...(dto.documentNumber?.trim() ? [{ label: 'Փաստաթուղթ', value: dto.documentNumber.trim() }] : []),
+      ],
+    });
     return { ...(await this.findOne(id)), amendment: result };
   }
   /**
@@ -1007,34 +1091,10 @@ export class ProcurementService {
         ProcurementOrderStatus.ORDERED,
       ].includes(status)
     ) {
-      const financeUrl = requireFinanceUrl();
-      const res = await fetch(
-        `${financeUrl}/api/transfer/external/cancel-by-ref`,
-        {
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-internal-secret': requireInternalSecret(),
-          },
-          body: JSON.stringify({
-            externalRef: `warehouse_procurement:${id}`,
-            reason: `Գնման պատվեր #${id} չեղարկվել է${reason ? `՝ ${reason}` : ''}`,
-          }),
-        },
+      financeNote = await this.cancelFinanceTransfers(
+        id,
+        `Գնման պատվեր #${id} չեղարկվել է${reason ? `՝ ${reason}` : ''}`,
       );
-      if (!res.ok) {
-        throw new BadRequestException(
-          `Ֆինանսական գործարքը չհաջողվեց չեղարկել (finance-api ${res.status})`,
-        );
-      }
-      const voided = (await res.json()) as {
-        cancelled: number[];
-        skippedCompleted: number[];
-      };
-      if (voided.skippedCompleted?.length) {
-        financeNote =
-          'Ուշադրություն. գործարք(ներ)ը արդեն կատարված են ֆինանսում — գումարի վերադարձը պետք է լուծվի առանձին';
-      }
     }
 
     const cancelled = await this.prisma.procurementOrder.update({
@@ -1044,7 +1104,9 @@ export class ProcurementService {
     });
 
     void this.notifications.send({
+      type: WAREHOUSE_TYPES.procurementCancelled,
       permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+      entityIds: [order.entityId],
       title: 'Գնման պատվերը չեղարկվել է',
       body: `Գնման պատվեր #${id} չեղարկվել է${reason ? `՝ ${reason}` : ''}։`,
       path: '/procurement',
@@ -1109,7 +1171,9 @@ export class ProcurementService {
     // out for goods that never arrived. Surface it rather than adjusting
     // anything automatically — recovering it is a human negotiation.
     void this.notifications.send({
+      type: WAREHOUSE_TYPES.procurementClosedShort,
       permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+      entityIds: [order.entityId],
       title: 'Գնման պատվերը փակվել է թերի',
       // The amount belongs in the body, not only in `details`: details render
       // in the email, and email is off unless EMAIL_USER/EMAIL_PASS are set —
@@ -1193,8 +1257,8 @@ export class ProcurementService {
         'Միայն նախագիծ պատվերները կարող են ուղարկվել հաստատման',
       );
     }
-    this.payable(order as any);
-    return this.prisma.procurementOrder.update({
+    const { total } = this.payable(order as any);
+    const updated = await this.prisma.procurementOrder.update({
       where: { id },
       data: {
         status: ProcurementOrderStatus.PENDING_APPROVAL,
@@ -1206,6 +1270,37 @@ export class ProcurementService {
       },
       include,
     });
+    // approve_purchase_order is held per organisation but decides for every
+    // organisation (hotfix 2026-09-29): its holders in the order's organisation
+    // and global holders hear of it — the audience rule, not the decide rule.
+    void this.notifications.send({
+      type: WAREHOUSE_TYPES.orderApprovalPending,
+      permissions: [APPROVE_ORDER_PERMISSION],
+      entityIds: [(order as any).entityId],
+      actorId: userId,
+      title: 'Գնման պատվերը սպասում է հաստատման',
+      body: `Գնման պատվեր #${id}${order.supplier?.name ? ` (${order.supplier.name})` : ''} սպասում է ձեր հաստատմանը՝ ${this.money(total)}։`,
+      path: '/procurement',
+      details: this.orderDetails(order, total),
+    });
+    return updated;
+  }
+
+  private money(n: number) {
+    return `${Math.round(n * 100) / 100} ֏`;
+  }
+
+  private orderDetails(order: any, total?: number) {
+    return [
+      { label: 'Պատվեր', value: `#${order.id}` },
+      ...(order.supplier?.name ? [{ label: 'Մատակարար', value: order.supplier.name }] : []),
+      ...(total != null ? [{ label: 'Գումար', value: this.money(total) }] : []),
+    ];
+  }
+
+  /** Who sent the order on its way: the one who submitted it for approval, else its author. */
+  private submitterOf(order: any): number | null {
+    return order.submittedForApprovalBy ?? order.createdBy ?? null;
   }
 
   /**
@@ -1231,7 +1326,16 @@ export class ProcurementService {
       where: { id },
       data: { approvedBy: userId, approvedAt: new Date() },
     });
-    return this.sendToFinance(id);
+    const sent = await this.sendToFinance(id);
+    void this.notifications.sendToUsers([this.submitterOf(order)], {
+      type: WAREHOUSE_TYPES.orderApprovalDecided,
+      actorId: userId,
+      title: 'Գնման պատվերը հաստատվել է',
+      body: `Գնման պատվեր #${id}-ը հաստատվել է և ուղարկվել ֆինանսական բաժին։`,
+      path: '/procurement',
+      details: this.orderDetails(order),
+    });
+    return sent;
   }
 
   /** The approver says no — back to draft with the reason, the way a finance rejection returns it. */
@@ -1242,7 +1346,7 @@ export class ProcurementService {
       throw new BadRequestException('Պատվերը հաստատման սպասման մեջ չէ');
     }
     await this.assertMayApprove(order as any, userId);
-    return this.prisma.procurementOrder.update({
+    const updated = await this.prisma.procurementOrder.update({
       where: { id },
       data: {
         status: ProcurementOrderStatus.DRAFT,
@@ -1252,6 +1356,15 @@ export class ProcurementService {
       },
       include,
     });
+    void this.notifications.sendToUsers([this.submitterOf(order)], {
+      type: WAREHOUSE_TYPES.orderApprovalDecided,
+      actorId: userId,
+      title: 'Գնման պատվերը վերադարձվել է',
+      body: `Գնման պատվեր #${id}-ը չի հաստատվել և վերադարձվել է նախագծի՝ ${reason.trim()}։`,
+      path: '/procurement',
+      details: [...this.orderDetails(order), { label: 'Պատճառ', value: reason.trim() }],
+    });
+    return updated;
   }
 
   /** Raises the order's money with finance (deposit first, then the balance) and moves it to finance approval. */
@@ -1436,8 +1549,13 @@ export class ProcurementService {
           where: { id: payment.id },
           data: { status },
         });
-        if (payment.type === 'ADJUSTMENT' || payment.type === 'REFUND')
+        if (payment.type === 'ADJUSTMENT' || payment.type === 'REFUND') {
+          // A price correction's own verdict — told once, not again on a retry.
+          if (payment.status !== status) {
+            this.announceFinanceDecision(order, status, rejectionReason, payment.type === 'ADJUSTMENT' ? 'ADJUSTMENT' : 'REFUND', payment.amount);
+          }
           return this.findOne(id);
+        }
       }
     }
     const target =
@@ -1456,7 +1574,7 @@ export class ProcurementService {
         `Պատվեր #${id}-ը «${procurementStatusLabel(order.status)}» կարգավիճակում է, ոչ թե ֆինանսական հաստատման սպասման`,
       );
     }
-    return this.prisma.procurementOrder.update({
+    const updated = await this.prisma.procurementOrder.update({
       where: { id },
       data: {
         status:
@@ -1470,13 +1588,119 @@ export class ProcurementService {
       },
       include,
     });
+    // Only on the transition: a retried callback (the no-op above) tells nobody twice.
+    this.announceFinanceDecision(order, status, rejectionReason, 'ORDER');
+    return updated;
   }
 
-  async remove(id: number) {
+  /**
+   * Finance's word on the order's money (or on a price correction): the
+   * procurement alert holders of the order's organisation and the person who
+   * sent the order for approval. Finance is the actor — nobody here is skipped.
+   */
+  private announceFinanceDecision(
+    order: any,
+    status: 'APPROVED' | 'REJECTED',
+    reason: string | undefined,
+    what: 'ORDER' | 'ADJUSTMENT' | 'REFUND',
+    amount?: number,
+  ) {
+    const approved = status === 'APPROVED';
+    const subject =
+      what === 'ORDER'
+        ? `Գնման պատվեր #${order.id}`
+        : `Գնման պատվեր #${order.id}-ի գնի ճշգրտումը (${what === 'ADJUSTMENT' ? 'հավելավճար' : 'վերադարձ'}${amount != null ? `՝ ${this.money(amount)}` : ''})`;
+    void this.notifications.send({
+      type: WAREHOUSE_TYPES.orderFinanceDecided,
+      permissions: ['receive_procurement_alerts', 'manage_warehouse'],
+      entityIds: [order.entityId],
+      userIds: [this.submitterOf(order)],
+      title: approved ? 'Ֆինանսները հաստատել են գնումը' : 'Ֆինանսները մերժել են գնումը',
+      body: approved
+        ? `${subject} հաստատվել է ֆինանսական բաժնի կողմից։`
+        : `${subject} մերժվել է ֆինանսական բաժնի կողմից${reason?.trim() ? `՝ ${reason.trim()}` : ''}։`,
+      path: '/procurement',
+      details: [
+        ...this.orderDetails(order),
+        ...(!approved && reason?.trim() ? [{ label: 'Պատճառ', value: reason.trim() }] : []),
+      ],
+    });
+  }
+
+  /**
+   * Void an order's finance transfers (balance, prepayment, corrections —
+   * everything under its ref) through finance's cancel-by-ref. Throws when
+   * finance is unreachable, so the caller's act fails whole rather than
+   * leaving a live transfer for a dead order. Answers a note when some were
+   * already booked and could not be voided.
+   */
+  private async cancelFinanceTransfers(id: number, reason: string): Promise<string | undefined> {
+    const financeUrl = requireFinanceUrl();
+    const res = await fetch(`${financeUrl}/api/transfer/external/cancel-by-ref`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-internal-secret': requireInternalSecret(),
+      },
+      body: JSON.stringify({ externalRef: `warehouse_procurement:${id}`, reason }),
+    });
+    if (!res.ok) {
+      throw new BadRequestException(
+        `Ֆինանսական գործարքը չհաջողվեց չեղարկել (finance-api ${res.status})`,
+      );
+    }
+    const voided = (await res.json()) as { cancelled: number[]; skippedCompleted: number[] };
+    return voided.skippedCompleted?.length
+      ? 'Ուշադրություն. գործարք(ներ)ը արդեն կատարված են ֆինանսում — գումարի վերադարձը պետք է լուծվի առանձին'
+      : undefined;
+  }
+
+  /**
+   * Delete an order (anything but RECEIVED). Data fix D2 (2026-10-07): the
+   * order's finance transfers are voided first, the way «Չեղարկել» does — an
+   * order that ever reached finance (a finance status, or any live payment
+   * row) cancels by ref; finance unreachable → the delete is refused. The
+   * people whose requisitions it served, and its submitter, are told
+   * (order_deleted).
+   */
+  async remove(id: number, userId?: number) {
     const order = await this.findOne(id);
     if (order.status === ProcurementOrderStatus.RECEIVED) {
       throw new BadRequestException('Ստացված պատվերը հնարավոր չէ ջնջել');
     }
-    return this.prisma.procurementOrder.delete({ where: { id } });
+    const financeStatuses: string[] = [
+      ProcurementOrderStatus.PENDING_FINANCE_APPROVAL,
+      ProcurementOrderStatus.FINANCE_APPROVED,
+      ProcurementOrderStatus.ORDERED,
+      ProcurementOrderStatus.PARTIALLY_RECEIVED,
+      ProcurementOrderStatus.CLOSED_SHORT,
+    ];
+    const reachedFinance =
+      financeStatuses.includes(order.status) ||
+      ((order as any).payments ?? []).some((p: any) => p.financeTransferId && p.status !== 'REJECTED');
+    let financeNote: string | undefined;
+    if (reachedFinance) {
+      financeNote = await this.cancelFinanceTransfers(id, `Գնման պատվեր #${id} ջնջվել է`);
+    }
+    const reqs = await this.linkedRequisitions(id);
+    const deleted = await this.prisma.procurementOrder.delete({ where: { id } });
+    void this.notifications.send({
+      type: WAREHOUSE_TYPES.orderDeleted,
+      userIds: [this.submitterOf(order), ...reqs.map((r) => r.createdBy)],
+      actorId: userId ?? null,
+      title: 'Գնման պատվերը ջնջվել է',
+      body:
+        `Գնման պատվեր #${id}-ը ջնջվել է` +
+        (reqs.length ? `․ գնման հայտ(եր) ${reqs.map((r) => `#${r.id}`).join(', ')} այլևս պատվեր չունեն` : '') +
+        (reachedFinance ? '․ ֆինանսական գործարքները չեղարկվել են' : '') +
+        '։',
+      path: reqs.length === 1 ? crmLinks.requisition(reqs[0].id) : '/procurement',
+      details: [
+        ...this.orderDetails(order),
+        ...reqs.map((r) => ({ label: 'Գնման հայտ', value: `#${r.id}${r.title ? ` «${r.title}»` : ''}` })),
+        ...(financeNote ? [{ label: 'Ֆինանս', value: financeNote }] : []),
+      ],
+    });
+    return financeNote ? { ...deleted, financeNote } : deleted;
   }
 }

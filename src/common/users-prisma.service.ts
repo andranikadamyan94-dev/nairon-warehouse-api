@@ -223,19 +223,41 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
     `;
   }
 
+  /**
+   * Who hears about a record (notifications phase 1, 2026-10-06 — the shared
+   * audience rule): active people holding one of `permissions` IN the
+   * record's organisation. For each organisation E in `entityIds`, a role
+   * counts when its assignment is global (entityId 0) or in E, and the
+   * permission is granted there globally (rp.entityId 0) or in E. A record
+   * with no organisation (null/0) reaches global holders only.
+   *
+   * Super-admins only when their role explicitly grants the permission —
+   * `isSuperAdmin` alone no longer qualifies (it used to reach every
+   * super-admin of every organisation). A person holding a read-only role
+   * (Role.readOnly, e.g. the read-only super admin) is never a recipient.
+   */
   async getNotificationRecipients(
     permissions: string[],
+    entityIds: (number | null | undefined)[],
   ): Promise<{ id: number; email: string; firstName: string; lastName: string }[]> {
     if (!permissions.length) return [];
+    const scopes = [...new Set(entityIds.map((e) => (Number.isInteger(e) && (e as number) > 0 ? (e as number) : 0)))];
+    if (!scopes.length) scopes.push(0);
     return this.$queryRaw<{ id: number; email: string; firstName: string; lastName: string }[]>`
       SELECT DISTINCT u.id, u.email, u."firstName", u."lastName"
       FROM "User" u
       JOIN "UserRole" ur ON ur."userId" = u.id
-      JOIN "Role" r ON r.id = ur."roleId"
-      LEFT JOIN "RolePermission" rp ON rp."roleId" = r.id
-      LEFT JOIN "Permission" p ON p.id = rp."permissionId"
+      JOIN "RolePermission" rp ON rp."roleId" = ur."roleId"
+      JOIN "Permission" p ON p.id = rp."permissionId"
+      JOIN unnest(${scopes}::int[]) AS scope(id)
+        ON (ur."entityId" = 0 OR ur."entityId" = scope.id)
+       AND (rp."entityId" = 0 OR rp."entityId" = scope.id)
       WHERE u."deactivatedAt" IS NULL
-        AND (p.name = ANY(${permissions}::text[]) OR r."isSuperAdmin" = true)
+        AND p.name = ANY(${permissions}::text[])
+        AND NOT EXISTS (
+          SELECT 1 FROM "UserRole" ro JOIN "Role" rr ON rr.id = ro."roleId"
+          WHERE ro."userId" = u.id AND rr."readOnly" = true
+        )
     `;
   }
 }

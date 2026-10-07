@@ -4,11 +4,18 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
 
 import { UsersPrismaService } from '../common/users-prisma.service';
+import {
+  WAREHOUSE_TYPES,
+  WarehouseNotification,
+  WarehouseNotificationsService,
+  crmLinks,
+} from '../common/notifications/notifications.service';
 import { FileService } from '../common/file.service';
 import { TxClient } from '../common/operations/operations.service';
 import { renamedFileName } from '../common/file-rename';
@@ -98,7 +105,9 @@ const OPEN_ORDER_STATUSES = ['PENDING_FINANCE_APPROVAL', 'FINANCE_APPROVED', 'OR
  * has no organisation picker): whoever holds the right anywhere sees every
  * organisation's rows.
  *
- * Notifications deliberately absent — platform-wide pass after this sprint.
+ * Notifications (phase 2, 2026-10-06): every step tells the people it waits
+ * on or answers — see the `announce*` helpers at the end. Best-effort, after
+ * the write, never the actor.
  */
 @Injectable()
 export class PurchaseRequisitionsService {
@@ -106,6 +115,7 @@ export class PurchaseRequisitionsService {
     private readonly prisma: PrismaService,
     private readonly usersPrisma: UsersPrismaService,
     private readonly fileService: FileService,
+    @Optional() private readonly notifications?: WarehouseNotificationsService,
   ) {}
 
   // ── Access ────────────────────────────────────────────────────────────────
@@ -278,6 +288,10 @@ export class PurchaseRequisitionsService {
       },
       include: this.include,
     });
+    // Inside a caller's transaction nothing is committed yet: the caller
+    // announces once it is (the controller after runOnce). A catalog checkout
+    // announces its own requisition with the submission (CatalogService).
+    if (!tx && !opts?.catalog) this.announceSubmitted(created, userId);
     return (await this.decorate([created]))[0];
   }
 
@@ -488,8 +502,9 @@ export class PurchaseRequisitionsService {
   }
 
   async submit(id: number, userId: number) {
-    await this.submittable(id, userId);
+    const req = await this.submittable(id, userId);
     await this.prisma.purchaseRequisition.update({ where: { id }, data: { status: 'PENDING_APPROVAL' } });
+    this.announceSubmitted({ ...req, status: 'PENDING_APPROVAL' }, userId);
     return this.findOne(id, userId);
   }
 
@@ -501,9 +516,11 @@ export class PurchaseRequisitionsService {
     return req;
   }
 
-  async cancel(id: number, userId: number, isSuperAdmin: boolean) {
-    await this.cancellable(id, userId, isSuperAdmin);
+  /** `quiet`: the catalog withdraws its own requisition and tells the desk itself, once. */
+  async cancel(id: number, userId: number, isSuperAdmin: boolean, opts?: { quiet?: boolean }) {
+    const req = await this.cancellable(id, userId, isSuperAdmin);
     await this.prisma.purchaseRequisition.update({ where: { id }, data: { status: 'CANCELLED' } });
+    if (!opts?.quiet) void this.announceCancelled(req, userId);
     return this.findOne(id, userId, { isSuperAdmin });
   }
 
@@ -620,6 +637,19 @@ export class PurchaseRequisitionsService {
       where: { id },
       data: { status: 'SUBMITTED', decidedBy: userId, decidedAt: new Date() },
     });
+    // Procurement now has it; the requester hears it went through — unless it
+    // is a catalog checkout's, whose submitter the catalog tells itself.
+    this.notify({
+      type: WAREHOUSE_TYPES.requisitionApproved,
+      permissions: ['manage_procurement'],
+      entityIds: [req.entityId],
+      userIds: req.submissionId ? [] : [req.createdBy],
+      actorId: userId,
+      title: 'Գնման հայտը հաստատվել է',
+      body: `${this.label(req)} հաստատվել է կազմակերպության կողմից և փոխանցվել գնումների բաժին։`,
+      path: crmLinks.requisition(req.id),
+      details: this.details(req),
+    });
     return this.findOne(id, userId, { permissionNames: [APPROVE_PERMISSION] });
   }
 
@@ -633,6 +663,7 @@ export class PurchaseRequisitionsService {
       where: { id },
       data: this.pendingRejection(userId, reason, 'ORG', req.status),
     });
+    this.announceRejectionPending(req, userId, reason);
     return this.findOne(id, userId, { permissionNames: [APPROVE_PERMISSION] });
   }
 
@@ -645,6 +676,16 @@ export class PurchaseRequisitionsService {
       where: { id },
       data: { status: 'IN_REVIEW', reviewedBy: userId, reviewedAt: new Date() },
     });
+    // Phase 3 (2026-10-07): the requester hears procurement picked it up.
+    this.notify({
+      type: WAREHOUSE_TYPES.requisitionInReview,
+      userIds: [req.createdBy],
+      actorId: userId,
+      title: 'Գնման հայտը մշակման մեջ է',
+      body: `${this.label(req)}՝ գնումների բաժինը վերցրել է այն մշակման։`,
+      path: crmLinks.requisition(req.id),
+      details: this.details(req),
+    });
     return this.findOne(id, userId, { permissionNames: ['manage_procurement'] });
   }
 
@@ -656,6 +697,7 @@ export class PurchaseRequisitionsService {
       where: { id },
       data: this.pendingRejection(userId, reason, 'PROCUREMENT', req.status),
     });
+    this.announceRejectionPending(req, userId, reason);
     return this.findOne(id, userId, { permissionNames: ['manage_procurement'] });
   }
 
@@ -721,6 +763,15 @@ export class PurchaseRequisitionsService {
         ? { status: 'REJECTED', reviewedBy: by, reviewedAt: at, ...stamp }
         : { status: 'REJECTED', decidedBy: by, decidedAt: at, ...stamp },
     });
+    this.notify({
+      type: WAREHOUSE_TYPES.requisitionRejectionDecided,
+      userIds: [req.createdBy, req.rejectionRequestedBy],
+      actorId: userId,
+      title: 'Գնման հայտը մերժվել է',
+      body: `${this.label(req)} մերժվել է${req.rejectionReason ? `՝ ${req.rejectionReason}` : ''}։`,
+      path: crmLinks.requisition(req.id),
+      details: [...this.details(req), ...(req.rejectionReason ? [{ label: 'Պատճառ', value: req.rejectionReason }] : [])],
+    });
     return this.findOne(id, userId, { permissionNames: [CONFIRM_REJECTION_PERMISSION] });
   }
 
@@ -739,6 +790,18 @@ export class PurchaseRequisitionsService {
         rejectionConfirmedAt: new Date(),
         rejectionDeclineNote: note?.trim() || null,
       },
+    });
+    // The rejecter learns their rejection did not stand; the requester that
+    // the requisition is alive again (they were never told it was rejected,
+    // but the screen showed it as such — catalog.rules REJECTION_PENDING).
+    this.notify({
+      type: WAREHOUSE_TYPES.requisitionRejectionDecided,
+      userIds: [req.createdBy, req.rejectionRequestedBy],
+      actorId: userId,
+      title: 'Գնման հայտի մերժումը չի հաստատվել',
+      body: `${this.label(req)}՝ մերժումը չի հաստատվել, հայտը վերադարձել է մշակման${note?.trim() ? `․ ${note.trim()}` : ''}։`,
+      path: crmLinks.requisition(req.id),
+      details: [...this.details(req), ...(note?.trim() ? [{ label: 'Նշում', value: note.trim() }] : [])],
     });
     return this.findOne(id, userId, { permissionNames: [CONFIRM_REJECTION_PERMISSION] });
   }
@@ -794,6 +857,15 @@ export class PurchaseRequisitionsService {
       });
       return order;
     });
+    this.notify({
+      type: WAREHOUSE_TYPES.requisitionConverted,
+      userIds: [req.createdBy],
+      actorId: userId,
+      title: 'Գնման հայտից պատվեր է ստեղծվել',
+      body: `${this.label(req)}՝ գնումների բաժինը ստեղծել է գնման պատվեր #${result.id}։`,
+      path: crmLinks.requisition(req.id),
+      details: [...this.details(req), { label: 'Գնման պատվեր', value: `#${result.id}` }],
+    });
     const out = await this.findOne(id, userId, { permissionNames: ['manage_procurement'] });
     return { ...out, order: { id: result.id, status: result.status } };
   }
@@ -816,16 +888,26 @@ export class PurchaseRequisitionsService {
     return req;
   }
 
-  async addComment(id: number, userId: number, text: string, ctx?: Ctx) {
-    await this.commentable(id, userId, text, ctx);
+  /**
+   * `quiet`: the catalog writes its own notes onto a catalog requisition
+   * (replies, approval comments, info requests) and tells the people itself
+   * with one catalog notice — the requisition does not tell them again.
+   */
+  async addComment(id: number, userId: number, text: string, ctx?: Ctx, opts?: { quiet?: boolean }) {
+    const req = await this.commentable(id, userId, text, ctx);
     await this.prisma.purchaseRequisitionComment.create({ data: { requisitionId: id, userId, text: text.trim() } });
+    if (!opts?.quiet) void this.announceComment(req, userId, `Նոր մեկնաբանություն՝ ${text.trim()}`);
     return this.findOne(id, userId, ctx);
   }
 
-  async addAttachment(id: number, userId: number, file: Express.Multer.File, ctx?: Ctx) {
+  async addAttachment(id: number, userId: number, file: Express.Multer.File, ctx?: Ctx, opts?: { quiet?: boolean }) {
     const req = await this.getOrThrow(id);
     await this.assertCanSee(req, userId, ctx);
     if (!file) throw new BadRequestException('Ֆայլը բացակայում է');
+    if (!opts?.quiet) {
+      // Phase 3: a file is its own type (request_attachment), the audience a comment's.
+      void this.announceComment(req, userId, `Նոր ֆայլ՝ ${Buffer.from(file.originalname, 'latin1').toString('utf8')}`, WAREHOUSE_TYPES.requestAttachment);
+    }
     const url = this.fileService.upload(file);
     await this.prisma.purchaseRequisitionAttachment.create({
       data: {
@@ -857,6 +939,129 @@ export class PurchaseRequisitionsService {
     if (att.uploadedBy !== userId) throw new ForbiddenException('Ֆայլը կարող է ջնջել միայն կցողը');
     await this.prisma.purchaseRequisitionAttachment.delete({ where: { id: attachmentId } });
     return { success: true };
+  }
+
+  // ── Notifications (phase 2, 2026-10-06) ──────────────────────────────────
+
+  private notify(n: WarehouseNotification) {
+    if (this.notifications) void this.notifications.send(n);
+  }
+
+  private label(req: { id: number; title?: string | null }) {
+    return `Գնման հայտ #${req.id}${req.title ? ` («${req.title}»)` : ''}`;
+  }
+
+  private details(req: { id: number; title?: string | null }) {
+    return [
+      { label: 'Հայտ', value: `#${req.id}` },
+      ...(req.title ? [{ label: 'Վերնագիր', value: req.title }] : []),
+    ];
+  }
+
+  /**
+   * A requisition now waits for its organisation: approve_purchase_requisition
+   * holders IN that organisation hear of it. Public for the callers that
+   * write inside their own transaction (the controller's runOnce) and for the
+   * catalog, which passes the people its own notice already reached.
+   */
+  announceSubmitted(
+    req: { id: number; title?: string | null; status: string; entityId: number | null; lines?: { itemName: string; quantity: number }[] },
+    actorId: number,
+    excludeUserIds: number[] = [],
+  ) {
+    if (req.status !== 'PENDING_APPROVAL') return;
+    const lines = (req.lines ?? []).map((l) => `${l.itemName} × ${l.quantity}`).join(', ');
+    this.notify({
+      type: WAREHOUSE_TYPES.requisitionSubmitted,
+      permissions: [APPROVE_PERMISSION],
+      entityIds: [req.entityId],
+      actorId,
+      excludeUserIds,
+      title: 'Գնման հայտը սպասում է հաստատման',
+      body: `${this.label(req)} սպասում է ձեր հաստատմանը${lines ? `՝ ${lines}` : ''}։`,
+      path: crmLinks.requisition(req.id),
+      details: [...this.details(req), ...(lines ? [{ label: 'Ապրանքներ', value: lines }] : [])],
+    });
+  }
+
+  /** A rejection waits for confirm_requisition_rejection in the requisition's organisation. */
+  private announceRejectionPending(req: any, actorId: number, reason: string) {
+    this.notify({
+      type: WAREHOUSE_TYPES.requisitionRejectionPending,
+      permissions: [CONFIRM_REJECTION_PERMISSION],
+      entityIds: [req.entityId],
+      actorId,
+      title: 'Գնման հայտի մերժումը սպասում է հաստատման',
+      body: `${this.label(req)}՝ մերժման պատճառ՝ ${reason.trim()}։ Հաստատեք կամ մերժեք մերժումը։`,
+      path: crmLinks.requisition(req.id),
+      details: [...this.details(req), { label: 'Պատճառ', value: reason.trim() }],
+    });
+  }
+
+  /**
+   * A comment or a file reaches the other side. The requester's goes to the
+   * people who have acted on the requisition (decided, reviewed, asked to
+   * reject, commented) — or, when nobody has yet, to whoever it waits on now.
+   * Anybody else's goes to the requester and the others who took part.
+   */
+  private async announceComment(req: any, actorId: number, what: string, type: string = WAREHOUSE_TYPES.requisitionComment) {
+    try {
+      if (!this.notifications) return;
+      const commenters = await this.prisma.purchaseRequisitionComment.findMany({
+        where: { requisitionId: req.id },
+        select: { userId: true },
+      });
+      const handlers = [req.decidedBy, req.reviewedBy, req.rejectionRequestedBy, req.rejectionConfirmedBy, ...commenters.map((c: any) => c.userId)]
+        .filter((x): x is number => !!x && x !== req.createdBy);
+      const base = {
+        type,
+        actorId,
+        title: type === WAREHOUSE_TYPES.requestAttachment ? 'Ֆայլ գնման հայտում' : 'Մեկնաբանություն գնման հայտում',
+        body: `${this.label(req)}․ ${what}`,
+        path: crmLinks.requisition(req.id),
+        details: this.details(req),
+      };
+      if (actorId !== req.createdBy) {
+        this.notify({ ...base, userIds: [req.createdBy, ...handlers] });
+        return;
+      }
+      if (handlers.length) {
+        this.notify({ ...base, userIds: handlers });
+        return;
+      }
+      const waitsOn =
+        req.status === 'PENDING_APPROVAL' ? [APPROVE_PERMISSION]
+        : req.status === 'REJECTION_PENDING' ? [CONFIRM_REJECTION_PERMISSION]
+        : REVIEWABLE.includes(req.status) ? ['manage_procurement']
+        : [];
+      if (waitsOn.length) this.notify({ ...base, permissions: waitsOn, entityIds: [req.entityId] });
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /**
+   * Phase 3 (2026-10-07): a requisition withdrawn after it was sent reaches
+   * the people it waited on (the organisation's approvers while
+   * PENDING_APPROVAL, procurement once SUBMITTED / IN_REVIEW) and whoever has
+   * already acted on it; its requester too when a super-admin withdrew it.
+   * A draft nobody saw is withdrawn silently.
+   */
+  private announceCancelled(req: any, actorId: number) {
+    if (req.status === 'DRAFT') return;
+    const handlers = [req.decidedBy, req.reviewedBy, req.createdBy].filter((x): x is number => !!x);
+    const waitsOn = req.status === 'PENDING_APPROVAL' ? [APPROVE_PERMISSION] : ['manage_procurement'];
+    this.notify({
+      type: WAREHOUSE_TYPES.requisitionCancelled,
+      permissions: waitsOn,
+      entityIds: [req.entityId],
+      userIds: handlers,
+      actorId,
+      title: 'Գնման հայտը չեղարկվել է',
+      body: `${this.label(req)} չեղարկվել է${actorId === req.createdBy ? ' ներկայացնողի կողմից' : ''}։`,
+      path: crmLinks.requisition(req.id),
+      details: this.details(req),
+    });
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────

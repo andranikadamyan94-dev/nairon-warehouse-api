@@ -153,8 +153,8 @@ export class ProcurementController {
     summary:
       'Confirm the purchase — order placed with the supplier, hands off to warehouse receiving',
   })
-  markOrdered(@Param('id', ParseIntPipe) id: number) {
-    return this.procurementService.confirmOrdered(id);
+  markOrdered(@Param('id', ParseIntPipe) id: number, @LoggedInUser('id') userId?: number) {
+    return this.procurementService.confirmOrdered(id, userId);
   }
 
   @UseGuards(PermissionGuard)
@@ -314,7 +314,7 @@ export class ProcurementController {
   @Permissions('manage_procurement')
   @Delete(':id')
   @ApiOperation({ summary: 'Delete procurement order' })
-  remove(@Param('id', ParseIntPipe) id: number) {
-    return this.procurementService.remove(id);
+  remove(@Param('id', ParseIntPipe) id: number, @LoggedInUser('id') userId?: number) {
+    return this.procurementService.remove(id, userId);
   }
 }

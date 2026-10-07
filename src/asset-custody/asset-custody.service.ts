@@ -2,7 +2,7 @@ import { requireInternalSecret } from '../common/internal-headers';
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from 'prisma/prisma.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
-import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
 import { CreateAssetRequestDto, DirectIssueDto, IssueAssetRequestDto, ObjectIssueDto, ReassignCustodyDto, ReleaseCondition, ReturnCustodyDto } from './dto/asset-custody.dto';
 import { ObjectsService } from '../objects/objects.service';
 import { holdsObjectRight, isResponsibleOf, OBJECT_PAGE_RIGHT } from '../objects/object-page-rights';
@@ -124,12 +124,15 @@ export class AssetCustodyService {
   }
 
   /** Approvers hear of a new request (fire-and-forget, as before). */
-  announceRequest(request: { id: number; forObjectId: number | null; forUserId: number | null; quantity: number; reason: string | null; item: { name: string } }) {
+  announceRequest(request: { id: number; requestedBy?: number | null; entityId: number | null; forObjectId: number | null; forUserId: number | null; quantity: number; reason: string | null; item: { name: string } }) {
     void (async () => {
       const object = request.forObjectId ? await this.objects.crmObject(request.forObjectId) : null;
       const who = object ? `${object.code} ${object.name}` : await this.person(request.forUserId!);
       await this.notifications.send({
+        type: WAREHOUSE_TYPES.assetRequest,
         permissions: [PERM.approve],
+        entityIds: [request.entityId],
+        actorId: request.requestedBy ?? null,
         title: 'Նոր գույքի հայտ',
         body: `${who}՝ ${request.item.name} × ${request.quantity}${request.reason ? ` — ${request.reason}` : ''}`,
         path: '/responsibilities?tab=requests',
@@ -179,15 +182,25 @@ export class AssetCustodyService {
       include: { item: true },
     });
     void this.notifyUsers([r.requestedBy, r.forUserId].filter((x): x is number => !!x), {
+      type: WAREHOUSE_TYPES.assetDecided,
+      actorId: actor.userId,
       title: approve ? 'Գույքի հայտը հաստատվեց' : 'Գույքի հայտը մերժվեց',
       body: `${r.item.name} × ${r.quantity}${note ? ` — ${note}` : ''}`,
       path: '/profile?tab=assets',
     });
     if (approve) {
+      // Phase 2: the object by its code and name, as the request announcement names it.
+      const object = r.forObjectId ? await this.objects.crmObject(r.forObjectId).catch(() => null) : null;
+      const who = r.forObjectId
+        ? object ? `${object.code} ${object.name}` : `Օբյեկտ #${r.forObjectId}`
+        : await this.person(r.forUserId ?? r.requestedBy);
       void this.notifications.send({
+        type: WAREHOUSE_TYPES.assetToIssue,
         permissions: [PERM.issue],
+        entityIds: [r.entityId],
+        actorId: actor.userId,
         title: 'Հաստատված գույքի հայտ՝ տրամադրման',
-        body: `${r.forObjectId ? `Օբյեկտ #${r.forObjectId}` : await this.person(r.forUserId ?? r.requestedBy)}՝ ${r.item.name} × ${r.quantity}`,
+        body: `${who}՝ ${r.item.name} × ${r.quantity}`,
         path: '/responsibilities?tab=requests',
         details: [{ label: 'Հայտ', value: `#${r.id}` }],
       });
@@ -204,8 +217,43 @@ export class AssetCustodyService {
   }
 
   async cancel(id: number, actor: Actor) {
-    await this.cancellable(id, actor);
-    return this.prisma.assetRequest.update({ where: { id }, data: { status: 'CANCELLED' } });
+    const r = await this.cancellable(id, actor);
+    const updated = await this.prisma.assetRequest.update({ where: { id }, data: { status: 'CANCELLED' } });
+    void this.announceRequestCancelled(r, actor);
+    return updated;
+  }
+
+  /**
+   * Phase 3 (2026-10-07): a withdrawn request reaches the people it was
+   * waiting on — approvers while PENDING, issuers once APPROVED — and the
+   * person it was for (forUserId), or its filer when a super-admin withdrew it.
+   */
+  private async announceRequestCancelled(r: any, actor: Actor) {
+    try {
+      const object = r.forObjectId ? await this.objects.crmObject(r.forObjectId).catch(() => null) : null;
+      const who = r.forObjectId
+        ? object ? `${object.code} ${object.name}` : `Օբյեկտ #${r.forObjectId}`
+        : await this.person(r.forUserId ?? r.requestedBy);
+      const n = {
+        type: WAREHOUSE_TYPES.assetRequestCancelled,
+        actorId: actor.userId,
+        title: 'Գույքի հայտը չեղարկվել է',
+        body: `${who}՝ ${r.item?.name ?? 'գույք'} × ${r.quantity} — հայտը չեղարկվել է։`,
+        details: [{ label: 'Հայտ', value: `#${r.id}` }],
+      };
+      // The people it concerned see it on their profile; the desk on its register.
+      const named = [r.forUserId, r.requestedBy].filter((x): x is number => !!x);
+      await this.notifications.sendToUsers(named, { ...n, path: '/profile?tab=assets' });
+      await this.notifications.send({
+        ...n,
+        permissions: [r.status === 'APPROVED' ? PERM.issue : PERM.approve],
+        entityIds: [r.entityId],
+        excludeUserIds: named,
+        path: '/responsibilities?tab=requests',
+      });
+    } catch (e: any) {
+      this.logger.warn(`asset request cancel notification failed: ${e?.message ?? e}`);
+    }
   }
 
   // ── The assistant's preflights (2026-10-01, coverage gaps batch 4) ──────────
@@ -302,6 +350,8 @@ export class AssetCustodyService {
     }
     if (r.forUserId) {
       void this.notifyUsers([r.forUserId], {
+        type: WAREHOUSE_TYPES.assetIssued,
+      actorId: actor.userId,
         title: 'Ձեզ գույք է տրամադրվել',
         body: `${r.item.name} × ${dto.assetIds.length} — հաստատեք ստացումը`,
         path: '/profile?tab=assets',
@@ -391,6 +441,8 @@ export class AssetCustodyService {
       return next;
     });
     void this.notifyUsers([dto.holderUserId], {
+      type: WAREHOUSE_TYPES.assetIssued,
+      actorId: actor.userId,
       title: 'Ձեզ գույք է տրամադրվել',
       body: `${row.asset.item.name}${row.asset.serialNumber ? ` (${row.asset.serialNumber})` : ''} — ${object ? `${object.code} ${object.name}` : 'օբյեկտ'} · հաստատեք ստացումը`,
       path: '/profile?tab=assets',
@@ -440,6 +492,7 @@ export class AssetCustodyService {
       const object = await this.objects.crmObject(objectId);
       if (object?.responsibleId) {
         await this.notifications.sendToUsers([object.responsibleId], {
+          type: WAREHOUSE_TYPES.assetIssuedObject,
           title: 'Օբյեկտին գույք է տրամադրվել',
           body: `${object.code} ${object.name}՝ ${what}`,
           path: `/objects/${objectId}`,
@@ -469,6 +522,8 @@ export class AssetCustodyService {
     if (await this.usersPrisma.isDeactivated(dto.holderUserId)) throw new BadRequestException('Աշխատակիցն ապաակտիվացված է');
     const row = await this.handOver(dto.assetId, dto.holderUserId, actor.userId, { via: 'DIRECT_ISSUE', notes: dto.notes });
     void this.notifyUsers([dto.holderUserId], {
+      type: WAREHOUSE_TYPES.assetIssued,
+      actorId: actor.userId,
       title: 'Ձեզ գույք է տրամադրվել',
       body: `${row.asset.item.name}${row.asset.serialNumber ? ` (${row.asset.serialNumber})` : ''} — հաստատեք ստացումը`,
       path: '/profile?tab=assets',
@@ -512,7 +567,22 @@ export class AssetCustodyService {
     } else if (c.holderUserId !== actor.userId) throw new ForbiddenException('Ստացումը հաստատում է միայն ստացողը');
     if (c.releasedAt) throw new BadRequestException('Գույքն արդեն վերադարձված է');
     if (c.acceptedAt) return c;
-    return this.prisma.assetCustody.update({ where: { id }, data: { acceptedAt: new Date() }, include: custodyInclude });
+    const accepted = await this.prisma.assetCustody.update({ where: { id }, data: { acceptedAt: new Date() }, include: custodyInclude });
+    // Phase 3 (2026-10-07): the person who issued it hears the receipt was confirmed.
+    if (c.assignedBy) {
+      const what = `${c.asset?.item?.name ?? 'Գույք'}${c.asset?.serialNumber ? ` (${c.asset.serialNumber})` : ''}`;
+      const holder = c.holderType === 'OBJECT' && c.holderObjectId
+        ? await this.objects.crmObject(c.holderObjectId).then((o) => (o ? `${o.code} ${o.name}` : `Օբյեկտ #${c.holderObjectId}`)).catch(() => `Օբյեկտ #${c.holderObjectId}`)
+        : await this.person(c.holderUserId ?? actor.userId).catch(() => '');
+      void this.notifyUsers([c.assignedBy], {
+        type: WAREHOUSE_TYPES.receiptConfirmed,
+        actorId: actor.userId,
+        title: 'Գույքի ստացումը հաստատվել է',
+        body: `${what}${holder ? ` — ${holder}` : ''} · ստացումը հաստատված է։`,
+        path: '/responsibilities',
+      });
+    }
+    return accepted;
   }
 
   async release(id: number, dto: ReturnCustodyDto, actor: Actor) {
@@ -527,7 +597,7 @@ export class AssetCustodyService {
     const onTask = await this.prisma.reservationAllocation.findFirst({ where: { assetId: c.assetId, releasedAt: null }, select: { reservationId: true } });
     if (onTask) throw new BadRequestException(`Գույքը տրամադրված է առաջադրանքի (ամրագրում #${onTask.reservationId}) — նախ ազատեք հատկացումը`);
     const status = dto.condition === ReleaseCondition.OK ? 'AVAILABLE' : dto.condition === ReleaseCondition.DAMAGED ? 'DAMAGED' : 'RETIRED';
-    return this.prisma.$transaction(async (tx) => {
+    const released = await this.prisma.$transaction(async (tx) => {
       const row = await tx.assetCustody.update({
         where: { id },
         data: { releasedAt: new Date(), releasedBy: actor.userId, releaseCondition: dto.condition, notes: dto.notes?.trim() ? `${c.notes ? c.notes + '\n' : ''}${dto.notes.trim()}` : c.notes },
@@ -542,6 +612,52 @@ export class AssetCustodyService {
       }
       return row;
     });
+    void this.announceRelease(c, dto, actor);
+    return released;
+  }
+
+  /**
+   * Phase 2 (2026-10-06): an asset back DAMAGED or LOST reaches issue_assets /
+   * manage_warehouse in the item's organisation; a holder whose custody the
+   * warehouse closed hears it was taken off them.
+   */
+  private async announceRelease(c: any, dto: ReturnCustodyDto, actor: Actor) {
+    try {
+      const what = `${c.asset?.item?.name ?? 'Գույք'}${c.asset?.serialNumber ? ` (${c.asset.serialNumber})` : ''}`;
+      const holder = c.holderUserId ? await this.person(c.holderUserId) : null;
+      if (dto.condition === ReleaseCondition.DAMAGED || dto.condition === ReleaseCondition.LOST) {
+        const category = c.asset?.item?.categoryId
+          ? await this.prisma.itemCategory.findUnique({ where: { id: c.asset.item.categoryId }, select: { entityId: true } })
+          : null;
+        const damaged = dto.condition === ReleaseCondition.DAMAGED;
+        await this.notifications.send({
+          type: WAREHOUSE_TYPES.assetReturnedDamaged,
+          permissions: [PERM.issue, 'manage_warehouse'],
+          entityIds: [category?.entityId ?? null],
+          actorId: actor.userId,
+          title: damaged ? 'Գույքը վերադարձվել է վնասված' : 'Գույքը նշվել է կորած',
+          body: `${what}${holder ? ` — ${holder}` : ''}${dto.notes?.trim() ? ` · ${dto.notes.trim()}` : ''}`,
+          path: '/responsibilities',
+          details: [
+            { label: 'Գույք', value: what },
+            ...(holder ? [{ label: 'Պատասխանատու', value: holder }] : []),
+            { label: 'Վիճակ', value: damaged ? 'Վնասված' : 'Կորած' },
+            ...(dto.notes?.trim() ? [{ label: 'Նշում', value: dto.notes.trim() }] : []),
+          ],
+        });
+      }
+      if (c.holderUserId && c.holderUserId !== actor.userId) {
+        await this.notifications.sendToUsers([c.holderUserId], {
+          type: WAREHOUSE_TYPES.responsibilityChanged,
+          actorId: actor.userId,
+          title: 'Գույքի պատասխանատվությունը հանվել է',
+          body: `${what} — պահեստը գրանցել է վերադարձը, դուք այլևս դրա պատասխանատուն չեք։`,
+          path: '/profile?tab=assets',
+        });
+      }
+    } catch (e: any) {
+      this.logger.warn(`custody release notification failed: ${e?.message ?? e}`);
+    }
   }
 
   /**
@@ -582,7 +698,7 @@ export class AssetCustodyService {
     });
   }
 
-  private async notifyUsers(userIds: number[], n: { title: string; body: string; path: string }) {
+  private async notifyUsers(userIds: number[], n: { type: string; actorId?: number | null; title: string; body: string; path: string; details?: { label: string; value: string }[] }) {
     try {
       await this.notifications.sendToUsers(userIds, n);
     } catch (e: any) {

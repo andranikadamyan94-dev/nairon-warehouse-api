@@ -2,7 +2,9 @@ import { roundQty } from '../common/quantity';
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
@@ -10,6 +12,7 @@ import { PrismaService } from 'prisma/prisma.service';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
 import { ObjectsService } from '../objects/objects.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
 
 import { ItemType } from '../common/enums/item-type.enum';
 
@@ -25,9 +28,49 @@ export class InventoryService {
     private readonly stockAlerts: StockAlertService,
     private readonly usersPrisma: UsersPrismaService,
     private readonly objectsService: ObjectsService,
+    @Optional() private readonly notifications?: WarehouseNotificationsService,
   ) {}
 
-  async createMovement(dto: InventoryMovementDto) {
+  private readonly logger = new Logger(InventoryService.name);
+
+  /**
+   * Phase 3 (2026-10-07): a manual stock movement on the main pool reaches the
+   * main warehouse's responsible person — stock changed by hand, outside a
+   * receipt, an issue or a transfer. Never the actor.
+   */
+  private async announceAdjusted(
+    item: { id: number; name: string; unit?: string | null },
+    dto: InventoryMovementDto,
+    before: number,
+    after: number,
+    actorId: number | null,
+  ) {
+    try {
+      if (!this.notifications) return;
+      const main = await this.prisma.warehouse.findFirst({ where: { type: 'MAIN' }, select: { responsibleId: true, name: true } });
+      if (!main?.responsibleId) return;
+      const kind: Record<string, string> = {
+        IN: 'մուտք', OUT: 'ելք', RESERVATION: 'ամրագրում', RELEASE: 'ազատում', ADJUSTMENT: 'ճշգրտում',
+      };
+      await this.notifications.sendToUsers([main.responsibleId], {
+        type: WAREHOUSE_TYPES.stockAdjusted,
+        actorId,
+        title: 'Պաշարը փոփոխվել է ձեռքով',
+        body: `«${item.name}»՝ ${kind[dto.type] ?? dto.type} ${dto.quantity}, մնացորդ ${before} → ${after}${dto.notes ? ` — ${dto.notes}` : ''}։`,
+        path: '/movements',
+        details: [
+          { label: 'Ապրանք', value: item.name },
+          { label: 'Շարժ', value: `${kind[dto.type] ?? dto.type} ${dto.quantity}` },
+          { label: 'Մնացորդ', value: `${before} → ${after}` },
+          ...(dto.notes ? [{ label: 'Նշում', value: dto.notes }] : []),
+        ],
+      });
+    } catch (e: any) {
+      this.logger.warn(`stock adjustment notification failed: ${e?.message ?? e}`);
+    }
+  }
+
+  async createMovement(dto: InventoryMovementDto, actorId?: number) {
     const item = await this.prisma.item.findUnique({
       where: {
         id: dto.itemId,
@@ -89,6 +132,7 @@ export class InventoryService {
 
     // After commit, never inside the transaction — see StockAlertService.
     this.stockAlerts.check([item.id]);
+    void this.announceAdjusted(item, dto, item.quantity, newQuantity, actorId ?? dto.performedBy ?? null);
 
     return movement;
   }

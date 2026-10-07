@@ -4,9 +4,11 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
+import { WAREHOUSE_TYPES, WarehouseNotification, WarehouseNotificationsService } from '../common/notifications/notifications.service';
 
 import { WarehouseActor } from '../auth/actor';
 import { CategoriesService } from '../categories/categories.service';
@@ -148,7 +150,91 @@ export class CatalogService {
     private readonly requisitions: PurchaseRequisitionsService,
     private readonly categories: CategoriesService,
     private readonly fileService: FileService,
+    @Optional() private readonly notifications?: WarehouseNotificationsService,
   ) {}
+
+  // ── Notifications (phase 2, 2026-10-06) ───────────────────────────────────
+  //
+  // The catalog speaks for its rows: the desk (view_catalog_requests in the
+  // submission's organisation) hears of a checkout and a reply; the submitter
+  // hears every decision once per action — approved, rejected, information
+  // requested, ready to collect. The reservation and requisition calls made
+  // on the way are quiet so nobody hears the same act twice.
+
+  private notify(n: WarehouseNotification) {
+    if (this.notifications) void this.notifications.send(n);
+  }
+
+  /** The desk hears of a new checkout, shortage included; the purchase approvers of a requisition it raised too — once. */
+  private announceCheckout(
+    sub: { id: number; number: string; entityId: number | null; createdBy: number; purpose: string; projectName: string | null },
+    stock: { itemName?: string; quantity: number; status: string }[],
+    purchase: { itemName: string; quantity: number }[],
+    requisition: any | null,
+  ) {
+    if (!this.notifications) return;
+    void (async () => {
+      const short = stock.filter((c) => c.status === 'PENDING');
+      const lines = [...stock, ...purchase].map((l) => `${l.itemName} × ${l.quantity}`).join(', ');
+      await this.notifications!.send({
+        type: WAREHOUSE_TYPES.catalogRequestReceived,
+        permissions: [QUEUE_PERMISSION],
+        entityIds: [sub.entityId],
+        actorId: sub.createdBy,
+        title: 'Նոր հարցում կատալոգից',
+        body: `Հարցում ${sub.number}՝ ${lines}${short.length ? `։ Պաշարը չի բավարարում՝ ${short.map((c) => c.itemName).join(', ')}` : ''}։`,
+        path: `/catalog/requests/${sub.id}`,
+        details: [
+          { label: 'Հարցում', value: sub.number },
+          { label: 'Նպատակ', value: sub.purpose },
+          { label: 'Ապրանքներ', value: lines },
+          ...(short.length ? [{ label: 'Պաշարը չի բավարարում', value: short.map((c) => `${c.itemName} × ${c.quantity}`).join(', ') }] : []),
+          ...(sub.projectName ? [{ label: 'Նախագիծ', value: sub.projectName }] : []),
+        ],
+      });
+      if (requisition) {
+        const told = await this.notifications!.audience([QUEUE_PERMISSION], [sub.entityId]);
+        this.requisitions.announceSubmitted(requisition, sub.createdBy, told);
+      }
+    })().catch((e) => this.logger.warn(`checkout notification failed: ${e?.message ?? e}`));
+  }
+
+  /** The submitter hears what the desk did — one notice per decision. */
+  private async announceToSubmitter(
+    id: number,
+    actor: WarehouseActor,
+    n: { kind: 'approved' | 'rejected' | 'info'; text?: string },
+  ) {
+    try {
+      if (!this.notifications) return;
+      const view = await this.getOne(id, actor);
+      const ready = n.kind === 'approved' && view.status === 'READY';
+      const title = ready
+        ? 'Հարցումը պատրաստ է ստանալու'
+        : n.kind === 'approved' ? 'Հարցումը հաստատվել է'
+        : n.kind === 'rejected' ? 'Հարցումը մերժվել է'
+        : 'Հարցման համար տեղեկություն է պահանջվում';
+      const body = ready
+        ? `Հարցում ${view.number}՝ ապրանքները պատրաստ են, ստացեք պահեստից և հաստատեք ստացումը։`
+        : n.kind === 'approved' ? `Հարցում ${view.number}՝ հաստատվել է${n.text ? `․ ${n.text}` : ''}։`
+        : n.kind === 'rejected' ? `Հարցում ${view.number}՝ մերժվել է${n.text ? `՝ ${n.text}` : ''}։`
+        : `Հարցում ${view.number}՝ հաստատողը տեղեկություն է խնդրում՝ ${n.text ?? ''}`;
+      this.notify({
+        type: ready ? WAREHOUSE_TYPES.catalogReady : WAREHOUSE_TYPES.catalogRequestDecided,
+        userIds: [view.createdBy],
+        actorId: actor.userId,
+        title,
+        body,
+        path: `/catalog/my-requests/${id}`,
+        details: [
+          { label: 'Հարցում', value: view.number },
+          ...(n.text ? [{ label: n.kind === 'info' ? 'Հարց' : n.kind === 'rejected' ? 'Պատճառ' : 'Մեկնաբանություն', value: n.text }] : []),
+        ],
+      });
+    } catch (e: any) {
+      this.logger.warn(`catalog decision notification failed: ${e?.message ?? e}`);
+    }
+  }
 
   // ── Catalog (employee) ────────────────────────────────────────────────────
 
@@ -403,6 +489,8 @@ export class CatalogService {
       },
     });
     const made: number[] = [];
+    const madeStock: { itemName?: string; quantity: number; status: string }[] = [];
+    let requisition: any = null;
     try {
       if (split.stock.length) {
         const { created } = await this.reservations.createForCatalog({
@@ -418,9 +506,10 @@ export class CatalogService {
           actor,
         });
         made.push(...created.map((c: any) => c.id));
+        madeStock.push(...created.map((c: any) => ({ itemName: c.itemName, quantity: c.quantity, status: c.status })));
       }
       if (purchaseLines.length) {
-        await this.requisitions.create(
+        requisition = await this.requisitions.create(
           {
             title: `Կատալոգ · ${number}`,
             comment: dto.comment?.trim() ? `${purpose}\n${dto.comment.trim()}` : purpose,
@@ -442,6 +531,7 @@ export class CatalogService {
       await this.prisma.catalogSubmission.delete({ where: { id: sub.id } }).catch(() => undefined);
       throw e;
     }
+    this.announceCheckout(sub, madeStock, purchaseLines.map((l) => ({ itemName: l.itemName ?? '', quantity: l.quantity })), requisition);
     return this.getOne(sub.id, actor);
   }
 
@@ -469,6 +559,17 @@ export class CatalogService {
         },
       });
     }
+    // Phase 3 (2026-10-07): a file added after filing reaches the desk.
+    this.notify({
+      type: WAREHOUSE_TYPES.requestAttachment,
+      permissions: [QUEUE_PERMISSION],
+      entityIds: [loaded.sub.entityId],
+      actorId: userId,
+      title: 'Հարցմանը ֆայլ է կցվել',
+      body: `Հարցում ${loaded.sub.number}՝ ներկայացնողը կցել է «${Buffer.from(file.originalname, 'latin1').toString('utf8')}» ֆայլը։`,
+      path: `/catalog/requests/${id}`,
+      details: [{ label: 'Հարցում', value: loaded.sub.number }],
+    });
     return this.getOne(id, actor);
   }
 
@@ -857,6 +958,7 @@ export class CatalogService {
   async edit(id: number, dto: EditSubmissionDto, userId: number, actor: WarehouseActor): Promise<SubmissionView> {
     const { loaded, lines } = await this.ownEditable(id, userId, 'Հարցումը կարող է խմբագրել միայն ներկայացնողը');
     const byId = new Map(lines.map((x) => [x.id, x]));
+    const changed: string[] = [];
     for (const edit of dto.lines ?? []) {
       const line = byId.get(edit.id);
       const ref = parseLineId(edit.id);
@@ -869,9 +971,13 @@ export class CatalogService {
           throw new BadRequestException('Ակտիվների քանակը պետք է լինի ամբողջ թիվ');
         }
         if (quantity === r.quantity) continue;
+        changed.push(`${r.item?.name ?? `#${r.itemId}`}: ${r.quantity} → ${quantity}`);
         await this.prisma.resourceReservation.update({ where: { id: r.id }, data: { quantity } });
         await this.noteOnReservation(r, userId, 'Քանակը փոխվել է ներկայացնողի կողմից', { previousQuantity: r.quantity, newQuantity: quantity });
       } else {
+        const before = (loaded.requisition?.lines ?? []).find((x: any) => x.id === ref.rowId);
+        if (before && Math.abs((before.quantity ?? 0) - quantity) < 1e-9) continue;
+        changed.push(`${before?.itemName ?? line.itemName ?? 'Տող'}: ${before?.quantity ?? '—'} → ${quantity}`);
         await this.prisma.purchaseRequisitionLine.update({ where: { id: ref.rowId }, data: { quantity } });
       }
     }
@@ -883,6 +989,9 @@ export class CatalogService {
       this.assertNotPast(day);
       data.neededBy = day;
     }
+    if (data.purpose !== undefined && data.purpose !== loaded.sub.purpose) changed.push('նպատակ');
+    if (data.comment !== undefined && data.comment !== (loaded.sub.comment ?? null)) changed.push('մեկնաբանություն');
+    if (data.neededBy && +data.neededBy !== +new Date(loaded.sub.neededBy)) changed.push(`անհրաժեշտ է մինչև ${data.neededBy.toISOString().slice(0, 10)}`);
     if (Object.keys(data).length) {
       await this.prisma.catalogSubmission.update({ where: { id }, data });
       if (data.purpose && loaded.reservations.length) {
@@ -900,22 +1009,50 @@ export class CatalogService {
         });
       }
     }
+    // Phase 3 (2026-10-07): the desk hears the requester changed a request it may be weighing.
+    if (changed.length) {
+      this.notify({
+        type: WAREHOUSE_TYPES.catalogRequestEdited,
+        permissions: [QUEUE_PERMISSION],
+        entityIds: [loaded.sub.entityId],
+        actorId: userId,
+        title: 'Կատալոգի հարցումը խմբագրվել է',
+        body: `Հարցում ${loaded.sub.number}՝ ներկայացնողը փոխել է՝ ${changed.join(', ')}։`,
+        path: `/catalog/requests/${id}`,
+        details: [{ label: 'Հարցում', value: loaded.sub.number }, { label: 'Փոփոխություններ', value: changed.join(', ') }],
+      });
+    }
     return this.getOne(id, actor);
   }
 
   async cancel(id: number, userId: number, actor: WarehouseActor): Promise<SubmissionView> {
     const { loaded } = await this.ownEditable(id, userId, 'Հարցումը կարող է չեղարկել միայն ներկայացնողը');
+    const withdrawn: string[] = [];
     for (const r of loaded.reservations) {
       if (RESERVATION_LIVE.includes(r.status)) {
-        await this.reservations.cancel(r.id, userId, 'Հարցումը չեղարկվել է ներկայացնողի կողմից', actor);
+        // Quiet: the desk hears of the whole withdrawal once, below.
+        await this.reservations.cancel(r.id, userId, 'Հարցումը չեղարկվել է ներկայացնողի կողմից', actor, { quiet: true });
+        withdrawn.push(`${r.item?.name ?? `#${r.itemId}`} × ${r.quantity}`);
       }
     }
     if (loaded.requisition && REQUISITION_CANCELLABLE.includes(loaded.requisition.status)) {
-      await this.requisitions.cancel(loaded.requisition.id, userId, actor.isSuperAdmin);
+      // Quiet: the cancelled submission below is the one notice.
+      await this.requisitions.cancel(loaded.requisition.id, userId, actor.isSuperAdmin, { quiet: true });
     }
     await this.prisma.catalogSubmission.update({
       where: { id },
       data: { cancelledAt: new Date(), infoRequestText: null, infoRequestBy: null, infoRequestAt: null },
+    });
+    // Phase 2: the desk learns the submitter walked away (reservation_cancelled, the other side).
+    this.notify({
+      type: WAREHOUSE_TYPES.reservationCancelled,
+      permissions: [QUEUE_PERMISSION],
+      entityIds: [loaded.sub.entityId],
+      actorId: userId,
+      title: 'Կատալոգի հարցումը չեղարկվել է',
+      body: `Հարցում ${loaded.sub.number}՝ չեղարկվել է ներկայացնողի կողմից${withdrawn.length ? ` (${withdrawn.join(', ')})` : ''}։`,
+      path: `/catalog/requests/${id}`,
+      details: [{ label: 'Հարցում', value: loaded.sub.number }],
     });
     return this.getOne(id, actor);
   }
@@ -928,8 +1065,8 @@ export class CatalogService {
     if (!answer) throw new BadRequestException('Գրեք պատասխանը');
     const req = loaded.requisition;
     if (req) {
-      await this.requisitions.addComment(req.id, userId, `Պատասխան՝ ${answer}`);
-      if (file) await this.requisitions.addAttachment(req.id, userId, file);
+      await this.requisitions.addComment(req.id, userId, `Պատասխան՝ ${answer}`, undefined, { quiet: true });
+      if (file) await this.requisitions.addAttachment(req.id, userId, file, undefined, { quiet: true });
       if (req.status === 'DRAFT') {
         await this.prisma.purchaseRequisition.update({ where: { id: req.id }, data: { status: 'PENDING_APPROVAL' } });
       }
@@ -943,6 +1080,22 @@ export class CatalogService {
     await this.prisma.catalogSubmission.update({
       where: { id },
       data: { infoRequestText: null, infoRequestBy: null, infoRequestAt: null },
+    });
+    // Phase 2: the reply reaches the desk — whoever asked first among them.
+    this.notify({
+      type: WAREHOUSE_TYPES.catalogRequestReceived,
+      permissions: [QUEUE_PERMISSION],
+      entityIds: [loaded.sub.entityId],
+      userIds: [loaded.sub.infoRequestBy],
+      actorId: userId,
+      title: 'Պատասխան կատալոգի հարցմանը',
+      body: `Հարցում ${loaded.sub.number}՝ ներկայացնողը պատասխանել է՝ ${answer}`,
+      path: `/catalog/requests/${id}`,
+      details: [
+        { label: 'Հարցում', value: loaded.sub.number },
+        ...(loaded.sub.infoRequestText ? [{ label: 'Հարց', value: loaded.sub.infoRequestText }] : []),
+        { label: 'Պատասխան', value: answer },
+      ],
     });
     return this.getOne(id, actor);
   }
@@ -995,7 +1148,7 @@ export class CatalogService {
         throw new BadRequestException(`«${line.itemName}» — տողն արդեն «${reservationStatusLabel(r.status)}» կարգավիճակում է`);
       }
       if (line.approvedQuantity === 0) {
-        await this.reservations.reject(r.id, userId, comment ?? 'Մերժված է հաստատողի կողմից', actor);
+        await this.reservations.reject(r.id, userId, comment ?? 'Մերժված է հաստատողի կողմից', actor, { quiet: true });
         continue;
       }
       if (line.approvedQuantity > r.quantity) {
@@ -1023,7 +1176,7 @@ export class CatalogService {
         }
       } else {
         // The existing approval: everything still outstanding is issued.
-        await this.reservations.approveConsumable(r.id, userId, undefined, actor);
+        await this.reservations.approveConsumable(r.id, userId, undefined, actor, { quiet: true });
       }
     }
 
@@ -1042,7 +1195,7 @@ export class CatalogService {
           await this.prisma.purchaseRequisitionLine.update({ where: { id: line.requisitionLineId! }, data: { quantity: line.approvedQuantity } });
         }
       }
-      if (comment) await this.requisitions.addComment(req.id, userId, comment);
+      if (comment) await this.requisitions.addComment(req.id, userId, comment, undefined, { quiet: true });
       const allLines = (req.lines as any[]).map((x) => x.id);
       const declinedIds = new Set(declined.map((x) => x.requisitionLineId!));
       if (allLines.every((lineId) => declinedIds.has(lineId))) {
@@ -1054,6 +1207,8 @@ export class CatalogService {
             req.id,
             userId,
             `Մերժված տողեր՝ ${declined.map((x) => `${x.itemName} × ${x.quantity}`).join(', ')}`,
+            undefined,
+            { quiet: true },
           );
         }
         await this.requisitions.orgApprove(req.id, userId);
@@ -1063,6 +1218,8 @@ export class CatalogService {
         await this.prisma.catalogSubmission.update({ where: { id }, data: { infoRequestText: null, infoRequestBy: null, infoRequestAt: null } });
       }
     }
+    const allRejected = allowed.every((x) => x.approvedQuantity === 0);
+    void this.announceToSubmitter(id, actor, { kind: allRejected ? 'rejected' : 'approved', text: comment });
     return { ...(await this.getOne(id, actor)), skipped };
   }
 
@@ -1077,7 +1234,7 @@ export class CatalogService {
     if (!allowed.length) throw new ForbiddenException('Դուք այս հարցման տողերը մերժելու թույլտվություն չունեք');
     for (const line of allowed.filter((x) => x.kind === 'STOCK')) {
       const r = loaded.reservations.find((x) => x.id === line.reservationId)!;
-      if (RESERVATION_LIVE.includes(r.status)) await this.reservations.reject(r.id, userId, why, actor);
+      if (RESERVATION_LIVE.includes(r.status)) await this.reservations.reject(r.id, userId, why, actor, { quiet: true });
     }
     if (allowed.some((x) => x.kind !== 'STOCK') && loaded.requisition) {
       const req = loaded.requisition;
@@ -1088,6 +1245,7 @@ export class CatalogService {
     if (loaded.sub.infoRequestAt) {
       await this.prisma.catalogSubmission.update({ where: { id }, data: { infoRequestText: null, infoRequestBy: null, infoRequestAt: null } });
     }
+    void this.announceToSubmitter(id, actor, { kind: 'rejected', text: why });
     return { ...(await this.getOne(id, actor)), skipped };
   }
 
@@ -1111,7 +1269,7 @@ export class CatalogService {
     }
     if (allowed.some((x) => x.kind !== 'STOCK') && loaded.requisition) {
       const req = loaded.requisition;
-      await this.requisitions.addComment(req.id, userId, `Պահանջվում է տեղեկություն՝ ${question}`);
+      await this.requisitions.addComment(req.id, userId, `Պահանջվում է տեղեկություն՝ ${question}`, undefined, { quiet: true });
       if (req.status === 'PENDING_APPROVAL') {
         await this.prisma.purchaseRequisition.update({ where: { id: req.id }, data: { status: 'DRAFT' } });
       }
@@ -1120,6 +1278,7 @@ export class CatalogService {
       where: { id },
       data: { infoRequestText: question, infoRequestBy: userId, infoRequestAt: new Date() },
     });
+    void this.announceToSubmitter(id, actor, { kind: 'info', text: question });
     return { ...(await this.getOne(id, actor)), skipped };
   }
 }

@@ -15,6 +15,7 @@ import { InventoryService } from './inventory.service';
 
 import { InventoryMovementDto } from './dto/inventory-movement.dto';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
+import { LoggedInUser } from '../auth/decorators/logged-in-user.decorator';
 
 @ApiTags('Inventory')
 @Controller('inventory')
@@ -33,8 +34,9 @@ export class InventoryController {
   createMovement(
     @Body()
     dto: InventoryMovementDto,
+    @LoggedInUser('id') userId?: number,
   ) {
-    return this.inventoryService.createMovement(dto);
+    return this.inventoryService.createMovement(dto, userId);
   }
 
   // The movements ledger page has its own permission (2026-09-02); the two

@@ -57,10 +57,12 @@ export class PurchaseRequisitionsController {
   @ApiOperation({ summary: 'File a purchase requisition (draft or submitted)' })
   async create(@Body() dto: any, @Req() req: any, @OperationKey() operationKey?: string) {
     const entityId = entityOf(req);
-    const { result } = await this.operations.runOnce(
+    const { result, replayed } = await this.operations.runOnce(
       { key: operationKey, actor: req.actor, route: 'POST /purchase-requisitions', body: { entityId, dto } },
       (tx) => this.service.create(dto, req.user?.id, entityId, tx),
     );
+    // Committed now — the approvers hear of it once, never on a replay.
+    if (!replayed && result) this.service.announceSubmitted(result as any, req.user?.id);
     return result;
   }
 

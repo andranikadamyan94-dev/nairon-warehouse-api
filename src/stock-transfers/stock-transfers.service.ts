@@ -3,6 +3,7 @@ import { roundQty } from '../common/quantity';
 import {
   BadRequestException,
   Injectable,
+  Optional,
   NotFoundException,
 } from '@nestjs/common';
 
@@ -10,6 +11,7 @@ import { PrismaService } from 'prisma/prisma.service';
 
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { ItemType } from '../common/enums/item-type.enum';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
 
 /**
  * Main ↔ project-warehouse transfers (#1989). One DOCUMENT with many item
@@ -24,6 +26,7 @@ export class StockTransfersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stockAlerts: StockAlertService,
+    @Optional() private readonly notifications?: WarehouseNotificationsService,
   ) {}
 
   async create(
@@ -35,6 +38,7 @@ export class StockTransfersService {
       comment?: string;
     },
     createdBy?: number,
+    opts: { notifyExclude?: number[] } = {},
   ) {
     const direction = dto.direction === 'TO_MAIN' ? 'TO_MAIN' : 'TO_SUB';
     // Fractional since 2026-09-15 (three decimals); asset lines are checked
@@ -189,8 +193,29 @@ export class StockTransfersService {
       });
     });
 
-    // Only main-pool consumable levels feed the low-stock latch today.
+    // Main's pool on a TO_SUB, the sub's own on a TO_MAIN (phase 2: per-sub latch).
     this.stockAlerts.check(lines.map((l) => l.itemId));
+    if (direction === 'TO_MAIN') this.stockAlerts.checkWarehouse(wh.id, lines.map((l) => l.itemId));
+
+    // Phase 2 (2026-10-06): the sub's responsible person hears goods are on the way in.
+    if (direction === 'TO_SUB' && wh.responsibleId && this.notifications) {
+      const what = lines.map((l) => `${itemOf.get(l.itemId)?.name ?? `#${l.itemId}`} × ${l.quantity}`).join(', ');
+      void this.notifications.sendToUsers([wh.responsibleId], {
+        type: WAREHOUSE_TYPES.stockTransferIncoming,
+        actorId: createdBy ?? null,
+        excludeUserIds: opts.notifyExclude,
+        title: 'Փոխանցում ձեր պահեստին',
+        body: `Հիմնական պահեստից ${wh.name}՝ ${what}`,
+        // Not '/transfers': hr-api's link map sends that segment to the FINANCE app.
+        path: '/warehouses',
+        details: [
+          { label: 'Փոխանցում', value: `#${transfer?.id}` },
+          { label: 'Պահեստ', value: wh.name },
+          { label: 'Ապրանքներ', value: what },
+          ...(dto.comment?.trim() ? [{ label: 'Մեկնաբանություն', value: dto.comment.trim() }] : []),
+        ],
+      });
+    }
 
     return transfer;
   }

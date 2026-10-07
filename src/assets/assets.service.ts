@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
 
@@ -7,6 +7,9 @@ import { UpdateAssetDto } from './dto/update-asset.dto';
 import { WarehouseActor } from '../auth/actor';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
+import { ObjectsService } from '../objects/objects.service';
+import { ReservationsService } from '../reservations/reservations.service';
 
 @Injectable()
 export class AssetsService {
@@ -14,7 +17,74 @@ export class AssetsService {
     private readonly prisma: PrismaService,
     private readonly workspaces: ResourceWorkspaceService,
     private readonly usersPrisma: UsersPrismaService,
+    @Optional() private readonly notifications?: WarehouseNotificationsService,
+    @Optional() private readonly objects?: ObjectsService,
+    @Optional() private readonly reservations?: ReservationsService,
   ) {}
+
+  private readonly logger = new Logger(AssetsService.name);
+
+  /**
+   * Who holds this asset right now (phase 3, 2026-10-07): its open custody's
+   * person — or, for an object, the object's responsible person — and the
+   * requesting side of a task it is issued to. Read BEFORE the change, since
+   * a delete cascades the rows away.
+   */
+  private async holdersOf(assetId: number): Promise<{ userId: number; path: string }[]> {
+    const out: { userId: number; path: string }[] = [];
+    const custody = await this.prisma.assetCustody.findMany({
+      where: { assetId, releasedAt: null },
+      select: { holderUserId: true, holderObjectId: true },
+    });
+    for (const c of custody) {
+      if (c.holderUserId) out.push({ userId: c.holderUserId, path: '/profile?tab=assets' });
+      else if (c.holderObjectId && this.objects) {
+        const o = await this.objects.crmObject(c.holderObjectId).catch(() => null);
+        if (o?.responsibleId) out.push({ userId: o.responsibleId, path: `/objects/${c.holderObjectId}` });
+      }
+    }
+    const allocations = await this.prisma.reservationAllocation.findMany({
+      where: { assetId, releasedAt: null },
+      select: { reservation: { select: { id: true, taskId: true, objectId: true, submissionId: true } } },
+    });
+    for (const a of allocations) {
+      if (!this.reservations || !a.reservation) continue;
+      const side = await this.reservations.requesterSide(a.reservation);
+      for (const u of side.userIds) out.push({ userId: u, path: side.path });
+    }
+    return out;
+  }
+
+  private async announceStatusChanged(
+    holders: { userId: number; path: string }[],
+    asset: { id: number; name?: string | null; serialNumber?: string | null; item?: { name: string } | null },
+    what: string,
+    actorId: number | null,
+  ) {
+    try {
+      if (!this.notifications || !holders.length) return;
+      const label = `${asset.item?.name ?? asset.name ?? 'Գույք'}${asset.serialNumber ? ` (${asset.serialNumber})` : ''}`;
+      const byPath = new Map<string, number[]>();
+      const seen = new Set<number>();
+      for (const h of holders) {
+        if (seen.has(h.userId)) continue;
+        seen.add(h.userId);
+        byPath.set(h.path, [...(byPath.get(h.path) ?? []), h.userId]);
+      }
+      for (const [path, userIds] of byPath) {
+        await this.notifications.sendToUsers(userIds, {
+          type: WAREHOUSE_TYPES.assetStatusChanged,
+          actorId,
+          title: 'Ձեր մոտ գտնվող գույքի կարգավիճակը փոխվել է',
+          body: `${label}՝ ${what}։`,
+          path,
+          details: [{ label: 'Գույք', value: label }, { label: 'Փոփոխություն', value: what }],
+        });
+      }
+    } catch (e: any) {
+      this.logger.warn(`asset status notification failed: ${e?.message ?? e}`);
+    }
+  }
 
   /**
    * An asset is a serial-numbered instance of an item, so the item has to exist
@@ -101,19 +171,32 @@ export class AssetsService {
     // The item it moves onto has to exist.
     if (dto.itemId !== undefined) await this.assertMayCreateFor(actor, dto.itemId);
 
-    return this.prisma.asset.update({
+    const before = await this.prisma.asset.findUnique({ where: { id }, include: { item: true } });
+    // Phase 3 (2026-10-07): retired (lost / written off) while somebody holds it.
+    const retiring = dto.status === 'RETIRED' && before?.status !== 'RETIRED';
+    const holders = retiring ? await this.holdersOf(id).catch(() => []) : [];
+    const updated = await this.prisma.asset.update({
       where: { id },
       data: dto,
     });
+    if (retiring && before) {
+      void this.announceStatusChanged(holders, before, 'նշվել է դուրս գրված (կորած / շահագործումից հանված)', actor?.userId ?? null);
+    }
+    return updated;
   }
 
   async remove(id: number, actor: WarehouseActor) {
     await this.findOne(id, actor);
     await this.assertMayEdit(actor, id);
 
-    return this.prisma.asset.delete({
+    // Phase 3 (2026-10-07): the delete cascades the custody rows — tell the holders first.
+    const before = await this.prisma.asset.findUnique({ where: { id }, include: { item: true } });
+    const holders = await this.holdersOf(id).catch(() => []);
+    const removed = await this.prisma.asset.delete({
       where: { id },
     });
+    if (before) void this.announceStatusChanged(holders, before, 'ջնջվել է պահեստի գրանցամատյանից', actor?.userId ?? null);
+    return removed;
   }
 
   async getAvailableAssets(query: {

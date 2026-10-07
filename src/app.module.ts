@@ -1,5 +1,6 @@
 import { MiddlewareConsumer, Global, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { LoggingMiddleware } from './common/middleware/logging.middleware';
 import { UsersPrismaService } from './common/users-prisma.service';
 import { WarehouseActorService } from './auth/actor.service';
@@ -36,6 +37,7 @@ import { StockRequestsModule } from './stock-requests/stock-requests.module';
 import { PurchaseRequisitionsModule } from './purchase-requisitions/purchase-requisitions.module';
 import { ObjectsModule } from './objects/objects.module';
 import { CatalogModule } from './catalog/catalog.module';
+import { RemindersModule } from './reminders/reminders.module';
 
 @Global()
 @Module({
@@ -45,6 +47,8 @@ import { CatalogModule } from './catalog/catalog.module';
     }),
 
     PrismaModule,
+    // The service's first timed jobs: the daily reminders (phase 3, 2026-10-07).
+    ScheduleModule.forRoot(),
 
     AuthModule,
     EntitiesModule,
@@ -70,6 +74,7 @@ import { CatalogModule } from './catalog/catalog.module';
     PurchaseRequisitionsModule,
     ObjectsModule,
     CatalogModule,
+    RemindersModule,
   ],
   controllers: [SourceController],
   providers: [

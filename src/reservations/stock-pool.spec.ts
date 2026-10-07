@@ -87,7 +87,7 @@ function harness(opts: {
   const svc = new ReservationsService(
     prisma,
     { checkAvailability: async () => ({}) } as any,
-    { check: async () => {} } as any,
+    { check: async () => {}, checkWarehouse: () => {} } as any,
     { reservationApproved: async () => {} } as any,
     {} as any,
     {} as any,

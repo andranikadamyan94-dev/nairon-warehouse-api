@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Optional,
   NotFoundException,
 } from '@nestjs/common';
 
@@ -12,6 +13,7 @@ import { WarehousesService } from '../warehouses/warehouses.service';
 import { StockTransfersService } from '../stock-transfers/stock-transfers.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
 import { TxClient } from '../common/operations/operations.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
 
 type Ctx = { isSuperAdmin?: boolean; permissionNames?: string[] };
 
@@ -35,7 +37,74 @@ export class StockRequestsService {
     private readonly warehousesService: WarehousesService,
     private readonly stockTransfersService: StockTransfersService,
     private readonly usersPrisma: UsersPrismaService,
+    @Optional() private readonly notifications?: WarehouseNotificationsService,
   ) {}
+
+  // ── Notifications (phase 2, 2026-10-06) ──
+
+  /**
+   * Main hears of a sub's request: manage_stock_transfers / manage_warehouse
+   * holders in the organisations whose stock is asked for (the lines' item
+   * categories — a warehouse itself names no organisation). Called after the
+   * write commits: by create() when it owns its write, by the controller after
+   * runOnce otherwise.
+   */
+  announceCreated(
+    req: { id: number; warehouseId: number; comment?: string | null; items?: { itemId: number; quantity: number; item?: { name: string; unit?: string | null } }[] },
+    actorId: number,
+  ) {
+    if (!this.notifications) return;
+    void (async () => {
+      const [wh, entityIds] = await Promise.all([
+        this.prisma.warehouse.findUnique({ where: { id: req.warehouseId }, select: { name: true } }),
+        this.entitiesOfItems((req.items ?? []).map((l) => l.itemId)),
+      ]);
+      const lines = (req.items ?? []).map((l) => `${l.item?.name ?? `#${l.itemId}`} × ${l.quantity}`).join(', ');
+      await this.notifications!.send({
+        type: WAREHOUSE_TYPES.stockRequestCreated,
+        permissions: ['manage_stock_transfers', 'manage_warehouse'],
+        entityIds,
+        actorId,
+        title: 'Նոր հայտ նախագծային պահեստից',
+        body: `${wh?.name ?? `Պահեստ #${req.warehouseId}`}՝ ${lines || 'ռեսուրսների հայտ'}`,
+        path: '/stock-requests',
+        details: [
+          { label: 'Հայտ', value: `#${req.id}` },
+          { label: 'Պահեստ', value: wh?.name ?? `#${req.warehouseId}` },
+          ...(lines ? [{ label: 'Ապրանքներ', value: lines }] : []),
+          ...(req.comment ? [{ label: 'Մեկնաբանություն', value: req.comment }] : []),
+        ],
+      });
+    })().catch(() => undefined);
+  }
+
+  private async entitiesOfItems(itemIds: number[]): Promise<(number | null)[]> {
+    if (!itemIds.length) return [null];
+    const items = await this.prisma.item.findMany({
+      where: { id: { in: itemIds } },
+      select: { category: { select: { entityId: true } } },
+    });
+    const ids = [...new Set(items.map((i) => i.category?.entityId ?? null))];
+    return ids.length ? ids : [null];
+  }
+
+  /** The requester hears main's answer. */
+  private announceDecided(req: { id: number; createdBy: number | null; warehouseId: number }, actorId: number, approved: boolean, reason?: string) {
+    if (!this.notifications || !req.createdBy) return;
+    void this.notifications.sendToUsers([req.createdBy], {
+      type: WAREHOUSE_TYPES.stockRequestDecided,
+      actorId,
+      title: approved ? 'Պահեստի հայտը հաստատվել է' : 'Պահեստի հայտը մերժվել է',
+      body: approved
+        ? `Հայտ #${req.id}՝ հիմնական պահեստը հաստատել է և ռեսուրսները փոխանցվել են։`
+        : `Հայտ #${req.id}՝ հիմնական պահեստը մերժել է${reason ? `՝ ${reason}` : ''}։`,
+      path: '/stock-requests',
+      details: [
+        { label: 'Հայտ', value: `#${req.id}` },
+        ...(reason ? [{ label: 'Պատճառ', value: reason }] : []),
+      ],
+    });
+  }
 
   /**
    * Everything create() checks before it writes: the warehouse exists, is a
@@ -65,7 +134,7 @@ export class StockRequestsService {
   async create(dto: CreateStockRequestInput, userId: number, ctx?: Ctx, tx?: TxClient) {
     const { wh, lines } = await this.assertMayCreate(dto, userId, ctx);
 
-    return (tx ?? this.prisma).stockRequest.create({
+    const created = await (tx ?? this.prisma).stockRequest.create({
       data: {
         warehouseId: wh.id,
         comment: dto.comment?.trim() || null,
@@ -74,6 +143,9 @@ export class StockRequestsService {
       },
       include: { items: { include: { item: { select: { id: true, name: true, unit: true } } } } },
     });
+    // Inside a caller's transaction nothing is committed yet — the caller announces.
+    if (!tx) this.announceCreated(created, userId);
+    return created;
   }
 
   /**
@@ -265,6 +337,9 @@ export class StockRequestsService {
         comment: `Հայտ #${req.id}${req.comment ? ` — ${req.comment}` : ''}`,
       },
       userId,
+      // The requester hears «approved» below; the sub's responsible hears the
+      // incoming transfer — unless that is the same person.
+      { notifyExclude: req.createdBy ? [req.createdBy] : [] },
     );
 
     // The transfer succeeded; a lost update here would strand an approved
@@ -276,6 +351,7 @@ export class StockRequestsService {
     if (upd.count === 0) {
       throw new BadRequestException('Հայտի վիճակը փոխվել է — ստուգեք փոխանցումների պատմությունը');
     }
+    this.announceDecided(req, userId, true);
     return { ...req, status: 'APPROVED', transferId: transfer!.id };
   }
 
@@ -290,7 +366,9 @@ export class StockRequestsService {
     if (upd.count === 0) {
       throw new BadRequestException('Հայտը չի գտնվել կամ արդեն որոշված է');
     }
-    return this.prisma.stockRequest.findUnique({ where: { id } });
+    const row = await this.prisma.stockRequest.findUnique({ where: { id } });
+    if (row) this.announceDecided(row, userId, false, reason.trim());
+    return row;
   }
 
   /** What cancel() checks before it writes. Shared with the assistant's preflight. */
@@ -308,13 +386,44 @@ export class StockRequestsService {
 
   /** The requester (or an admin) may withdraw a pending request. */
   async cancel(id: number, userId: number, isSuperAdmin: boolean) {
-    await this.cancellable(id, userId, isSuperAdmin);
+    const req = await this.cancellable(id, userId, isSuperAdmin);
     const upd = await this.prisma.stockRequest.updateMany({
       where: { id, status: 'PENDING' },
       data: { status: 'CANCELLED', decidedBy: userId, decidedAt: new Date() },
     });
     if (upd.count === 0) throw new BadRequestException('Հայտն արդեն որոշված է');
+    this.announceCancelled(req, userId);
     return this.prisma.stockRequest.findUnique({ where: { id } });
+  }
+
+  /**
+   * Phase 3 (2026-10-07): main stops waiting on a withdrawn request — the
+   * audience its creation reached; the requester too when an admin withdrew it.
+   */
+  private announceCancelled(req: { id: number; warehouseId: number; createdBy: number | null }, actorId: number) {
+    if (!this.notifications) return;
+    void (async () => {
+      const [wh, lines] = await Promise.all([
+        this.prisma.warehouse.findUnique({ where: { id: req.warehouseId }, select: { name: true } }),
+        this.prisma.stockRequestItem.findMany({ where: { requestId: req.id }, include: { item: { select: { name: true } } } }),
+      ]);
+      const entityIds = await this.entitiesOfItems(lines.map((l: any) => l.itemId));
+      const what = lines.map((l: any) => `${l.item?.name ?? `#${l.itemId}`} × ${l.quantity}`).join(', ');
+      await this.notifications!.send({
+        type: WAREHOUSE_TYPES.stockRequestCancelled,
+        permissions: ['manage_stock_transfers', 'manage_warehouse'],
+        entityIds,
+        userIds: [req.createdBy],
+        actorId,
+        title: 'Պահեստի հայտը չեղարկվել է',
+        body: `Հայտ #${req.id}՝ ${wh?.name ?? `Պահեստ #${req.warehouseId}`}${what ? ` (${what})` : ''} — չեղարկվել է։`,
+        path: '/stock-requests',
+        details: [
+          { label: 'Հայտ', value: `#${req.id}` },
+          { label: 'Պահեստ', value: wh?.name ?? `#${req.warehouseId}` },
+        ],
+      });
+    })().catch(() => undefined);
   }
 
   /**

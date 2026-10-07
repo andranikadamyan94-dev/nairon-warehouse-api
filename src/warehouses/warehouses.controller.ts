@@ -80,7 +80,7 @@ export class WarehousesController {
   @Permissions('manage_warehouses')
   @Patch(':id')
   @ApiOperation({ summary: 'Update a project warehouse' })
-  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateWarehouseDto) {
-    return this.warehousesService.update(id, dto);
+  update(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateWarehouseDto, @Req() req: any) {
+    return this.warehousesService.update(id, dto, req.user?.id);
   }
 }

@@ -50,10 +50,12 @@ export class StockRequestsController {
   @Post()
   @ApiOperation({ summary: 'File a resource request to main' })
   async create(@Body() dto: any, @Req() req: any, @OperationKey() operationKey?: string) {
-    const { result } = await this.operations.runOnce(
+    const { result, replayed } = await this.operations.runOnce(
       { key: operationKey, actor: req.actor, route: 'POST /stock-requests', body: dto },
       (tx) => this.stockRequestsService.create(dto, req.user?.id, ctxOf(req), tx),
     );
+    // Committed now — main hears of it once, never on a replay.
+    if (!replayed && result) this.stockRequestsService.announceCreated(result as any, req.user?.id);
     return result;
   }
 

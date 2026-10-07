@@ -404,6 +404,9 @@ model WarehouseStock {
 
   quantity Float @default(0)
 
+  /// Low-stock latch for this sub's pool (phase 2, 2026-10-06) — see Item.lowStockNotifiedAt.
+  lowStockNotifiedAt DateTime?
+
   updatedAt DateTime @updatedAt
 
   warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
@@ -1429,4 +1432,20 @@ model AssetCustody {
   @@index([holderUserId])
   @@index([holderObjectId])
   @@index([releasedAt])
+}
+
+/// Notifications phase 3 (2026-10-07): one row per reminder kind, record and
+/// Yerevan day — the daily 09:00 run claims it before sending, so nobody hears
+/// the same reminder twice in a day (restart, second replica, re-run).
+model WarehouseReminderMarker {
+  id        Int      @id @default(autoincrement())
+  /// maintenance_due | asset_due_back | receipt_unconfirmed
+  kind      String
+  /// MaintenanceRecord / ResourceReservation / AssetCustody id, by kind.
+  refId     Int
+  day       DateTime @db.Date
+  createdAt DateTime @default(now())
+
+  @@unique([kind, refId, day])
+  @@index([day])
 }

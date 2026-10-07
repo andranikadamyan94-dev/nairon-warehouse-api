@@ -3,12 +3,15 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
 
 import { UsersPrismaService } from '../common/users-prisma.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
 
 /**
  * #1989 sub-warehouses. The MAIN row is identity only — its stock is
@@ -21,7 +24,56 @@ export class WarehousesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly usersPrisma: UsersPrismaService,
+    @Optional() private readonly notifications?: WarehouseNotificationsService,
   ) {}
+
+  private readonly logger = new Logger(WarehousesService.name);
+
+  /**
+   * Phase 3 (2026-10-07): the people a warehouse change is about — made its
+   * responsible person or no longer, added to or removed from its staff, or
+   * everyone on it when it is closed / reopened. One notice per person, its
+   * own wording; never the actor.
+   */
+  private announceAssignment(
+    wh: { name: string; code: string },
+    before: { responsibleId: number | null; staff: number[]; status: string } | null,
+    after: { responsibleId: number | null; staff: number[]; status: string },
+    actorId: number | null,
+  ) {
+    if (!this.notifications) return;
+    const lines = new Map<number, string[]>();
+    const say = (u: number | null | undefined, text: string) => {
+      if (!u) return;
+      lines.set(u, [...(lines.get(u) ?? []), text]);
+    };
+    const prevResp = before?.responsibleId ?? null;
+    if (after.responsibleId !== prevResp) {
+      say(after.responsibleId, 'դուք նշանակվել եք պահեստի պատասխանատու');
+      say(prevResp, 'դուք այլևս պահեստի պատասխանատուն չեք');
+    }
+    const prevStaff = new Set(before?.staff ?? []);
+    const nextStaff = new Set(after.staff);
+    for (const u of nextStaff) if (!prevStaff.has(u)) say(u, 'դուք ավելացվել եք պահեստի աշխատակիցների մեջ');
+    for (const u of prevStaff) if (!nextStaff.has(u)) say(u, 'դուք հանվել եք պահեստի աշխատակիցներից');
+    if (before && before.status !== after.status) {
+      const text = after.status === 'INACTIVE' ? 'պահեստը փակվել է (ապաակտիվացվել)' : 'պահեստը կրկին ակտիվ է';
+      for (const u of new Set([after.responsibleId, ...after.staff])) if (u) say(u, text);
+    }
+    const label = `${wh.name} (${wh.code})`;
+    for (const [userId, texts] of lines) {
+      void this.notifications
+        .sendToUsers([userId], {
+          type: WAREHOUSE_TYPES.warehouseAssignment,
+          actorId,
+          title: 'Պահեստի նշանակման փոփոխություն',
+          body: `${label}՝ ${texts.join('. ')}։`,
+          path: '/warehouses',
+          details: [{ label: 'Պահեստ', value: label }],
+        })
+        .catch((e: any) => this.logger.warn(`warehouse assignment notification failed: ${e?.message ?? e}`));
+    }
+  }
 
   private crmUrl() {
     return process.env.CRM_API_URL || 'http://localhost:3003';
@@ -214,7 +266,7 @@ export class WarehousesService {
     await this.assertProjectsLinkable(dto.projectIds ?? [], null);
     const projectNames = await this.projectNames(dto.projectIds ?? []);
 
-    return this.prisma.warehouse.create({
+    const created = await this.prisma.warehouse.create({
       data: {
         name: dto.name.trim(),
         code: dto.code.trim(),
@@ -234,6 +286,13 @@ export class WarehousesService {
       },
       include: { projects: true, employees: true },
     });
+    this.announceAssignment(
+      created,
+      null,
+      { responsibleId: created.responsibleId, staff: created.employees.map((e) => e.userId), status: created.status },
+      createdBy ?? null,
+    );
+    return created;
   }
 
   async update(
@@ -247,8 +306,9 @@ export class WarehousesService {
       projectIds?: number[];
       employeeIds?: number[];
     },
+    actorId?: number,
   ) {
-    const wh = await this.prisma.warehouse.findUnique({ where: { id }, include: { projects: true } });
+    const wh = await this.prisma.warehouse.findUnique({ where: { id }, include: { projects: true, employees: true } });
     if (!wh) throw new NotFoundException('Պահեստը չի գտնվել');
     // The main row's identity is fixed, but linking backlogs TO main is the
     // explicit way a «նախագիծ» opts into the main pool (unlinked = blocked).
@@ -294,7 +354,7 @@ export class WarehousesService {
       };
     }
 
-    return this.prisma.warehouse.update({
+    const updated = await this.prisma.warehouse.update({
       where: { id },
       data: {
         ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
@@ -307,6 +367,13 @@ export class WarehousesService {
       },
       include: { projects: true, employees: true },
     });
+    this.announceAssignment(
+      updated,
+      { responsibleId: wh.responsibleId, staff: (wh.employees ?? []).map((e) => e.userId), status: wh.status },
+      { responsibleId: updated.responsibleId, staff: updated.employees.map((e) => e.userId), status: updated.status },
+      actorId ?? null,
+    );
+    return updated;
   }
 
   /** One warehouse per project: reject links already owned by ANOTHER warehouse. */

@@ -19,7 +19,7 @@ import { holdsObjectRight, isResponsibleOf, OBJECT_PAGE_RIGHT } from '../objects
 import { CrmObjectCard, fetchCrmObjectCard } from '../objects/objects.service';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
 import { RequesterWorkspaceService } from '../common/workspace/requester-workspace.service';
-import { ReservationParties, SideVerdict, decideOperation, isReservationReader, mayRead } from './two-party';
+import { ReservationParties, SideVerdict, decideOperation, decideWarehouse, isReservationReader, mayRead } from './two-party';
 
 /** Why a requester-side act was refused: not on the task, no warehouse permission (two-party.ts). */
 const REQUESTER_ONLY =
@@ -34,7 +34,7 @@ const inTaskRole = (task: any, userId: number): boolean =>
   ['acceptors', 'executors', 'responsibles'].some((r) => (task?.[r] ?? []).some((u: any) => (u.id ?? u.userId) === userId));
 import { quantitiesOf } from './quantities';
 import { lockItem, lockReservation } from '../common/operations/row-lock';
-import { WarehouseNotificationsService } from '../common/notifications/notifications.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService, crmLinks } from '../common/notifications/notifications.service';
 
 import { AssetStatus } from '../common/enums/asset-status.enum';
 import { ItemType } from '../common/enums/item-type.enum';
@@ -333,36 +333,6 @@ export class ReservationsService {
 
   // ─── helpers ────────────────────────────────────────────────────────────────
 
-  /**
-   * Who to tell about a reservation's outcome. A reservation records no
-   * requester (ResourceReservation has no createdBy), so the audience is the
-   * assignees of the CRM task it was raised against. Reservations with no
-   * taskId have nobody to notify.
-   */
-  private async taskAssignees(taskId: number | null | undefined): Promise<number[]> {
-    if (!taskId) return [];
-    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
-    try {
-      const res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, {
-        headers: { 'x-internal-secret': requireInternalSecret() },
-      });
-      if (!res.ok) {
-        this.logger.warn(`CRM task lookup failed for task ${taskId}: ${res.status}`);
-        return [];
-      }
-      // The internal endpoint resolves assignees to USER objects — `id` is the
-      // user id. (The CRM table column is `userId`; don't reach for that here,
-      // it isn't in the response and would silently yield zero recipients.)
-      const task = (await res.json()) as { assignees?: { id?: number; userId?: number }[] };
-      return (task?.assignees ?? [])
-        .map((a) => a.id ?? a.userId)
-        .filter((id): id is number => Number.isFinite(id));
-    } catch (e: any) {
-      this.logger.warn(`CRM task lookup error for task ${taskId}: ${e?.message}`);
-      return [];
-    }
-  }
-
   /** An asset goes to a task only on a person's name (custody register). */
   private async assertHasResponsiblePerson(db: any, assetId: number) {
     const custody = await db.assetCustody.findFirst({
@@ -376,30 +346,126 @@ export class ReservationsService {
     }
   }
 
-  /** Tell the requesting task's assignees what happened to their reservation. */
-  private async notifyRequesters(
-    reservation: { taskId?: number | null; objectId?: number | null; projectName?: string | null },
-    title: string,
-    body: string,
-    details: { label: string; value: string }[] = [],
-  ): Promise<void> {
-    // 2026-09-29: an object's own request answers to the object's responsible person.
-    let userIds: number[] = [];
-    if (reservation.taskId) userIds = await this.taskAssignees(reservation.taskId);
-    else if (reservation.objectId) {
-      const card = await this.objectCard(reservation.objectId).catch(() => null);
-      if (card?.responsibleId) userIds = [card.responsibleId];
+  /**
+   * The requesting side of a reservation, and where its record lives
+   * (notifications phase 2, 2026-10-06):
+   *   - a task's row → the task's assignees, linked to the CRM task;
+   *   - an object's own row → the object's responsible person, linked to the
+   *     CRM object page (the warehouse reservations page is not theirs);
+   *   - a catalog checkout's row → the person who filed the submission,
+   *     linked to their request in «Իմ հարցումները».
+   * Never throws; nobody on a lookup failure.
+   */
+  async requesterSide(reservation: {
+    taskId?: number | null;
+    objectId?: number | null;
+    submissionId?: number | null;
+  }): Promise<{ kind: 'task' | 'object' | 'catalog' | null; userIds: number[]; path: string; label?: string }> {
+    try {
+      if (reservation.taskId) {
+        const task = await this.crmTaskOrNull(reservation.taskId);
+        const userIds = (task?.assignees ?? [])
+          .map((a: any) => a.id ?? a.userId)
+          .filter((id: any): id is number => Number.isFinite(id));
+        return {
+          kind: 'task',
+          userIds,
+          path: crmLinks.task(task?.projectId, reservation.taskId) ?? '/reservations',
+          label: task?.title ?? undefined,
+        };
+      }
+      if (reservation.objectId) {
+        const card = await this.objectCard(reservation.objectId).catch(() => null);
+        return {
+          kind: 'object',
+          userIds: card?.responsibleId ? [card.responsibleId] : [],
+          path: crmLinks.object(reservation.objectId),
+          label: card ? `${card.code} ${card.name}` : undefined,
+        };
+      }
+      if (reservation.submissionId) {
+        const sub = await (this.prisma as any).catalogSubmission.findUnique({
+          where: { id: reservation.submissionId },
+          select: { createdBy: true, number: true },
+        });
+        return {
+          kind: 'catalog',
+          userIds: sub?.createdBy ? [sub.createdBy] : [],
+          path: `/catalog/my-requests/${reservation.submissionId}`,
+          label: sub?.number ?? undefined,
+        };
+      }
+    } catch (e: any) {
+      this.logger.warn(`requester lookup failed: ${e?.message ?? e}`);
     }
-    if (!userIds.length) return;
-    await this.notifications.sendToUsers(userIds, {
-      title,
-      body,
-      path: '/reservations',
+    return { kind: null, userIds: [], path: '/reservations' };
+  }
+
+  /** CRM's task, or null — a notification never fails on CRM. */
+  private async crmTaskOrNull(taskId: number): Promise<any | null> {
+    try {
+      return await this.crmTask(taskId);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Tell the requesting side what happened to their reservation. `text`
+   * words the body for each side — an object's people are not told about
+   * «your task» (phase 2 defect), a catalog submitter about their request.
+   * Catalog rows get the catalog's own types: ready to collect when the
+   * reservation is ALLOCATED, decided otherwise.
+   */
+  private async notifyRequesters(
+    reservation: { id?: number; taskId?: number | null; objectId?: number | null; submissionId?: number | null; projectName?: string | null },
+    n: {
+      title: string;
+      type: string;
+      text: { task: string; object: string; catalog: string };
+      details?: { label: string; value: string }[];
+      actorId?: number | null;
+      /** The reservation is now fully issued (catalog: ready to collect). */
+      ready?: boolean;
+      /** The event is not a catalog decision (a reclaim) — keep `type` for catalog rows too. */
+      keepType?: boolean;
+    },
+  ): Promise<void> {
+    const side = await this.requesterSide(reservation as any);
+    if (!side.kind || !side.userIds.length) return;
+    const catalog = side.kind === 'catalog' && !n.keepType;
+    await this.notifications.sendToUsers(side.userIds, {
+      type: catalog ? (n.ready ? WAREHOUSE_TYPES.catalogReady : WAREHOUSE_TYPES.catalogRequestDecided) : n.type,
+      actorId: n.actorId ?? null,
+      title: catalog && n.ready ? 'Հարցումը պատրաստ է ստանալու' : n.title,
+      body: n.text[side.kind],
+      path: side.path,
       details: [
-        ...details,
+        ...(n.details ?? []),
+        ...(side.label ? [{ label: side.kind === 'task' ? 'Առաջադրանք' : side.kind === 'object' ? 'Օբյեկտ' : 'Հարցում', value: side.label }] : []),
         ...(reservation.projectName ? [{ label: 'Նախագիծ', value: reservation.projectName }] : []),
       ],
     });
+  }
+
+  /** The warehouse side of a reservation: its reservation desk in the stock owner's organisation. */
+  private async notifyWarehouseSide(
+    reservationIds: number[],
+    n: { type: string; title: string; body: string; details?: { label: string; value: string }[]; actorId?: number | null; excludeUserIds?: number[] },
+  ): Promise<void> {
+    try {
+      const owners = await Promise.all(
+        reservationIds.map((id) => this.workspaces.partiesOfReservation(id).then((p) => p.stockOwner).catch(() => null)),
+      );
+      await this.notifications.send({
+        ...n,
+        permissions: ['receive_reservation_alerts', 'manage_warehouse'],
+        entityIds: owners.length ? owners : [null],
+        path: '/reservations',
+      });
+    } catch (e: any) {
+      this.logger.warn(`warehouse-side notification failed: ${e?.message ?? e}`);
+    }
   }
 
   private async writeStatusHistory(
@@ -868,7 +934,11 @@ export class ReservationsService {
         ]),
       ];
       void this.notifications.send({
+        type: WAREHOUSE_TYPES.reservationPending,
         permissions: ['receive_reservation_alerts', 'manage_warehouse'],
+        // Whose stock it is decides who approves it.
+        entityIds: created.map((c) => c.stockOwnerWorkspaceId),
+        actorId: performedBy ?? null,
         title: 'Ամրագրում սպասում է հաստատման',
         body: 'Ամրագրման հայտ է ստացվել ռեսուրսի համար, որը հասանելի չէ նշված ժամկետում և սպասում է ձեր որոշմանը։',
         path: '/reservations',
@@ -1247,7 +1317,9 @@ export class ReservationsService {
   async allocate(dto: AllocateReservationDto, allocatedBy?: number) {
     // Only reservations that reached ALLOCATED are worth telling the requester
     // about — a partial allocation isn't yet a usable outcome.
-    const fullyAllocated: { taskId: number | null; projectName: string | null; quantity: number }[] = [];
+    // Phase 2: the whole row — object and catalog rows have no taskId, and
+    // used to tell nobody.
+    const fullyAllocated: { id: number; taskId: number | null; objectId: number | null; submissionId: number | null; projectName: string | null; quantity: number }[] = [];
 
     const result = await this.prisma.$transaction(async (tx) => {
       for (const allocation of dto.allocations) {
@@ -1333,7 +1405,10 @@ export class ReservationsService {
 
         if (newStatus === ResourceReservationStatus.ALLOCATED) {
           fullyAllocated.push({
+            id: reservation.id,
             taskId: reservation.taskId,
+            objectId: (reservation as any).objectId ?? null,
+            submissionId: (reservation as any).submissionId ?? null,
             projectName: reservation.projectName,
             quantity: reservation.quantity,
           });
@@ -1344,12 +1419,18 @@ export class ReservationsService {
     });
 
     for (const r of fullyAllocated) {
-      void this.notifyRequesters(
-        r,
-        'Ամրագրումը հաստատվել է',
-        'Ձեր առաջադրանքի համար պահանջված ռեսուրսը տրամադրվել է։',
-        [{ label: 'Քանակ', value: String(r.quantity) }],
-      );
+      void this.notifyRequesters(r, {
+        title: 'Ամրագրումը հաստատվել է',
+        type: WAREHOUSE_TYPES.reservationApproved,
+        text: {
+          task: 'Ձեր առաջադրանքի համար պահանջված ռեսուրսը տրամադրվել է։',
+          object: 'Պահեստը ռեսուրս է տրամադրել օբյեկտին — հաստատեք ստացումը օբյեկտի «Պահեստային հայտեր» բաժնում։',
+          catalog: 'Ձեր հարցման ռեսուրսը պատրաստ է — ստացեք պահեստից և հաստատեք ստացումը։',
+        },
+        details: [{ label: 'Քանակ', value: String(r.quantity) }],
+        actorId: allocatedBy ?? null,
+        ready: true,
+      });
     }
 
     return result;
@@ -1380,6 +1461,8 @@ export class ReservationsService {
     performedBy?: number,
     quantity?: number,
     actor?: WarehouseActor,
+    /** quiet: the catalog page tells its submitter itself, in one notice for the whole decision. */
+    opts: { quiet?: boolean } = {},
   ) {
     // Handing stock out is the warehouse's decision, not the asker's.
     await this.assertMay(actor, reservationId, 'reservation.approve');    const reservation = await this.prisma.resourceReservation.findUnique({
@@ -1593,23 +1676,32 @@ export class ReservationsService {
 
     // The main breach path: approving a consumable reservation takes stock out.
     this.stockAlerts.check([reservation.item.id]);
+    // Phase 2: a sub-warehouse row drew from that sub's own pool.
+    if (reservation.warehouseId) this.stockAlerts.checkWarehouse(reservation.warehouseId, [reservation.item.id]);
 
-    void this.notifyRequesters(
-      reservation,
-      'Ամրագրումը հաստատվել է',
-      reservation.taskId
-        ? toAllocate < outstanding
-          ? 'Ձեր առաջադրանքի համար կատարված ամրագրումը մասնակի տրամադրվել է։ Մնացորդը դեռ սպասվում է։'
-          : 'Ձեր առաջադրանքի համար կատարված ամրագրումը հաստատվել է և ռեսուրսը տրամադրվել է։'
-        : 'Պահեստը ռեսուրս է տրամադրել օբյեկտին — հաստատեք ստացումը օբյեկտի «Պահեստային հայտեր» բաժնում։',
-      [
-        { label: 'Ռեսուրս', value: reservation.item.name },
-        { label: 'Տրամադրված', value: String(toAllocate) },
-        ...(toAllocate < outstanding
-          ? [{ label: 'Մնացորդ', value: String(roundQty(outstanding - toAllocate)) }]
-          : []),
-      ],
-    );
+    const partial = toAllocate < outstanding;
+    if (!opts.quiet) {
+      void this.notifyRequesters(reservation as any, {
+        title: 'Ամրագրումը հաստատվել է',
+        type: WAREHOUSE_TYPES.reservationApproved,
+        text: {
+          task: partial
+            ? 'Ձեր առաջադրանքի համար կատարված ամրագրումը մասնակի տրամադրվել է։ Մնացորդը դեռ սպասվում է։'
+            : 'Ձեր առաջադրանքի համար կատարված ամրագրումը հաստատվել է և ռեսուրսը տրամադրվել է։',
+          object: 'Պահեստը ռեսուրս է տրամադրել օբյեկտին — հաստատեք ստացումը օբյեկտի «Պահեստային հայտեր» բաժնում։',
+          catalog: partial
+            ? `«${reservation.item.name}»՝ մասնակի տրամադրվել է (${toAllocate})։ Մնացորդը դեռ սպասվում է։`
+            : `«${reservation.item.name}»՝ պատրաստ է, ստացեք պահեստից և հաստատեք ստացումը։`,
+        },
+        details: [
+          { label: 'Ռեսուրս', value: reservation.item.name },
+          { label: 'Տրամադրված', value: String(toAllocate) },
+          ...(partial ? [{ label: 'Մնացորդ', value: String(roundQty(outstanding - toAllocate)) }] : []),
+        ],
+        actorId: performedBy ?? null,
+        ready: !partial,
+      });
+    }
 
     return result;
   }
@@ -1748,6 +1840,21 @@ export class ReservationsService {
       });
 
       if (landed) {
+        // Phase 3 (2026-10-07): less than issued was accepted — the warehouse
+        // desk hears it with the reason (a broken delivery, an over-estimate).
+        if (quantity < acceptable) {
+          void this.notifyWarehouseSide([reservationId], {
+            type: WAREHOUSE_TYPES.partialAcceptance,
+            actorId: userId,
+            title: 'Մասնակի ընդունում',
+            body: `${reservation.item.name}՝ ընդունվել է ${quantity}-ը տրամադրված ${acceptable}-ից — ${comment!.trim()}`,
+            details: [
+              { label: 'Ամրագրում', value: `#${reservationId}` },
+              { label: 'Ընդունված', value: `${quantity} / ${acceptable}` },
+              { label: 'Պատճառ', value: comment!.trim() },
+            ],
+          });
+        }
         return this.prisma.resourceReservation.findUnique({ where: { id: reservationId } });
       }
       // someone else's acceptance landed first — re-validate against fresh state
@@ -1786,7 +1893,7 @@ export class ReservationsService {
       throw new BadRequestException('Քանակը պետք է լինի դրական թիվ');
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const outcome = await this.prisma.$transaction(async (tx) => {
       const active = await tx.reservationAllocation.findMany({
         where: { reservationId, releasedAt: null },
         orderBy: { id: 'desc' },
@@ -1892,6 +1999,25 @@ export class ReservationsService {
 
       return { reclaimed: quantity, damaged, issuedNow: newIssued };
     });
+
+    // Phase 2 (2026-10-06): the requesting side learns the unaccepted remainder was taken back.
+    void this.notifyRequesters(reservation as any, {
+      title: 'Չընդունված քանակը հետ է վերցվել',
+      type: WAREHOUSE_TYPES.reservationReclaimed,
+      text: {
+        task: `«${reservation.item.name}»՝ տրամադրված, բայց չընդունված ${quantity} հետ է վերցվել պահեստի կողմից${reason ? `՝ ${reason}` : ''}։`,
+        object: `«${reservation.item.name}»՝ օբյեկտին տրամադրված, բայց չընդունված ${quantity} հետ է վերցվել պահեստի կողմից${reason ? `՝ ${reason}` : ''}։`,
+        catalog: `«${reservation.item.name}»՝ չընդունված ${quantity} հետ է վերցվել պահեստի կողմից${reason ? `՝ ${reason}` : ''}։`,
+      },
+      details: [
+        { label: 'Ռեսուրս', value: reservation.item.name },
+        { label: 'Հետ վերցված', value: String(quantity) },
+        ...(reason ? [{ label: 'Պատճառ', value: reason }] : []),
+      ],
+      actorId: performedBy ?? null,
+      keepType: true,
+    }).catch(() => undefined);
+    return outcome;
   }
 
   /** The task as CRM's internal route answers it — its project, its people.
@@ -2025,11 +2151,11 @@ export class ReservationsService {
     }
   }
 
-  async cancel(reservationId: number, performedBy?: number, reason?: string, actor?: WarehouseActor) {
+  async cancel(reservationId: number, performedBy?: number, reason?: string, actor?: WarehouseActor, opts: { quiet?: boolean } = {}) {
     // Either party may walk away from an arrangement they are part of.
     const { reservation } = await this.assertCanCancel(reservationId, actor);
 
-    return this.prisma.$transaction(async (tx) => {
+    const done = await this.prisma.$transaction(async (tx) => {
       const activeAllocations = await tx.reservationAllocation.findMany({
         where: { reservationId, releasedAt: null },
       });
@@ -2064,6 +2190,51 @@ export class ReservationsService {
 
       return { success: true };
     });
+    if (!opts.quiet) void this.announceCancelled(reservation, performedBy ?? actor?.userId ?? null, reason, actor);
+    return done;
+  }
+
+  /**
+   * Phase 2 (2026-10-06): a cancellation reaches the OTHER side — the
+   * requester's people when the warehouse called it off, the warehouse's
+   * reservation desk when the requesting side did.
+   */
+  private async announceCancelled(reservation: any, actorId: number | null, reason?: string, actor?: WarehouseActor) {
+    try {
+      const itemName = (await this.prisma.item.findUnique({ where: { id: reservation.itemId }, select: { name: true } }))?.name ?? 'Ռեսուրս';
+      const side = await this.requesterSide(reservation);
+      // On the task (or the object's / the submission's person), or without the
+      // warehouse right to cancel: the requester walked away.
+      const byRequester =
+        (actorId != null && side.userIds.includes(actorId)) ||
+        (!!actor && !decideWarehouse(actor, 'reservation.cancel').allowed);
+      const details = [
+        { label: 'Ամրագրում', value: `#${reservation.id}` },
+        { label: 'Ռեսուրս', value: `${itemName} × ${reservation.quantity}` },
+        ...(side.label ? [{ label: side.kind === 'task' ? 'Առաջադրանք' : side.kind === 'object' ? 'Օբյեկտ' : 'Հարցում', value: side.label }] : []),
+        ...(reason ? [{ label: 'Պատճառ', value: reason }] : []),
+      ];
+      if (byRequester) {
+        await this.notifyWarehouseSide([reservation.id], {
+          type: WAREHOUSE_TYPES.reservationCancelled,
+          actorId,
+          title: 'Ամրագրումը չեղարկվել է',
+          body: `${itemName} × ${reservation.quantity}՝ ամրագրումը չեղարկվել է պահանջողի կողմից${reason ? `՝ ${reason}` : ''}։`,
+          details,
+        });
+      } else if (side.userIds.length) {
+        await this.notifications.sendToUsers(side.userIds, {
+          type: WAREHOUSE_TYPES.reservationCancelled,
+          actorId,
+          title: 'Ամրագրումը չեղարկվել է',
+          body: `${itemName} × ${reservation.quantity}՝ ամրագրումը չեղարկվել է պահեստի կողմից${reason ? `՝ ${reason}` : ''}։`,
+          path: side.path,
+          details,
+        });
+      }
+    } catch (e: any) {
+      this.logger.warn(`cancel notification failed: ${e?.message ?? e}`);
+    }
   }
 
   // ─── uncancel ────────────────────────────────────────────────────────────────
@@ -2079,7 +2250,7 @@ export class ReservationsService {
       throw new BadRequestException(`Վերաակտիվացնել կարելի է միայն «${RESERVATION_STATUS_LABELS.CANCELLED}» կարգավիճակի ամրագրումները`);
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const result = await this.prisma.$transaction(async (tx) => {
       await tx.resourceReservation.update({
         where: { id: reservationId },
         data: { status: ResourceReservationStatus.PENDING },
@@ -2093,11 +2264,27 @@ export class ReservationsService {
       );
       return { success: true };
     });
+    // Phase 3 (2026-10-07): the requesting side hears its request is live again.
+    const item = await this.prisma.item.findUnique({ where: { id: reservation.itemId }, select: { name: true } }).catch(() => null);
+    const what = `${item?.name ?? 'Ռեսուրս'} × ${reservation.quantity}`;
+    void this.notifyRequesters(reservation as any, {
+      type: WAREHOUSE_TYPES.reservationReactivated,
+      keepType: true,
+      actorId: performedBy ?? null,
+      title: 'Ամրագրումը վերաակտիվացվել է',
+      text: {
+        task: `${what}՝ առաջադրանքի չեղարկված ամրագրումը վերաակտիվացվել է և սպասում է պահեստի որոշմանը։`,
+        object: `${what}՝ օբյեկտի չեղարկված հայտը վերաակտիվացվել է և սպասում է պահեստի որոշմանը։`,
+        catalog: `${what}՝ ձեր հարցման չեղարկված տողը վերաակտիվացվել է։`,
+      },
+      details: [{ label: 'Ամրագրում', value: `#${reservationId}` }],
+    }).catch(() => undefined);
+    return result;
   }
 
   // ─── reject ──────────────────────────────────────────────────────────────────
 
-  async reject(reservationId: number, performedBy?: number, reason?: string, actor?: WarehouseActor) {
+  async reject(reservationId: number, performedBy?: number, reason?: string, actor?: WarehouseActor, opts: { quiet?: boolean } = {}) {
     // Turning a request down is the warehouse's answer to it.
     await this.assertMay(actor, reservationId, 'reservation.reject');
     const reservation = await this.prisma.resourceReservation.findUnique({
@@ -2144,12 +2331,24 @@ export class ReservationsService {
       return { success: true };
     });
 
-    void this.notifyRequesters(
-      reservation,
-      'Ամրագրումը մերժվել է',
-      'Ձեր առաջադրանքի համար կատարված ամրագրման հայտը մերժվել է։',
-      reason ? [{ label: 'Պատճառ', value: reason }] : [],
-    );
+    if (!opts.quiet) {
+      const itemName = (await this.prisma.item.findUnique({ where: { id: reservation.itemId }, select: { name: true } }).catch(() => null))?.name;
+      void this.notifyRequesters(reservation as any, {
+        title: 'Ամրագրումը մերժվել է',
+        type: WAREHOUSE_TYPES.reservationRejected,
+        text: {
+          task: 'Ձեր առաջադրանքի համար կատարված ամրագրման հայտը մերժվել է։',
+          // Phase 2 defect: an object's request is not «your task's».
+          object: `Օբյեկտի պահեստային հայտը${itemName ? ` («${itemName}»)` : ''} մերժվել է։`,
+          catalog: `Ձեր հարցման${itemName ? ` «${itemName}»` : ''} տողը մերժվել է${reason ? `՝ ${reason}` : ''}։`,
+        },
+        details: [
+          ...(itemName ? [{ label: 'Ռեսուրս', value: itemName }] : []),
+          ...(reason ? [{ label: 'Պատճառ', value: reason }] : []),
+        ],
+        actorId: performedBy ?? null,
+      });
+    }
 
     return result;
   }
@@ -2266,6 +2465,22 @@ export class ReservationsService {
 
     if (isConsumable) this.stockAlerts.check([allocation.reservation.itemId]);
 
+    // Phase 3 (2026-10-07): goods already issued were taken back off the request.
+    const what = `${allocation.reservation.item?.name ?? 'Ռեսուրս'}${isConsumable ? ` × ${allocation.quantity}` : ''}`;
+    const why = reason ? `՝ ${reason}` : '';
+    void this.notifyRequesters(allocation.reservation as any, {
+      type: WAREHOUSE_TYPES.allocationChanged,
+      keepType: true,
+      actorId: releasedBy ?? null,
+      title: 'Տրամադրվածը հետ է վերցվել',
+      text: {
+        task: `${what}՝ առաջադրանքին տրամադրվածը հետ է վերցվել պահեստի կողմից${why}։`,
+        object: `${what}՝ օբյեկտին տրամադրվածը հետ է վերցվել պահեստի կողմից${why}։`,
+        catalog: `${what}՝ ձեր հարցմամբ տրամադրվածը հետ է վերցվել պահեստի կողմից${why}։`,
+      },
+      details: [{ label: 'Ամրագրում', value: `#${allocation.reservationId}` }],
+    }).catch(() => undefined);
+
     return result;
   }
 
@@ -2274,7 +2489,7 @@ export class ReservationsService {
   async reallocate(dto: ReallocateResourceDto, performedBy?: number) {
     const allocation = await this.prisma.reservationAllocation.findUnique({
       where: { id: dto.allocationId },
-      include: { reservation: true },
+      include: { reservation: { include: { item: true } }, asset: true },
     });
 
     if (!allocation) throw new NotFoundException('Հատկացումը չի գտնվել');
@@ -2312,7 +2527,7 @@ export class ReservationsService {
     });
     if (overlappingMaintenance) throw new BadRequestException('Ակտիվը սպասարկման մեջ է');
 
-    return this.prisma.$transaction(async (tx) => {
+    const created = await this.prisma.$transaction(async (tx) => {
       await tx.reservationAllocation.update({
         where: { id: allocation.id },
         data: { releasedAt: new Date() },
@@ -2342,6 +2557,23 @@ export class ReservationsService {
 
       return newAllocation;
     });
+    // Phase 3 (2026-10-07): the issued asset was swapped for another one.
+    const label = (a: any, id: number | null) => a?.serialNumber || a?.name || (id ? `#${id}` : '—');
+    const swap = `${allocation.reservation.item?.name ?? 'Ակտիվ'}՝ ${label((allocation as any).asset, allocation.assetId)} → ${label(newAsset, newAsset.id)}`;
+    const why = dto.reason ? `՝ ${dto.reason}` : '';
+    void this.notifyRequesters(allocation.reservation as any, {
+      type: WAREHOUSE_TYPES.allocationChanged,
+      keepType: true,
+      actorId: performedBy ?? null,
+      title: 'Տրամադրված ակտիվը փոխարինվել է',
+      text: {
+        task: `${swap} — առաջադրանքի ակտիվը փոխարինվել է${why}։`,
+        object: `${swap} — օբյեկտի ակտիվը փոխարինվել է${why}։`,
+        catalog: `${swap} — ձեր հարցման ակտիվը փոխարինվել է${why}։`,
+      },
+      details: [{ label: 'Ամրագրում', value: `#${allocation.reservationId}` }],
+    }).catch(() => undefined);
+    return created;
   }
 
   // ─── getAll ──────────────────────────────────────────────────────────────────
@@ -2714,7 +2946,10 @@ export class ReservationsService {
     if (!opts.asWarehouse) {
       const short = created.filter((c) => c.status === ResourceReservationStatus.PENDING);
       void this.notifications.send({
+        type: short.length ? WAREHOUSE_TYPES.reservationPending : WAREHOUSE_TYPES.reservationRequested,
         permissions: ['receive_reservation_alerts', 'manage_warehouse'],
+        entityIds: created.map((c) => c.entityId),
+        actorId: performedBy ?? null,
         title: short.length ? 'Օբյեկտի հայտ՝ սպասում է որոշման' : 'Նոր հայտ օբյեկտից',
         body: `${card.code} ${card.name}՝ ${created.map((c) => `${c.itemName} × ${c.quantity}`).join(', ')}`,
         path: '/reservations',
@@ -2758,8 +2993,21 @@ export class ReservationsService {
     const issued: number[] = [];
     try {
       for (const row of created) {
-        await this.approveConsumable(row.id, performedBy, undefined, actor);
+        // One notice for the whole supply below, not one per line.
+        await this.approveConsumable(row.id, performedBy, undefined, actor, { quiet: true });
         issued.push(row.id);
+      }
+      if (created.length) {
+        void this.notifyRequesters({ objectId }, {
+          title: 'Պահեստը ռեսուրս է տրամադրել օբյեկտին',
+          type: WAREHOUSE_TYPES.reservationApproved,
+          text: {
+            task: '',
+            object: `${card.code} ${card.name}՝ ${created.map((c: any) => `${c.itemName} × ${c.quantity}`).join(', ')} — հաստատեք ստացումը օբյեկտի «Պահեստային հայտեր» բաժնում։`,
+            catalog: '',
+          },
+          actorId: performedBy ?? null,
+        });
       }
     } catch (e) {
       // Stock moved under us: whatever was not issued is withdrawn, nothing half-made stays open.
@@ -2868,20 +3116,10 @@ export class ReservationsService {
       }
     });
 
-    const short = created.filter((c) => c.status === ResourceReservationStatus.PENDING);
-    if (short.length) {
-      void this.notifications.send({
-        permissions: ['receive_reservation_alerts', 'manage_warehouse'],
-        title: 'Ամրագրում սպասում է հաստատման',
-        body: `Կատալոգի հարցում ${input.number}՝ պաշարը չի բավարարում ${short.map((c) => c.itemName).join(', ')} տողերի համար և սպասում է ձեր որոշմանը։`,
-        path: '/catalog/requests',
-        details: [
-          { label: 'Հարցում', value: input.number },
-          { label: 'Պաշարը չի բավարարում', value: short.map((c) => `${c.itemName} × ${c.quantity}`).join(', ') },
-          ...(input.projectName ? [{ label: 'Նախագիծ', value: input.projectName }] : []),
-        ],
-      });
-    }
+    // Phase 2 (2026-10-06): the shortage is no longer announced here, to the
+    // reservation desk — the catalog checkout announces the whole submission,
+    // shortage included, once, to the catalog desk (view_catalog_requests),
+    // who are the ones who decide it (CatalogService.announceCheckout).
     return { created };
   }
 
@@ -3262,7 +3500,8 @@ export class ReservationsService {
     const startDate = new Date(dto.startDate);
     const endDate = new Date(dto.endDate);
 
-    return this.prisma.$transaction(async (tx) => {
+    const backToPending: { id: number; quantity: number }[] = [];
+    const outcome = await this.prisma.$transaction(async (tx) => {
       const existingReservations = await tx.resourceReservation.findMany({
         where: { taskId: taskId, status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.COMPLETED] } },
       });
@@ -3403,6 +3642,7 @@ export class ReservationsService {
 
               const quantityChanged = roundQty(existing.quantity) !== roundQty(targetQuantity);
               const statusChanged = existing.status !== newStatus;
+              if (statusChanged && newStatus === ResourceReservationStatus.PENDING) backToPending.push({ id: existing.id, quantity: targetQuantity });
 
               await tx.resourceReservation.update({
                 where: { id: existing.id },
@@ -3517,6 +3757,7 @@ export class ReservationsService {
 
             const quantityChanged = roundQty(existing.quantity) !== roundQty(targetQuantity);
             const statusChanged = existing.status !== newStatus;
+            if (statusChanged && newStatus === ResourceReservationStatus.PENDING) backToPending.push({ id: existing.id, quantity: targetQuantity });
 
             await tx.resourceReservation.update({
               where: { id: existing.id },
@@ -3613,5 +3854,23 @@ export class ReservationsService {
 
       return result;
     }, { timeout: 30000 });
+
+    // Phase 2 (2026-10-06): an edit that knocked a decided row back to PENDING
+    // puts it in front of the warehouse again — tell the reservation desk.
+    if (backToPending.length) {
+      const rows = backToPending.map((b) => `#${b.id} × ${b.quantity}`).join(', ');
+      void this.notifyWarehouseSide(backToPending.map((b) => b.id), {
+        type: WAREHOUSE_TYPES.reservationBackToPending,
+        actorId: performedBy ?? null,
+        title: 'Ամրագրումը կրկին սպասում է որոշման',
+        body: `Առաջադրանք #${taskId}՝ քանակի փոփոխությունից հետո պաշարը չի բավարարում, ամրագրումը վերադարձել է սպասման (${rows})։`,
+        details: [
+          { label: 'Առաջադրանք', value: `#${taskId}` },
+          ...(dto.projectName ? [{ label: 'Նախագիծ', value: dto.projectName }] : []),
+          { label: 'Ամրագրումներ', value: rows },
+        ],
+      });
+    }
+    return outcome;
   }
 }

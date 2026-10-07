@@ -1,6 +1,8 @@
 import { settleStoredQty } from '../common/stored-quantity';
 import { roundQty } from '../common/quantity';
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';import { PrismaService } from 'prisma/prisma.service';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
+import { PrismaService } from 'prisma/prisma.service';
 import { CreateReturnDto } from './dto/create-return.dto';
 import { ResourceReturnStatus } from '../common/enums/resource-return-status.enum';
 import { ResourceReservationStatus } from '../common/enums/resource-reservation-status.enum';
@@ -54,7 +56,57 @@ export class ResourceReturnsService {
     private readonly stockAlerts: StockAlertService,
     private readonly workspaces: ResourceWorkspaceService,
     private readonly reservations: ReservationsService,
+    @Optional() private readonly notifications?: WarehouseNotificationsService,
   ) {}
+
+  // ── Notifications (phase 2, 2026-10-06) ──
+
+  /** The warehouse returns desk of the stock owner hears a return was filed. */
+  private announceFiled(ret: any, actorId: number) {
+    if (!this.notifications) return;
+    void (async () => {
+      const parties = await this.workspaces.partiesOfReservation(ret.reservationId).catch(() => null);
+      const item = ret.reservation?.item?.name ?? (await this.prisma.resourceReservation.findUnique({
+        where: { id: ret.reservationId },
+        select: { item: { select: { name: true } } },
+      }))?.item?.name ?? 'Ռեսուրս';
+      await this.notifications!.send({
+        type: WAREHOUSE_TYPES.returnFiled,
+        permissions: ['manage_resource_returns', 'manage_warehouse'],
+        entityIds: [parties?.stockOwner ?? null],
+        actorId,
+        title: 'Նոր վերադարձ',
+        body: `${item} × ${ret.quantity} վերադարձվում է պահեստ${ret.notes ? ` — ${ret.notes}` : ''}։`,
+        path: '/returns',
+        details: [
+          { label: 'Վերադարձ', value: `#${ret.id}` },
+          { label: 'Ռեսուրս', value: item },
+          { label: 'Քանակ', value: String(ret.quantity) },
+          ...(ret.notes ? [{ label: 'Նշում', value: ret.notes }] : []),
+        ],
+      });
+    })().catch(() => undefined);
+  }
+
+  /** The person who filed the return hears the warehouse's answer. */
+  private announceDecided(ret: any, actorId: number | null | undefined, received: boolean) {
+    if (!this.notifications || !ret.requestedBy) return;
+    const item = ret.reservation?.item?.name ?? 'Ռեսուրս';
+    void this.notifications.sendToUsers([ret.requestedBy], {
+      type: WAREHOUSE_TYPES.returnDecided,
+      actorId: actorId ?? null,
+      title: received ? 'Վերադարձը ընդունվել է' : 'Վերադարձը չեղարկվել է',
+      body: received
+        ? `${item} × ${ret.quantity}՝ պահեստը ընդունել է վերադարձը։`
+        : `${item} × ${ret.quantity}՝ վերադարձը չեղարկվել է պահեստի կողմից։`,
+      path: '/returns',
+      details: [
+        { label: 'Վերադարձ', value: `#${ret.id}` },
+        { label: 'Ռեսուրս', value: item },
+        { label: 'Քանակ', value: String(ret.quantity) },
+      ],
+    });
+  }
 
   private readonly include = {
     reservation: {
@@ -212,7 +264,7 @@ export class ResourceReturnsService {
      * at the same moment both passed the old check, because it read and then
      * wrote with nothing in between.
      */
-    return this.prisma.$transaction(async (tx) => {
+    const filed = await this.prisma.$transaction(async (tx) => {
       /*
        * Before measuring. Two people handing back the same six both read "six
        * returnable" under READ COMMITTED and both filed — the live run caught
@@ -244,6 +296,8 @@ export class ResourceReturnsService {
         include: this.include,
       });
     });
+    this.announceFiled(filed, actor.userId);
+    return filed;
   }
 
   async findAll(
@@ -454,6 +508,7 @@ export class ResourceReturnsService {
     });
 
     if (!isAsset) this.stockAlerts.check([ret.reservation.itemId]);
+    this.announceDecided(ret, receivedBy ?? actor?.userId, true);
 
     return result;
   }
@@ -481,11 +536,14 @@ export class ResourceReturnsService {
   async cancel(id: number, actor?: WarehouseActor) {
     await this.cancellable(id, actor);
 
-    return this.prisma.resourceReturn.update({
+    const row = await this.prisma.resourceReturn.update({
       where: { id },
       data: { status: ResourceReturnStatus.CANCELLED },
       include: this.include,
     });
+    // Called off by somebody else (the warehouse) — the filer hears; their own cancel tells nobody.
+    this.announceDecided(row, actor?.userId, false);
+    return row;
   }
 
   /**

@@ -2,7 +2,9 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
 import { PrismaService } from 'prisma/prisma.service';
 import { AssetStatus } from '../common/enums/asset-status.enum';
 import { MaintenanceStatus } from '../common/enums/maintenance-status.enum';
@@ -26,6 +28,7 @@ export class MaintenanceService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly workspaces: ResourceWorkspaceService,
+    @Optional() private readonly notifications?: WarehouseNotificationsService,
   ) {}
 
   /**
@@ -232,7 +235,7 @@ export class MaintenanceService {
         `Սպասարկման գրառում #${id}-ը «${maintenanceStatusLabel(record.status)}» կարգավիճակում է, ոչ թե ֆինանսական հաստատման սպասման`,
       );
 
-    return this.prisma.maintenanceRecord.update({
+    const updated = await this.prisma.maintenanceRecord.update({
       where: { id },
       data: {
         status: status === 'APPROVED' ? 'FINANCE_APPROVED' : 'FINANCE_REJECTED',
@@ -242,6 +245,35 @@ export class MaintenanceService {
       },
       include,
     });
+    // Phase 2 (2026-10-06): the job's author and the warehouse managers of the
+    // asset's organisation hear finance's word — only on the transition, so a
+    // retried callback (the early return above) tells nobody twice.
+    if (this.notifications) {
+      const approved = status === 'APPROVED';
+      const asset: any = (updated as any).asset;
+      const entityId = asset?.item?.categoryId
+        ? (await this.prisma.itemCategory.findUnique({ where: { id: asset.item.categoryId }, select: { entityId: true } }).catch(() => null))?.entityId ?? null
+        : null;
+      const what = `${asset?.item?.name ?? 'Ակտիվ'}${asset?.serialNumber ? ` (${asset.serialNumber})` : ''}`;
+      void this.notifications.send({
+        type: WAREHOUSE_TYPES.maintenanceFinanceDecided,
+        permissions: ['manage_warehouse'],
+        entityIds: [entityId],
+        userIds: [record.createdBy],
+        title: approved ? 'Սպասարկման ծախսը հաստատվել է' : 'Սպասարկման ծախսը մերժվել է',
+        body: approved
+          ? `Սպասարկում #${id} (${what})՝ ֆինանսական բաժինը հաստատել է ծախսը։`
+          : `Սպասարկում #${id} (${what})՝ ֆինանսական բաժինը մերժել է ծախսը${rejectionReason?.trim() ? `՝ ${rejectionReason.trim()}` : ''}։`,
+        path: '/maintenance',
+        details: [
+          { label: 'Սպասարկում', value: `#${id}` },
+          { label: 'Ակտիվ', value: what },
+          ...(record.amount != null ? [{ label: 'Գումար', value: `${record.amount} ֏` }] : []),
+          ...(!approved && rejectionReason?.trim() ? [{ label: 'Պատճառ', value: rejectionReason.trim() }] : []),
+        ],
+      });
+    }
+    return updated;
   }
 
   async complete(id: number, actor?: WarehouseActor) {

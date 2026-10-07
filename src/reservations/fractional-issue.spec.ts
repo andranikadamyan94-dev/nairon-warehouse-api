@@ -127,7 +127,7 @@ function store(opts: {
   const svc = new ReservationsService(
     db,
     { checkAvailability: async () => ({}) } as any,
-    { check: async () => {} } as any,
+    { check: async () => {}, checkWarehouse: () => {} } as any,
     { reservationApproved: async () => {} } as any,
     {} as any,
     {} as any,
@@ -137,8 +137,8 @@ function store(opts: {
   (svc as any).assertMay = async () => {};
   (svc as any).currentTaskObjectId = async () => undefined;
   const notices: { label: string; value: string }[][] = [];
-  (svc as any).notifyRequesters = async (_r: unknown, _t: string, _b: string, fields: any[]) => {
-    notices.push(fields);
+  (svc as any).notifyRequesters = async (_r: unknown, n: { details?: any[] }) => {
+    notices.push(n.details ?? []);
   };
 
   const issue = (quantity?: number) => svc.approveConsumable(1, 99, quantity as number);

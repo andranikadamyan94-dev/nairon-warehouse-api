@@ -7,6 +7,7 @@ import {
   ParseIntPipe,
   Post,
   Query,
+  Req,
   UseGuards,
 } from '@nestjs/common';
 
@@ -38,8 +39,9 @@ export class ResponsibilitiesController {
   assign(
     @Body()
     dto: AssignResponsibilityDto,
+    @Req() req?: any,
   ) {
-    return this.responsibilitiesService.assign(dto);
+    return this.responsibilitiesService.assign(dto, req?.user?.id);
   }
 
   @UseGuards(PermissionGuard)
@@ -54,8 +56,9 @@ export class ResponsibilitiesController {
   release(
     @Param('id', ParseIntPipe)
     id: number,
+    @Req() req?: any,
   ) {
-    return this.responsibilitiesService.release(id);
+    return this.responsibilitiesService.release(id, req?.user?.id);
   }
 
   @UseGuards(PermissionGuard)

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
 import { PrismaService } from 'prisma/prisma.service';
@@ -15,6 +15,15 @@ import { ResourceWorkspaceService } from '../common/workspace/resource-workspace
 import { TxClient } from '../common/operations/operations.service';
 import { FileService } from '../common/file.service';
 import { roundQty } from '../common/quantity';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
+import { ReservationsService } from '../reservations/reservations.service';
+
+/** A reservation still in play — the request is open (D1 / item_changed, 2026-10-07). */
+export const LIVE_RESERVATION_STATUSES = ['PENDING', 'APPROVED', 'PARTIALLY_ALLOCATED', 'ALLOCATED'] as const;
+
+const UNIT_LABELS: Record<string, string> = {
+  KG: 'կգ', TONNE: 'տոննա', METER: 'մ', PIECE: 'հատ', HOUR: 'ժամ', BOX: 'տուփ', LITER: 'լ', SQUARE_METER: 'մ²',
+};
 
 /** Gallery cap per item (contract §9). */
 const MAX_IMAGES = 10;
@@ -82,7 +91,11 @@ export class ItemsService {
     private readonly stockAlerts: StockAlertService,
     private readonly workspaces: ResourceWorkspaceService,
     private readonly files: FileService,
+    @Optional() private readonly notifications?: WarehouseNotificationsService,
+    @Optional() private readonly reservations?: ReservationsService,
   ) {}
+
+  private readonly logger = new Logger(ItemsService.name);
 
   /**
    * Can an item be filed under this category? The category has to exist; an
@@ -396,7 +409,75 @@ export class ItemsService {
     // Re-evaluate: this edit may have set/raised the threshold or changed the
     // quantity directly, either of which can put the item below the line.
     this.stockAlerts.check([id]);
+    // Phase 3 (2026-10-07): people with an open request for the item hear
+    // that its quantity, unit or catalog visibility changed under them.
+    const changes: string[] = [];
+    if (dto.quantity !== undefined && Math.abs((dto.quantity ?? 0) - (current.quantity ?? 0)) > 1e-9) {
+      changes.push(`քանակ՝ ${current.quantity ?? 0} → ${dto.quantity}`);
+    }
+    if (dto.unit !== undefined && (dto.unit ?? null) !== (current.unit ?? null)) {
+      changes.push(`միավոր՝ ${UNIT_LABELS[current.unit ?? ''] ?? current.unit ?? '—'} → ${UNIT_LABELS[dto.unit ?? ''] ?? dto.unit ?? '—'}`);
+    }
+    if (dto.catalogVisible !== undefined && dto.catalogVisible !== current.catalogVisible) {
+      changes.push(dto.catalogVisible ? 'կրկին երևում է կատալոգում' : 'հանվել է կատալոգից');
+    }
+    if (changes.length) {
+      // A parent's unit flows down to its variants: their requests count too.
+      const ids = [id, ...(dto.unit !== undefined ? current.variants.map((v: any) => v.id) : [])];
+      void this.announceItemChanged(ids, current.name, changes, actor.userId);
+    }
     return this.detail(id);
+  }
+
+  /**
+   * The people with an open request for these items: the requesting side of
+   * every live reservation (task assignees / the object's responsible person
+   * / the catalog submitter), the requester and beneficiary of an open asset
+   * request, the filer of a pending stock request. One notice each, linked to
+   * their own request. Never throws.
+   */
+  async announceItemChanged(itemIds: number[], name: string, changes: string[], actorId: number | null) {
+    try {
+      if (!this.notifications) return;
+      const pathOf = new Map<number, string>();
+      const add = (userIds: (number | null | undefined)[], path: string) => {
+        for (const u of userIds) if (u && !pathOf.has(u)) pathOf.set(u, path);
+      };
+      const live = await this.prisma.resourceReservation.findMany({
+        where: { itemId: { in: itemIds }, status: { in: [...LIVE_RESERVATION_STATUSES] as any } },
+        select: { id: true, taskId: true, objectId: true, submissionId: true },
+      });
+      if (this.reservations) {
+        for (const r of live) {
+          const side = await this.reservations.requesterSide(r);
+          add(side.userIds, side.path);
+        }
+      }
+      const assetRequests = await this.prisma.assetRequest.findMany({
+        where: { itemId: { in: itemIds }, status: { in: ['PENDING', 'APPROVED'] } },
+        select: { requestedBy: true, forUserId: true },
+      });
+      for (const a of assetRequests) add([a.forUserId, a.requestedBy], '/profile?tab=assets');
+      const stockRequests = await this.prisma.stockRequest.findMany({
+        where: { status: 'PENDING', items: { some: { itemId: { in: itemIds } } } },
+        select: { createdBy: true },
+      });
+      add(stockRequests.map((s) => s.createdBy), '/stock-requests');
+      const byPath = new Map<string, number[]>();
+      for (const [u, p] of pathOf) byPath.set(p, [...(byPath.get(p) ?? []), u]);
+      for (const [path, userIds] of byPath) {
+        await this.notifications.sendToUsers(userIds, {
+          type: WAREHOUSE_TYPES.itemChanged,
+          actorId,
+          title: 'Հայտված ապրանքը փոփոխվել է',
+          body: `«${name}»՝ ${changes.join(', ')}։ Ձեր հայտը դեռ բաց է — ստուգեք այն։`,
+          path,
+          details: [{ label: 'Ապրանք', value: name }, { label: 'Փոփոխություն', value: changes.join(', ') }],
+        });
+      }
+    } catch (e: any) {
+      this.logger.warn(`item change notification failed: ${e?.message ?? e}`);
+    }
   }
 
   /**
@@ -465,6 +546,22 @@ export class ItemsService {
     await this.assertMayEdit(actor, id);
     if (item.variants.length) {
       throw new BadRequestException('Ապրանքն ունի տարբերակներ. նախ ջնջեք դրանք');
+    }
+    // Data fix D1 (2026-10-07): the delete cascades reservations (catalog
+    // request lines included), assets and custody — open requests and
+    // custody records vanished without a trace. Refused while any is live,
+    // as variant deletion already refuses.
+    const [liveReservations, openCustody] = await Promise.all([
+      this.prisma.resourceReservation.count({
+        where: { itemId: id, status: { in: [...LIVE_RESERVATION_STATUSES] as any } },
+      }),
+      this.prisma.assetCustody.count({ where: { releasedAt: null, asset: { itemId: id } } }),
+    ]);
+    if (liveReservations > 0) {
+      throw new BadRequestException(`Ապրանքն ունի ակտիվ ամրագրումներ (${liveReservations}) և չի կարող ջնջվել. նախ ավարտեք կամ չեղարկեք դրանք`);
+    }
+    if (openCustody > 0) {
+      throw new BadRequestException(`Ապրանքի ակտիվները (${openCustody}) տրամադրված են պատասխանատուների և ապրանքը չի կարող ջնջվել. նախ գրանցեք վերադարձը`);
     }
 
     try {

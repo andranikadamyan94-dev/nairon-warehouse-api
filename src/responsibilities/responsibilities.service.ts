@@ -1,4 +1,5 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
 
 import { AssignResponsibilityDto } from './dto/assign-responsibility.dto';
 import { PrismaService } from 'prisma/prisma.service';
@@ -7,18 +8,26 @@ import { decideHoldingsRead } from './holdings-access';
 
 @Injectable()
 export class ResponsibilitiesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly notifications?: WarehouseNotificationsService,
+  ) {}
 
-  async assign(dto: AssignResponsibilityDto) {
+  async assign(dto: AssignResponsibilityDto, actorId?: number) {
     const asset = await this.prisma.asset.findUnique({
       where: {
         id: dto.assetId,
       },
+      include: { item: { select: { name: true } } },
     });
 
     if (!asset) {
       throw new NotFoundException('Ակտիվը չի գտնվել');
     }
+    const previous = await this.prisma.assetResponsibility.findMany({
+      where: { assetId: dto.assetId, releasedAt: null },
+      select: { userId: true },
+    });
 
     await this.prisma.assetResponsibility.updateMany({
       where: {
@@ -48,21 +57,56 @@ export class ResponsibilitiesService {
       },
     });
 
+    // Phase 2 (2026-10-06): the new responsible person, and whoever it was taken from.
+    const what = this.assetLabel(asset);
+    this.tell([dto.userId], actorId, 'Ձեզ նշանակել են գույքի պատասխանատու', `${what} — այժմ դուք եք պատասխանատուն։`, what);
+    this.tell(
+      previous.map((p) => p.userId).filter((u) => u !== dto.userId),
+      actorId,
+      'Գույքի պատասխանատվությունը փոխանցվել է',
+      `${what} — պատասխանատվությունը փոխանցվել է այլ աշխատակցի։`,
+      what,
+    );
+
     return responsibility;
   }
 
-  async release(id: number) {
+  async release(id: number, actorId?: number) {
     const r = await this.prisma.assetResponsibility.findUnique({ where: { id } });
     if (!r) throw new NotFoundException('Պատասխանատվության գրառումը չի գտնվել');
+    const open = await this.prisma.assetResponsibility.findMany({
+      where: { assetId: r.assetId, releasedAt: null },
+      select: { userId: true },
+    });
 
     await this.prisma.assetResponsibility.updateMany({
       where: { assetId: r.assetId, releasedAt: null },
       data: { releasedAt: new Date() },
     });
 
-    return this.prisma.asset.update({
+    const asset = await this.prisma.asset.update({
       where: { id: r.assetId },
       data: { responsibleUserId: null },
+      include: { item: { select: { name: true } } },
+    });
+    const what = this.assetLabel(asset);
+    this.tell(open.map((o) => o.userId), actorId, 'Գույքի պատասխանատվությունը հանվել է', `${what} — դուք այլևս դրա պատասխանատուն չեք։`, what);
+    return asset;
+  }
+
+  private assetLabel(asset: any): string {
+    return `${asset?.item?.name ?? 'Ակտիվ'}${asset?.serialNumber ? ` (${asset.serialNumber})` : ` #${asset?.id}`}`;
+  }
+
+  private tell(userIds: number[], actorId: number | undefined, title: string, body: string, what: string) {
+    if (!this.notifications || !userIds.length) return;
+    void this.notifications.sendToUsers(userIds, {
+      type: WAREHOUSE_TYPES.responsibilityChanged,
+      actorId: actorId ?? null,
+      title,
+      body,
+      path: '/profile?tab=assets',
+      details: [{ label: 'Գույք', value: what }],
     });
   }
 
