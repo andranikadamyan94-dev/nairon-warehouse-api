@@ -153,6 +153,6 @@ describe('legacy object rows → catalog submissions (data migration)', () => {
     // Only this spec's object: other DB-backed specs and the local app may add submissions meanwhile.
     const before = await prisma.catalogSubmission.count({ where: { objectId: OBJECT } });
     await migrate();
-    expect(await prisma.catalogSubmission.count()).toBe(before);
+    expect(await prisma.catalogSubmission.count({ where: { objectId: OBJECT } })).toBe(before);
   });
 });
