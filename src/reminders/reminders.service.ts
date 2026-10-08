@@ -1,7 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from 'prisma/prisma.service';
-import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService, warehouseLinks } from '../common/notifications/notifications.service';
 import { ReservationsService } from '../reservations/reservations.service';
 import { ObjectsService } from '../objects/objects.service';
 
@@ -166,7 +166,7 @@ export class WarehouseRemindersService {
           excludeUserIds: holder ? [holder.userId] : [],
           title,
           body,
-          path: '/maintenance',
+          path: warehouseLinks.maintenance(r.id),
           details,
         });
         sent++;

@@ -13,7 +13,7 @@ import { WarehousesService } from '../warehouses/warehouses.service';
 import { StockTransfersService } from '../stock-transfers/stock-transfers.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
 import { TxClient } from '../common/operations/operations.service';
-import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService, warehouseLinks } from '../common/notifications/notifications.service';
 
 type Ctx = { isSuperAdmin?: boolean; permissionNames?: string[] };
 
@@ -67,7 +67,7 @@ export class StockRequestsService {
         actorId,
         title: 'Նոր հայտ նախագծային պահեստից',
         body: `${wh?.name ?? `Պահեստ #${req.warehouseId}`}՝ ${lines || 'ռեսուրսների հայտ'}`,
-        path: '/stock-requests',
+        path: warehouseLinks.stockRequest(req.id),
         details: [
           { label: 'Հայտ', value: `#${req.id}` },
           { label: 'Պահեստ', value: wh?.name ?? `#${req.warehouseId}` },
@@ -98,7 +98,7 @@ export class StockRequestsService {
       body: approved
         ? `Հայտ #${req.id}՝ հիմնական պահեստը հաստատել է և ռեսուրսները փոխանցվել են։`
         : `Հայտ #${req.id}՝ հիմնական պահեստը մերժել է${reason ? `՝ ${reason}` : ''}։`,
-      path: '/stock-requests',
+      path: warehouseLinks.stockRequest(req.id),
       details: [
         { label: 'Հայտ', value: `#${req.id}` },
         ...(reason ? [{ label: 'Պատճառ', value: reason }] : []),
@@ -274,18 +274,9 @@ export class StockRequestsService {
       const whId = Number(query.warehouseId);
       await this.warehousesService.assertWarehouseAccess(userId, whId, ctx);
       where.warehouseId = whId;
-    } else {
-      // The main-side queue: only transfer/warehouse staff may see everything.
-      const names = ctx.permissionNames ?? [];
-      const mainSide =
-        ctx.isSuperAdmin ||
-        names.includes('manage_stock_transfers') ||
-        names.includes('manage_warehouses') ||
-        names.includes('manage_warehouse');
-      if (!mainSide) {
-        const acc = await this.warehousesService.accessibleWarehouseIds(userId, ctx);
-        if (acc !== 'all') where.warehouseId = { in: acc };
-      }
+    } else if (!this.isMainSide(ctx)) {
+      const acc = await this.warehousesService.accessibleWarehouseIds(userId, ctx);
+      if (acc !== 'all') where.warehouseId = { in: acc };
     }
 
     const [rows, total] = await this.prisma.$transaction([
@@ -302,20 +293,61 @@ export class StockRequestsService {
       this.prisma.stockRequest.count({ where }),
     ]);
 
-    const ids = [...new Set(rows.flatMap((r) => [r.createdBy, r.decidedBy]).filter((x): x is number => x != null))];
-    const users = await this.usersPrisma.getUsersByIds(ids);
-    const nameOf = new Map(users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
-
     return {
-      data: rows.map((r) => ({
-        ...r,
-        createdByName: r.createdBy ? nameOf.get(r.createdBy) ?? null : null,
-        decidedByName: r.decidedBy ? nameOf.get(r.decidedBy) ?? null : null,
-      })),
+      data: await this.withNames(rows),
       total,
       page,
       limit,
     };
+  }
+
+  /**
+   * One request, by the list's own rule (notification deep links,
+   * 2026-10-08): main-side staff read any; anybody else only a request of a
+   * warehouse they belong to — 404 otherwise, so an id says nothing about
+   * requests the person may not see.
+   */
+  async findOne(id: number, userId: number, ctx?: Ctx) {
+    if (!ctx) {
+      const info = await this.usersPrisma.getUserAccessInfo(userId);
+      ctx = { isSuperAdmin: info.isSuperAdmin, permissionNames: info.permissionNames };
+    }
+    const row = await this.prisma.stockRequest.findUnique({
+      where: { id },
+      include: {
+        warehouse: { select: { id: true, name: true, code: true } },
+        items: { include: { item: { select: { id: true, name: true, unit: true, type: true } } } },
+      },
+    });
+    if (!row) throw new NotFoundException('Հայտը չի գտնվել');
+    if (!this.isMainSide(ctx)) {
+      const acc = await this.warehousesService.accessibleWarehouseIds(userId, ctx);
+      if (acc !== 'all' && !acc.includes(row.warehouseId)) throw new NotFoundException('Հայտը չի գտնվել');
+    }
+    return (await this.withNames([row]))[0];
+  }
+
+  /** The main-side queue: only transfer/warehouse staff may see everything. */
+  private isMainSide(ctx: Ctx): boolean {
+    const names = ctx.permissionNames ?? [];
+    return (
+      !!ctx.isSuperAdmin ||
+      names.includes('manage_stock_transfers') ||
+      names.includes('manage_warehouses') ||
+      names.includes('manage_warehouse')
+    );
+  }
+
+  /** Creator's and decider's names next to their ids. */
+  private async withNames<T extends { createdBy: number | null; decidedBy: number | null }>(rows: T[]) {
+    const ids = [...new Set(rows.flatMap((r) => [r.createdBy, r.decidedBy]).filter((x): x is number => x != null))];
+    const users = await this.usersPrisma.getUsersByIds(ids);
+    const nameOf = new Map(users.map((u) => [u.id, `${u.firstName} ${u.lastName}`.trim()]));
+    return rows.map((r) => ({
+      ...r,
+      createdByName: r.createdBy ? nameOf.get(r.createdBy) ?? null : null,
+      decidedByName: r.decidedBy ? nameOf.get(r.decidedBy) ?? null : null,
+    }));
   }
 
   /** Approve = execute the TO_SUB transfer atomically, then mark the request. */
@@ -417,7 +449,7 @@ export class StockRequestsService {
         actorId,
         title: 'Պահեստի հայտը չեղարկվել է',
         body: `Հայտ #${req.id}՝ ${wh?.name ?? `Պահեստ #${req.warehouseId}`}${what ? ` (${what})` : ''} — չեղարկվել է։`,
-        path: '/stock-requests',
+        path: warehouseLinks.stockRequest(req.id),
         details: [
           { label: 'Հայտ', value: `#${req.id}` },
           { label: 'Պահեստ', value: wh?.name ?? `#${req.warehouseId}` },

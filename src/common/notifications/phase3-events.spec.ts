@@ -179,6 +179,8 @@ describe('procurement · order deleted (D2), placed, price amended', () => {
     await svc.remove(9, 11);
     expect(calls).toHaveLength(0);
     expect(reached(n)).toEqual([]);
+    // a deleted order cannot be opened: the bare list, no id
+    expect(n.sent[0].path).toBe('/procurement');
   });
 
   it('a draft with a live finance payment row still cancels by ref', async () => {
@@ -197,6 +199,7 @@ describe('procurement · order deleted (D2), placed, price amended', () => {
       entityIds: [7],
       userIds: [12, 10],
       actorId: 12,
+      path: '/procurement?order=9',
     });
     expect(reached(n)).toEqual([10]);
   });
@@ -212,6 +215,7 @@ describe('procurement · order deleted (D2), placed, price amended', () => {
       entityIds: [7],
       userIds: [12],
       actorId: 50,
+      path: '/procurement?order=9',
     });
     expect(n.sent[0].body).toContain('Ցեմենտ: 50 → 60');
     expect(n.sent[0].details).toContainEqual({ label: 'Պատճառ', value: 'Հաշիվ-ապրանքագիր' });
@@ -416,6 +420,7 @@ describe('reservations · partial acceptance / allocation changed / reactivated'
       permissions: ['receive_reservation_alerts', 'manage_warehouse'],
       entityIds: [7],
       actorId: 21,
+      path: '/reservations?reservation=1',
     });
     expect(n.sent[0].body).toContain('Երկու պարկ պատռված էր');
     expect(n.sent[0].details).toContainEqual({ label: 'Պատճառ', value: 'Երկու պարկ պատռված էր' });
@@ -539,6 +544,7 @@ describe('stock requests · cancelled', () => {
       entityIds: [7],
       userIds: [14],
       actorId: 14,
+      path: '/stock-requests?request=6',
     });
     expect(n.sent[0].body).toContain('Ցեմենտ × 2');
     expect(reached(n)).toEqual([]);
@@ -720,7 +726,7 @@ describe('daily reminders (09:00 Asia/Yerevan)', () => {
       permissions: ['manage_maintenance', 'manage_warehouse'],
       entityIds: [7],
       excludeUserIds: [21],
-      path: '/maintenance',
+      path: '/maintenance?maintenance=4',
     });
     // open statuses and the two windows are asked for
     const where = prisma.maintenanceRecord.findMany.mock.calls[0][0].where;

@@ -13,7 +13,7 @@ import { CreateProcurementDto } from './dto/create-procurement.dto';
 import { UpdateProcurementDto } from './dto/update-procurement.dto';
 import { FileService } from '../common/file.service';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
-import { WAREHOUSE_TYPES, WarehouseNotificationsService, crmLinks } from '../common/notifications/notifications.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService, crmLinks, warehouseLinks } from '../common/notifications/notifications.service';
 import { ReceiveDeliveryDto } from './dto/receive-delivery.dto';
 import { requireInternalSecret } from '../common/internal-headers';
 import { requireFinanceUrl } from '../common/finance-url';
@@ -46,6 +46,16 @@ const financeMessageOf = (body: string): string | null => {
   }
 };
 
+type ProcurementListQuery = {
+  status?: string;
+  supplierId?: string;
+  search?: string;
+  page?: string;
+  limit?: string;
+  sortBy?: string;
+  sortOrder?: string;
+};
+
 @Injectable()
 export class ProcurementService {
   private readonly logger = new Logger(ProcurementService.name);
@@ -58,18 +68,45 @@ export class ProcurementService {
     private readonly usersPrisma: UsersPrismaService,
   ) {}
 
-  async findAll(query?: {
-    status?: string;
-    supplierId?: string;
-    search?: string;
-    page?: string;
-    limit?: string;
-    sortBy?: string;
-    sortOrder?: string;
-  }) {
+  async findAll(query?: ProcurementListQuery) {
     const page = Number(query?.page ?? 1);
     const limit = Number(query?.limit ?? 20);
+    const { where, orderBy } = this.listQuery(query);
 
+    const [data, total] = await Promise.all([
+      this.prisma.procurementOrder.findMany({
+        where,
+        include,
+        orderBy,
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.procurementOrder.count({ where }),
+    ]);
+
+    return { data, total, page, limit };
+  }
+
+  /**
+   * Which page of the list holds an order, under the same filters and sort
+   * (2026-10-08) — a notification link opens the list on that page with the
+   * order's row expanded. It walks the list's own where/orderBy over ids only,
+   * so it can never disagree with findAll (status sorts in the database's enum
+   * order, which differs from schema.prisma's). `inList: false` when the
+   * filters leave the order out.
+   */
+  async positionOf(id: number, query?: ProcurementListQuery) {
+    const limit = Math.max(1, Number(query?.limit ?? 20) || 20);
+    const { where, orderBy } = this.listQuery(query);
+    const ids = await this.prisma.procurementOrder.findMany({ where, orderBy, select: { id: true } });
+    const index = ids.findIndex((row) => row.id === id);
+    if (index >= 0) return { inList: true, page: Math.floor(index / limit) + 1 };
+    const exists = await this.prisma.procurementOrder.count({ where: { id } });
+    if (!exists) throw new NotFoundException('Գնման պատվերը չի գտնվել');
+    return { inList: false, page: null };
+  }
+
+  private listQuery(query?: ProcurementListQuery) {
     const where: any = {};
     // The warehouse is global (owner decision 2026-10-05): the list is never
     // held to the organisation acted in (X-Entity-ID) — every organisation's
@@ -95,19 +132,7 @@ export class ProcurementService {
             { createdAt: query?.sortBy === 'createdAt' ? order : 'desc' },
             { id: 'desc' },
           ];
-
-    const [data, total] = await Promise.all([
-      this.prisma.procurementOrder.findMany({
-        where,
-        include,
-        orderBy,
-        skip: (page - 1) * limit,
-        take: limit,
-      }),
-      this.prisma.procurementOrder.count({ where }),
-    ]);
-
-    return { data, total, page, limit };
+    return { where, orderBy };
   }
 
   async findOne(id: number) {
@@ -308,7 +333,7 @@ export class ProcurementService {
         actorId,
         title: 'Գնման պատվերը պատվիրված է',
         body: `Գնման պատվեր #${order.id}-ը տեղադրվել է մատակարարի մոտ${lines ? `՝ ${lines}` : ''}։ Սպասվում է առաքում։`,
-        path: '/procurement',
+        path: warehouseLinks.order(order.id),
         details: [
           ...this.orderDetails(order),
           ...reqs.map((r) => ({ label: 'Գնման հայտ', value: `#${r.id}${r.title ? ` «${r.title}»` : ''}` })),
@@ -643,7 +668,7 @@ export class ProcurementService {
       body: complete
         ? `Գնման պատվեր #${id} ամբողջությամբ ստացվել է և պաշարը թարմացվել է։`
         : `Գնման պատվեր #${id}-ի մի մասը ստացվել է։ Մնացած քանակը դեռ սպասվում է։`,
-      path: '/procurement',
+      path: warehouseLinks.order(id),
       details: [
         { label: 'Պատվեր', value: `#${id}` },
         ...(order.supplier?.name
@@ -712,7 +737,7 @@ export class ProcurementService {
         type: WAREHOUSE_TYPES.procurementPrepaymentExcess,
         permissions: ['receive_procurement_alerts', 'manage_warehouse'],
         entityIds: [order.entityId],
-        path: '/procurement',
+        path: warehouseLinks.order(order.id),
         title: 'Կանխավճարը գերազանցում է ստացվածը',
         body:
           `Պատվեր #${order.id}: կանխավճար ${prepaid}, ստացվել է ${invoicedValue}-ի չափով։ ` +
@@ -737,7 +762,7 @@ export class ProcurementService {
           `Հաստատվել է ${Math.round(orderedValue).toLocaleString('hy-AM')} ֏, ` +
           `փաստացի արժեքը ${Math.round(invoicedValue).toLocaleString('hy-AM')} ֏ է։ ` +
           `Անհրաժեշտ է ձեռքով ճշգրտում ֆինանսների հետ։`,
-        path: '/procurement',
+        path: warehouseLinks.order(order.id),
         details: [{ label: 'Պատվեր', value: `#${order.id}` }],
       });
       return { action: 'failed' as const, delta: 0 };
@@ -914,7 +939,7 @@ export class ProcurementService {
       entityIds: [order.entityId],
       title: 'Ստացված պատվերը խմբագրվել է',
       body: `Գնման պատվեր #${order.id}-ը փոփոխվել է սուպեր-ադմինի կողմից՝ ${changed.join(', ')}։`,
-      path: '/procurement',
+      path: warehouseLinks.order(order.id),
       details: [{ label: 'Պատվեր', value: `#${order.id}` }],
     });
     if (priceChanges.size) {
@@ -1031,7 +1056,7 @@ export class ProcurementService {
       actorId: userId ?? null,
       title: 'Գնման պատվերի գները ճշգրտվել են',
       body: `Գնման պատվեր #${id}՝ ${moved.length ? moved.join(', ') : 'ֆինանսական ճշգրտում'} — ${reason}։`,
-      path: '/procurement',
+      path: warehouseLinks.order(id),
       details: [
         ...this.orderDetails(order),
         ...(result.delta ? [{ label: 'Տարբերություն', value: this.money(result.delta) }] : []),
@@ -1109,7 +1134,7 @@ export class ProcurementService {
       entityIds: [order.entityId],
       title: 'Գնման պատվերը չեղարկվել է',
       body: `Գնման պատվեր #${id} չեղարկվել է${reason ? `՝ ${reason}` : ''}։`,
-      path: '/procurement',
+      path: warehouseLinks.order(id),
       details: [
         { label: 'Պատվեր', value: `#${id}` },
         ...(order.supplier?.name
@@ -1181,7 +1206,7 @@ export class ProcurementService {
       body:
         `Գնման պատվեր #${id} փակվել է չմատակարարված մնացորդով՝ ` +
         `${Math.round(shortfallValue).toLocaleString('hy-AM')} ֏ արժեքի ${shortLines.length} տող։`,
-      path: '/procurement',
+      path: warehouseLinks.order(id),
       details: [
         { label: 'Պատվեր', value: `#${id}` },
         ...(order.supplier?.name
@@ -1280,7 +1305,7 @@ export class ProcurementService {
       actorId: userId,
       title: 'Գնման պատվերը սպասում է հաստատման',
       body: `Գնման պատվեր #${id}${order.supplier?.name ? ` (${order.supplier.name})` : ''} սպասում է ձեր հաստատմանը՝ ${this.money(total)}։`,
-      path: '/procurement',
+      path: warehouseLinks.order(id),
       details: this.orderDetails(order, total),
     });
     return updated;
@@ -1332,7 +1357,7 @@ export class ProcurementService {
       actorId: userId,
       title: 'Գնման պատվերը հաստատվել է',
       body: `Գնման պատվեր #${id}-ը հաստատվել է և ուղարկվել ֆինանսական բաժին։`,
-      path: '/procurement',
+      path: warehouseLinks.order(id),
       details: this.orderDetails(order),
     });
     return sent;
@@ -1361,7 +1386,7 @@ export class ProcurementService {
       actorId: userId,
       title: 'Գնման պատվերը վերադարձվել է',
       body: `Գնման պատվեր #${id}-ը չի հաստատվել և վերադարձվել է նախագծի՝ ${reason.trim()}։`,
-      path: '/procurement',
+      path: warehouseLinks.order(id),
       details: [...this.orderDetails(order), { label: 'Պատճառ', value: reason.trim() }],
     });
     return updated;
@@ -1619,7 +1644,7 @@ export class ProcurementService {
       body: approved
         ? `${subject} հաստատվել է ֆինանսական բաժնի կողմից։`
         : `${subject} մերժվել է ֆինանսական բաժնի կողմից${reason?.trim() ? `՝ ${reason.trim()}` : ''}։`,
-      path: '/procurement',
+      path: warehouseLinks.order(order.id),
       details: [
         ...this.orderDetails(order),
         ...(!approved && reason?.trim() ? [{ label: 'Պատճառ', value: reason.trim() }] : []),

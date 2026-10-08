@@ -98,6 +98,19 @@ export const crmLinks = {
   requisition: (id: number) => `/purchase-requisitions?requisition=${id}`,
 };
 
+/**
+ * Where a record lives in the warehouse client (2026-10-08): the list page
+ * plus the record's id, which the page reads once and opens. Not for a
+ * deleted record — there is nothing to open, so those keep the bare path.
+ */
+export const warehouseLinks = {
+  order: (id: number) => `/procurement?order=${id}`,
+  reservation: (id: number) => `/reservations?reservation=${id}`,
+  stockRequest: (id: number) => `/stock-requests?request=${id}`,
+  maintenance: (id: number) => `/maintenance?maintenance=${id}`,
+  return: (id: number) => `/returns?return=${id}`,
+};
+
 export interface WarehouseNotification {
   /** Catalog key, `warehouse.<event>`. */
   type: string;

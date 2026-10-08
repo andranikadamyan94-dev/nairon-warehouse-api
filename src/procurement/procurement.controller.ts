@@ -83,6 +83,20 @@ export class ProcurementController {
     return this.procurementService.findOne(id);
   }
 
+  // A notification link opens the list where the order sits (2026-10-08).
+  @UseGuards(PermissionGuard)
+  @Permissions(
+    'view_procurement',
+    'manage_procurement',
+    'receive_procurement_alerts',
+    'approve_purchase_order',
+  )
+  @Get(':id/position')
+  @ApiOperation({ summary: 'List page holding a procurement order, under the given filters and sort' })
+  position(@Param('id', ParseIntPipe) id: number, @Query() query: any) {
+    return this.procurementService.positionOf(id, query);
+  }
+
   @UseGuards(PermissionGuard)
   @Permissions('manage_procurement')
   @Post()

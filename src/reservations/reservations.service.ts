@@ -34,7 +34,7 @@ const inTaskRole = (task: any, userId: number): boolean =>
   ['acceptors', 'executors', 'responsibles'].some((r) => (task?.[r] ?? []).some((u: any) => (u.id ?? u.userId) === userId));
 import { quantitiesOf } from './quantities';
 import { lockItem, lockReservation } from '../common/operations/row-lock';
-import { WAREHOUSE_TYPES, WarehouseNotificationsService, crmLinks } from '../common/notifications/notifications.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService, crmLinks, warehouseLinks } from '../common/notifications/notifications.service';
 
 import { AssetStatus } from '../common/enums/asset-status.enum';
 import { ItemType } from '../common/enums/item-type.enum';
@@ -357,6 +357,7 @@ export class ReservationsService {
    * Never throws; nobody on a lookup failure.
    */
   async requesterSide(reservation: {
+    id?: number | null;
     taskId?: number | null;
     objectId?: number | null;
     submissionId?: number | null;
@@ -370,7 +371,7 @@ export class ReservationsService {
         return {
           kind: 'task',
           userIds,
-          path: crmLinks.task(task?.projectId, reservation.taskId) ?? '/reservations',
+          path: crmLinks.task(task?.projectId, reservation.taskId) ?? this.reservationsPath([reservation.id]),
           label: task?.title ?? undefined,
         };
       }
@@ -398,7 +399,16 @@ export class ReservationsService {
     } catch (e: any) {
       this.logger.warn(`requester lookup failed: ${e?.message ?? e}`);
     }
-    return { kind: null, userIds: [], path: '/reservations' };
+    return { kind: null, userIds: [], path: this.reservationsPath([reservation.id]) };
+  }
+
+  /**
+   * The reservations page, opened on the reservation when the notice is about
+   * exactly one (2026-10-08); several rows or none → the bare list.
+   */
+  private reservationsPath(ids: (number | null | undefined)[]): string {
+    const unique = [...new Set(ids.filter((id): id is number => Number.isInteger(id) && (id as number) > 0))];
+    return unique.length === 1 ? warehouseLinks.reservation(unique[0]) : '/reservations';
   }
 
   /** CRM's task, or null — a notification never fails on CRM. */
@@ -461,7 +471,7 @@ export class ReservationsService {
         ...n,
         permissions: ['receive_reservation_alerts', 'manage_warehouse'],
         entityIds: owners.length ? owners : [null],
-        path: '/reservations',
+        path: this.reservationsPath(reservationIds),
       });
     } catch (e: any) {
       this.logger.warn(`warehouse-side notification failed: ${e?.message ?? e}`);
@@ -941,7 +951,7 @@ export class ReservationsService {
         actorId: performedBy ?? null,
         title: 'Ամրագրում սպասում է հաստատման',
         body: 'Ամրագրման հայտ է ստացվել ռեսուրսի համար, որը հասանելի չէ նշված ժամկետում և սպասում է ձեր որոշմանը։',
-        path: '/reservations',
+        path: this.reservationsPath((pendingRows.length ? pendingRows : created).map((c) => c.id)),
         details: [
           { label: 'Ռեսուրս(ներ)', value: names.join(', ') },
           ...(dto.projectName ? [{ label: 'Նախագիծ', value: dto.projectName }] : []),
@@ -2983,7 +2993,7 @@ export class ReservationsService {
         actorId: performedBy ?? null,
         title: short.length ? 'Օբյեկտի հայտ՝ սպասում է որոշման' : 'Նոր հայտ օբյեկտից',
         body: `${card.code} ${card.name}՝ ${created.map((c) => `${c.itemName} × ${c.quantity}`).join(', ')}`,
-        path: '/reservations',
+        path: this.reservationsPath(created.map((c) => c.id)),
         details: [
           { label: 'Օբյեկտ', value: `${card.code} ${card.name}` },
           ...(short.length ? [{ label: 'Պաշարը չի բավարարում', value: short.map((c) => c.itemName).join(', ') }] : []),

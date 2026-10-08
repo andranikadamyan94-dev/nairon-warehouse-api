@@ -88,10 +88,12 @@ describe('WarehouseNotificationsService · phase 2 audience rules', () => {
       actorId: 9,
       title: 't',
       body: 'b',
-      path: '/procurement',
+      path: '/procurement?order=3',
     });
     expect(users.getNotificationRecipients).toHaveBeenCalledWith(['receive_procurement_alerts'], [7]);
     expect(bodies.map((b) => b.userId).sort((a, b) => a - b)).toEqual([4, 5, 12]);
+    // the record's id survives the origin prefix (deep link, 2026-10-08)
+    expect(bodies[0].url).toBe('https://wh.test/procurement?order=3');
     // emailDefault=Y type: the email block rides along (hr-api decides per person).
     expect(bodies[0]).toMatchObject({ type: 'warehouse.order_finance_decided', email: { subject: 't' } });
   });
@@ -284,16 +286,17 @@ describe('procurement orders', () => {
       permissions: ['approve_purchase_order'],
       entityIds: [7],
       actorId: 11,
+      path: '/procurement?order=9',
     });
   });
 
   it('approved / sent back → the submitter, with the reason', async () => {
     const a = world({ status: ProcurementOrderStatus.PENDING_APPROVAL, submittedForApprovalBy: 12 });
     await a.svc.approve(9, 50);
-    expect(a.n.toUsers[0]).toMatchObject({ ids: [12], n: { type: 'warehouse.order_approval_decided', actorId: 50 } });
+    expect(a.n.toUsers[0]).toMatchObject({ ids: [12], n: { type: 'warehouse.order_approval_decided', actorId: 50, path: '/procurement?order=9' } });
     const r = world({ status: ProcurementOrderStatus.PENDING_APPROVAL, submittedForApprovalBy: 12 });
     await r.svc.rejectApproval(9, 50, 'Գինը բարձր է');
-    expect(r.n.toUsers[0].n).toMatchObject({ type: 'warehouse.order_approval_decided' });
+    expect(r.n.toUsers[0].n).toMatchObject({ type: 'warehouse.order_approval_decided', path: '/procurement?order=9' });
     expect(r.n.toUsers[0].n.details).toContainEqual({ label: 'Պատճառ', value: 'Գինը բարձր է' });
   });
 
@@ -306,6 +309,7 @@ describe('procurement orders', () => {
       permissions: ['receive_procurement_alerts', 'manage_warehouse'],
       entityIds: [7],
       userIds: [12],
+      path: '/procurement?order=9',
     });
     expect(n.sent[0].body).toContain('Բյուջե չկա');
     await svc.financeCallback(9, 'REJECTED', 'Բյուջե չկա');
@@ -429,6 +433,7 @@ describe('reservations', () => {
       permissions: ['receive_reservation_alerts', 'manage_warehouse'],
       entityIds: [7],
       actorId: 21,
+      path: '/reservations?reservation=1',
     });
     expect(byRequester.n.toUsers).toHaveLength(0);
   });
@@ -436,7 +441,10 @@ describe('reservations', () => {
   it('back to pending → the stock owner\'s reservation desk', async () => {
     const { svc, n } = world();
     await (svc as any).notifyWarehouseSide([1, 2], { type: WAREHOUSE_TYPES.reservationBackToPending, title: 't', body: 'b', actorId: 21 });
+    // several rows → the list; one row → that reservation
     expect(n.sent[0]).toMatchObject({ type: 'warehouse.reservation_back_to_pending', entityIds: [7, 7], actorId: 21, path: '/reservations' });
+    await (svc as any).notifyWarehouseSide([2], { type: WAREHOUSE_TYPES.reservationBackToPending, title: 't', body: 'b', actorId: 21 });
+    expect(n.sent[1]).toMatchObject({ path: '/reservations?reservation=2' });
   });
 });
 
@@ -461,9 +469,10 @@ describe('stock requests / transfers / returns', () => {
       permissions: ['manage_stock_transfers', 'manage_warehouse'],
       entityIds: [7],
       actorId: 14,
+      path: '/stock-requests?request=6',
     });
     await svc.reject(6, 40, 'Չկա');
-    expect(n.toUsers[0]).toMatchObject({ ids: [14], n: { type: 'warehouse.stock_request_decided', actorId: 40 } });
+    expect(n.toUsers[0]).toMatchObject({ ids: [14], n: { type: 'warehouse.stock_request_decided', actorId: 40, path: '/stock-requests?request=6' } });
   });
 
   it('TO_SUB transfer → the sub\'s responsible, not the sender, not somebody already told', async () => {
@@ -493,9 +502,10 @@ describe('stock requests / transfers / returns', () => {
       permissions: ['manage_resource_returns', 'manage_warehouse'],
       entityIds: [7],
       actorId: 21,
+      path: '/returns?return=1',
     });
     (svc as any).announceDecided({ id: 1, quantity: 2, requestedBy: 21, reservation: { item: { name: 'Ցեմենտ' } } }, 40, true);
-    expect(n.toUsers[0]).toMatchObject({ ids: [21], n: { type: 'warehouse.return_decided', actorId: 40 } });
+    expect(n.toUsers[0]).toMatchObject({ ids: [21], n: { type: 'warehouse.return_decided', actorId: 40, path: '/returns?return=1' } });
   });
 });
 
@@ -564,6 +574,7 @@ describe('assets / responsibility / maintenance', () => {
       permissions: ['manage_warehouse'],
       entityIds: [7],
       userIds: [12],
+      path: '/maintenance?maintenance=4',
     });
     expect(n.sent[0].body).toContain('Թանկ է');
   });

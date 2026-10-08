@@ -1,7 +1,7 @@
 import { settleStoredQty } from '../common/stored-quantity';
 import { roundQty } from '../common/quantity';
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
-import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService, warehouseLinks } from '../common/notifications/notifications.service';
 import { PrismaService } from 'prisma/prisma.service';
 import { CreateReturnDto } from './dto/create-return.dto';
 import { ResourceReturnStatus } from '../common/enums/resource-return-status.enum';
@@ -77,7 +77,7 @@ export class ResourceReturnsService {
         actorId,
         title: 'Նոր վերադարձ',
         body: `${item} × ${ret.quantity} վերադարձվում է պահեստ${ret.notes ? ` — ${ret.notes}` : ''}։`,
-        path: '/returns',
+        path: warehouseLinks.return(ret.id),
         details: [
           { label: 'Վերադարձ', value: `#${ret.id}` },
           { label: 'Ռեսուրս', value: item },
@@ -99,7 +99,7 @@ export class ResourceReturnsService {
       body: received
         ? `${item} × ${ret.quantity}՝ պահեստը ընդունել է վերադարձը։`
         : `${item} × ${ret.quantity}՝ վերադարձը չեղարկվել է պահեստի կողմից։`,
-      path: '/returns',
+      path: warehouseLinks.return(ret.id),
       details: [
         { label: 'Վերադարձ', value: `#${ret.id}` },
         { label: 'Ռեսուրս', value: item },
@@ -351,6 +351,33 @@ export class ResourceReturnsService {
       throw new NotFoundException('Առաջադրանքը չի գտնվել');
     }
     return visible;
+  }
+
+  /**
+   * One return, by the list's own rule (2026-10-08) — what a notification link
+   * opens. The person who asked for it is on its task (the notice goes to
+   * them); anyone else needs the list's right to see it. Not visible reads as
+   * not found.
+   */
+  async findOne(id: number, actor: WarehouseActor) {
+    const r = await this.prisma.resourceReturn.findUnique({ where: { id }, include: this.includeWithCatalogue });
+    if (!r) throw new NotFoundException('Վերադարձը չի գտնվել');
+    const taskId = (r.reservation as { taskId?: number | null }).taskId ?? null;
+    const onTheTask =
+      r.requestedBy === actor.userId || (taskId ? await this.reservations.isOnTask(taskId, actor.userId) : false);
+    const visible =
+      (onTheTask || this.mayListEverything(actor)) &&
+      mayRead(
+        actor,
+        {
+          requester: r.reservation.requesterWorkspaceId ?? null,
+          stockOwner:
+            (r.reservation as { item?: { category?: { entityId?: number } } }).item?.category?.entityId ?? null,
+        },
+        { onTheTask, warehouseViewer: isWarehouseViewer(actor) },
+      );
+    if (!visible) throw new NotFoundException('Վերադարձը չի գտնվել');
+    return r;
   }
 
   async receive(id: number, receivedBy?: number, actor?: WarehouseActor) {

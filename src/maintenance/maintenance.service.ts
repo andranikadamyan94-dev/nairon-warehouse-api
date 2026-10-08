@@ -4,7 +4,7 @@ import {
   NotFoundException,
   Optional,
 } from '@nestjs/common';
-import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService, warehouseLinks } from '../common/notifications/notifications.service';
 import { PrismaService } from 'prisma/prisma.service';
 import { AssetStatus } from '../common/enums/asset-status.enum';
 import { MaintenanceStatus } from '../common/enums/maintenance-status.enum';
@@ -264,7 +264,7 @@ export class MaintenanceService {
         body: approved
           ? `Սպասարկում #${id} (${what})՝ ֆինանսական բաժինը հաստատել է ծախսը։`
           : `Սպասարկում #${id} (${what})՝ ֆինանսական բաժինը մերժել է ծախսը${rejectionReason?.trim() ? `՝ ${rejectionReason.trim()}` : ''}։`,
-        path: '/maintenance',
+        path: warehouseLinks.maintenance(id),
         details: [
           { label: 'Սպասարկում', value: `#${id}` },
           { label: 'Ակտիվ', value: what },

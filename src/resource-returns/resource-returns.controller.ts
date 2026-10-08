@@ -72,6 +72,12 @@ export class ResourceReturnsController {
     );
   }
 
+  /** One return, by the list's rule — what a notification link opens (2026-10-08). */
+  @Get(':id')
+  findOne(@Param('id', ParseIntPipe) id: number, @Actor() actor: WarehouseActor) {
+    return this.service.findOne(id, actor);
+  }
+
   @Patch(':id/receive')
   @UseGuards(PermissionGuard)
   @Permissions('manage_resource_returns')

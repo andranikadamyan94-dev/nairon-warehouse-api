@@ -42,6 +42,13 @@ export class StockRequestsController {
     return this.stockRequestsService.findAll(query, req.user?.id, ctxOf(req));
   }
 
+  /** One request, by the list's rule — what a notification link opens. */
+  @Get(':id')
+  @ApiOperation({ summary: 'One stock request (same visibility as the list)' })
+  findOne(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.stockRequestsService.findOne(id, req.user?.id, ctxOf(req));
+  }
+
   /**
    * Asking twice asks main for twice the stock. With an `Idempotency-Key` a
    * repeated attempt replays the first instead of filing again — see
