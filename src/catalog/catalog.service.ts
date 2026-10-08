@@ -25,8 +25,12 @@ import {
   LineInput,
   PurchaseRequisitionsService,
 } from '../purchase-requisitions/purchase-requisitions.service';
-import { ReservationsService } from '../reservations/reservations.service';
+import { CrmTaskCard, ReservationsService } from '../reservations/reservations.service';
+import { isReservationReader } from '../reservations/two-party';
+import { decideWorkspace } from '../auth/actor';
 import { AssetsService } from '../assets/assets.service';
+import { CrmObjectCard, ObjectsService, fetchCrmObjectCard } from '../objects/objects.service';
+import { OBJECT_PAGE_RIGHT, holdsObjectRight, isResponsibleOf } from '../objects/object-page-rights';
 
 import {
   ApprovalRights,
@@ -49,12 +53,26 @@ import {
   stageOf,
   stillEditable,
   stockLineLabel,
+  DIRECT_SUPPLY_PURPOSE,
+  SUBMISSION_SOURCES,
+  SubmissionSource,
+  sourceOf,
 } from './catalog.rules';
 import { CheckoutDto } from './dto/checkout.dto';
-import { ApproveSubmissionDto, EditSubmissionDto } from './dto/submission-actions.dto';
+import { ApproveSubmissionDto, EditSubmissionDto, IssueLineDto } from './dto/submission-actions.dto';
 
 /** The queue's permission (D4). Granted per environment by the owner; auth-api seeds the name. */
 export const QUEUE_PERMISSION = 'view_catalog_requests';
+/**
+ * Who opens the queue (owner 2026-10-08): «Հաստատում» is the one surface for
+ * every request — the catalog desk AND the keepers (the former «Տրամադրում»
+ * tab's rights, the alert holders included, so a notice's link opens). What
+ * each may DO inside is decided per action: manage_reservations hands out,
+ * approve_purchase_requisition decides purchase lines, the desk reminds.
+ */
+export const QUEUE_VIEWER_PERMISSIONS = [QUEUE_PERMISSION, 'view_reservations', 'manage_reservations', 'receive_reservation_alerts'];
+/** Ordering from the catalog: the right that opens the warehouse app is enough (2026-10-08). */
+export const EMPLOYEE_PERMISSIONS = ['page_warehouse', 'view_warehouse'];
 
 const PAGE = 20;
 
@@ -98,11 +116,29 @@ export type SubmissionLine = {
   isAsset: boolean;
   /** Issued so far — for an asset line, the units already allocated. */
   issuedQuantity: number;
+  /** Confirmed received so far («Ստացել եմ»); what is still owed is issued − accepted (2026-10-08). */
+  acceptedQuantity: number;
   status: string;
   statusLabel: string;
   reservationId: number | null;
   requisitionId: number | null;
   requisitionLineId: number | null;
+  /**
+   * The keeper's view of a stock line (2026-10-08, the queue is the one
+   * surface): the pool it draws from (null = main), what is free there FOR
+   * THIS LINE, what is still to hand out, what went out and is not yet
+   * confirmed («Հետ վերցնել»'s window), the live allocations («Վերադարձնել»),
+   * the two histories, and the purchase requisition raised for a short line.
+   * Purchase/new lines carry the empty shape.
+   */
+  warehouse: { id: number; name: string } | null;
+  freeQuantity: number;
+  outstandingQuantity: number;
+  reclaimableQuantity: number;
+  allocations: { id: number; assetId: number | null; serialNumber: string | null; quantity: number }[];
+  allocationHistory: { at: string; action: string; by: Person; serialNumber: string | null; notes: string | null }[];
+  statusHistory: { at: string; from: string | null; to: string; by: Person; reason: string | null; previousQuantity: number | null; newQuantity: number | null }[];
+  requisition: { id: number; status: string } | null;
   /** Internal: where the line stands for the derivation. Not part of the contract. */
   stage: LineStage;
 };
@@ -119,6 +155,16 @@ export type SubmissionView = {
   projectId: number | null;
   projectName: string | null;
   costCenter: string | null;
+  /** Object requests (2026-10-08): the construction object this was filed for, with its label when CRM answers. */
+  objectId: number | null;
+  object: { id: number; code: string | null; name: string | null } | null;
+  /** Task requests (2026-10-08): the CRM task this was filed for, with its title and project when CRM answers. */
+  taskId: number | null;
+  task: { id: number; title: string | null; projectId: number | null } | null;
+  /** The warehouse supplied the object without a request («Պահեստից՝ առանց հայտի»): the keeper filed it, lines issued at once. */
+  direct: boolean;
+  /** Where it came from — the queue's «Աղբյուր» filter (2026-10-08): CATALOG / OBJECT / TASK / DIRECT. */
+  source: SubmissionSource;
   purpose: string;
   neededBy: string;
   comment: string | null;
@@ -173,6 +219,8 @@ export class CatalogService {
     @Optional() private readonly notifications?: WarehouseNotificationsService,
     /** The Reservations page's free-unit list, reused for the asset unit picker (REQ-1015). */
     @Optional() private readonly assets?: AssetsService,
+    /** CRM's object catalogue (cached), for the cart's object picker and the rows' labels (2026-10-08). */
+    @Optional() private readonly objects?: ObjectsService,
   ) {}
 
   // ── Notifications (phase 2, 2026-10-06) ───────────────────────────────────
@@ -193,6 +241,8 @@ export class CatalogService {
     stock: { itemName?: string; quantity: number; status: string }[],
     purchase: { itemName: string; quantity: number }[],
     requisition: any | null,
+    object: CrmObjectCard | null = null,
+    task: CrmTaskCard | null = null,
   ) {
     if (!this.notifications) return;
     void (async () => {
@@ -203,11 +253,13 @@ export class CatalogService {
         permissions: [QUEUE_PERMISSION],
         entityIds: [sub.entityId],
         actorId: sub.createdBy,
-        title: 'Նոր հարցում կատալոգից',
-        body: `Հարցում ${sub.number}՝ ${lines}${short.length ? `։ Պաշարը չի բավարարում՝ ${short.map((c) => c.itemName).join(', ')}` : ''}։`,
-        path: `/catalog/requests/${sub.id}`,
+        title: task ? 'Նոր հարցում առաջադրանքից' : object ? 'Նոր հարցում օբյեկտից' : 'Նոր հարցում կատալոգից',
+        body: `Հարցում ${sub.number}${task ? ` (առաջադրանք #${task.id})` : object ? ` (${object.name})` : ''}՝ ${lines}${short.length ? `։ Պաշարը չի բավարարում՝ ${short.map((c) => c.itemName).join(', ')}` : ''}։`,
+        path: `/goods-requests?tab=approve&id=${sub.id}`,
         details: [
           { label: 'Հարցում', value: sub.number },
+          ...(task ? [{ label: 'Առաջադրանք', value: `#${task.id} ${task.title}`.trim() }] : []),
+          ...(object ? [{ label: 'Օբյեկտ', value: object.name }] : []),
           { label: 'Նպատակ', value: sub.purpose },
           { label: 'Ապրանքներ', value: lines },
           ...(short.length ? [{ label: 'Պաշարը չի բավարարում', value: short.map((c) => `${c.itemName} × ${c.quantity}`).join(', ') }] : []),
@@ -247,7 +299,7 @@ export class CatalogService {
         actorId: actor.userId,
         title,
         body,
-        path: `/catalog/my-requests/${id}`,
+        path: `/goods-requests?tab=mine&id=${id}`,
         details: [
           { label: 'Հարցում', value: view.number },
           ...(n.text ? [{ label: n.kind === 'info' ? 'Հարց' : n.kind === 'rejected' ? 'Պատճառ' : 'Մեկնաբանություն', value: n.text }] : []),
@@ -464,6 +516,26 @@ export class CatalogService {
     this.assertNotPast(neededBy);
     const entityId = this.entityOf(actor);
 
+    // Task requests (2026-10-08): the task decides the project AND the object;
+    // CRM's card decides who may ask. A project or object that disagrees with
+    // the task's is refused before anything is written.
+    const task = dto.taskId != null ? await this.taskForCheckout(Number(dto.taskId), actor) : null;
+    if (task && dto.projectId != null && task.projectId != null && Number(dto.projectId) !== task.projectId) {
+      throw new BadRequestException('Նախագիծը չի համընկնում առաջադրանքի նախագծի հետ');
+    }
+    if (task && dto.objectId != null && task.objectId != null && Number(dto.objectId) !== task.objectId) {
+      throw new BadRequestException('Օբյեկտը չի համընկնում առաջադրանքի օբյեկտի հետ');
+    }
+    const taskProjectName = task?.projectId ? ((await this.crmProjectNames()).get(task.projectId) ?? dto.projectName?.trim() ?? null) : null;
+    // Object requests (2026-10-08): the object decides the project; CRM's card decides who may ask.
+    // A task's object is the task's own (no responsible-person rule): it rides on the task.
+    const object = !task && dto.objectId != null ? await this.objectForCheckout(Number(dto.objectId), actor) : null;
+    if (object && dto.projectId != null && object.projectId != null && Number(dto.projectId) !== object.projectId) {
+      throw new BadRequestException('Նախագիծը չի համընկնում օբյեկտի նախագծի հետ');
+    }
+    const projectId = task ? task.projectId : object ? object.projectId : (dto.projectId ?? null);
+    const projectName = task ? taskProjectName : object ? object.projectName : (dto.projectName?.trim() || null);
+
     // The same item twice in a cart is one ask.
     const merged = new Map<number, number>();
     for (const l of lines) merged.set(l.itemId, roundQty((merged.get(l.itemId) ?? 0) + l.quantity));
@@ -515,13 +587,15 @@ export class CatalogService {
         number,
         createdBy: userId,
         entityId,
-        projectId: dto.projectId ?? null,
-        projectName: dto.projectName?.trim() || null,
+        projectId,
+        projectName,
         costCenter: dto.costCenter?.trim() || null,
+        objectId: task ? (task.objectId ?? null) : object ? object.id : null,
+        taskId: task ? task.id : null,
         purpose,
         neededBy,
         comment: dto.comment?.trim() || null,
-      },
+      } as any,
     });
     const made: number[] = [];
     const madeStock: { itemName?: string; quantity: number; status: string }[] = [];
@@ -532,24 +606,38 @@ export class CatalogService {
           submissionId: sub.id,
           number,
           lines: split.stock,
-          projectId: dto.projectId ?? null,
-          projectName: dto.projectName?.trim() || null,
+          projectId,
+          projectName,
           entityId,
           purpose,
           neededBy,
           performedBy: userId,
           actor,
+          object,
+          task,
+          taskProjectName,
         });
         made.push(...created.map((c: any) => c.id));
         madeStock.push(...created.map((c: any) => ({ itemName: c.itemName, quantity: c.quantity, status: c.status })));
       }
       if (purchaseLines.length) {
+        // PurchaseRequisition has no object column: the object rides in the
+        // title and the comment; the submission keeps the id (decided 2026-10-08).
+        // Owner 2026-10-08: the object's NAME only, never its code.
+        // A task's requisition is bound to the task (#1894's taskId), so the
+        // task modal's purchase list shows it too; the task also rides in the
+        // title and the comment.
+        const objectNote = object ? `Օբյեկտ՝ ${object.name}` : null;
+        const taskNote = task ? `Առաջադրանք՝ #${task.id} ${task.title}`.trim() : null;
         requisition = await this.requisitions.create(
           {
-            title: `Կատալոգ · ${number}`,
-            comment: dto.comment?.trim() ? `${purpose}\n${dto.comment.trim()}` : purpose,
+            title: task
+              ? `Կատալոգ · ${number} · Առաջադրանք #${task.id}`
+              : object ? `Կատալոգ · ${number} · ${object.name}` : `Կատալոգ · ${number}`,
+            comment: [purpose, taskNote, objectNote, dto.comment?.trim() || null].filter(Boolean).join('\n'),
             periodEnd: neededBy.toISOString().slice(0, 10),
             lines: purchaseLines,
+            ...(task ? { taskId: task.id } : {}),
           },
           userId,
           entityId,
@@ -566,8 +654,192 @@ export class CatalogService {
       await this.prisma.catalogSubmission.delete({ where: { id: sub.id } }).catch(() => undefined);
       throw e;
     }
-    this.announceCheckout(sub, madeStock, purchaseLines.map((l) => ({ itemName: l.itemName ?? '', quantity: l.quantity })), requisition);
+    this.announceCheckout(sub, madeStock, purchaseLines.map((l) => ({ itemName: l.itemName ?? '', quantity: l.quantity })), requisition, object, task);
     return this.getOne(sub.id, actor);
+  }
+
+  // ── Construction objects (2026-10-08) ─────────────────────────────────────
+  //
+  // An object's responsible person orders for the object through the catalog
+  // (the CRM object page's «Հայտ կատալոգից» opens /catalog?objectId=). Who may
+  // ask is what createForObject asked: the responsible person as CRM's card
+  // names them — or manage_reservations / a super admin, who may also supply
+  // the object directly. The rows then follow the object rules.
+
+  /** May this actor order for any object they like (the desk), rather than only their own? */
+  private ordersForAnyObject(actor: WarehouseActor): boolean {
+    return actor.isSuperAdmin || (actor.permissionNames ?? []).includes('manage_reservations');
+  }
+
+  /** The object's fresh card, once the caller is allowed to order for it. */
+  private async objectForCheckout(objectId: number, actor: WarehouseActor): Promise<CrmObjectCard> {
+    if (!Number.isInteger(objectId) || objectId <= 0) throw new BadRequestException('Օբյեկտը սխալ է նշված');
+    const card = await fetchCrmObjectCard(objectId);
+    if (!card.responsibleId) {
+      throw new BadRequestException('Օբյեկտը պատասխանատու չունի — նախ նշանակեք պատասխանատու, որը կհաստատի ստացումը');
+    }
+    if (!this.ordersForAnyObject(actor) && !isResponsibleOf(card, actor.userId)) {
+      throw new ForbiddenException('Օբյեկտի համար պահեստային հայտ ներկայացնում է միայն օբյեկտի պատասխանատուն');
+    }
+    return card;
+  }
+
+  /**
+   * The objects this person may order for — the cart's «Օբյեկտ» picker: their
+   * own (responsible person), every object for the desk. CRM's cached
+   * catalogue; the checkout itself asks the fresh card.
+   */
+  async objectsForRequester(actor: WarehouseActor) {
+    if (!this.objects) return [];
+    // Past the 60 s cache: the CRM object page sends people here right after an object (or its responsible person) was set.
+    const all = await this.objects.crmObjectsFresh();
+    const mine = this.ordersForAnyObject(actor) ? all : all.filter((o) => o.responsibleId != null && o.responsibleId === actor.userId);
+    const projectName = mine.some((o) => o.projectId) ? await this.crmProjectNames() : new Map<number, string>();
+    return mine.map((o) => ({
+      id: o.id,
+      code: o.code,
+      name: o.name,
+      projectId: o.projectId ?? null,
+      projectName: o.projectId ? (projectName.get(o.projectId) ?? null) : null,
+      entityId: o.entityId ?? null,
+      status: o.status,
+    }));
+  }
+
+  /** CRM's project names (the list warehouses.service reads for its picker); unreachable → no names, the picker still works. */
+  private async crmProjectNames(): Promise<Map<number, string>> {
+    try {
+      const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+      const res = await fetch(`${crmUrl}/api/projects/internal`, { headers: { 'x-internal-secret': requireInternalSecret() } });
+      if (!res.ok) return new Map();
+      return new Map(((await res.json()) as { id: number; name: string }[]).map((p) => [p.id, p.name]));
+    } catch {
+      return new Map();
+    }
+  }
+
+  /**
+   * An object's catalog submissions — the CRM object page's «Պահեստային
+   * հայտեր» tab. Read as GET /reservations/object/:id is read (owner
+   * 2026-10-05): view_object_requests or a super admin, else the object's
+   * responsible person as CRM's card names them. No card, no object: 403.
+   */
+  async forObject(objectId: number, actor: WarehouseActor): Promise<SubmissionView[]> {
+    if (!holdsObjectRight(actor.permissionNames ?? [], actor.isSuperAdmin, OBJECT_PAGE_RIGHT.requests)) {
+      const card = await fetchCrmObjectCard(objectId).catch(() => null);
+      if (!isResponsibleOf(card, actor.userId)) throw new ForbiddenException('Օբյեկտի հայտերը դիտելու իրավունք չկա');
+    }
+    return this.views({ objectId }, actor.userId);
+  }
+
+  // ── Tasks (2026-10-08) ────────────────────────────────────────────────────
+  //
+  // A task's people order for the task through the catalog: the CRM task
+  // modal's «Հայտ կատալոգից» opens /catalog?taskId=, its «Ընտրել կատալոգից»
+  // drawer checks out from inside CRM. Who may ask is isOnTask's rule (owner
+  // 2026-10-08, kept): the task's creator or one of its role slots — or the
+  // desk (manage_reservations / a super admin). The task decides the project
+  // and the object; the rows are task rows (ReservationsService.createForCatalog).
+
+  /** The task's card, once the caller is allowed to order for it. */
+  private async taskForCheckout(taskId: number, actor: WarehouseActor): Promise<CrmTaskCard> {
+    if (!Number.isInteger(taskId) || taskId <= 0) throw new BadRequestException('Առաջադրանքը սխալ է նշված');
+    const card = await this.reservations.taskCard(taskId);
+    if (!this.ordersForAnyObject(actor) && !this.onTask(card, actor.userId)) {
+      throw new ForbiddenException('Առաջադրանքի համար պահեստային հայտ ներկայացնում են միայն առաջադրանքի մասնակիցները');
+    }
+    if (!card.projectId) throw new BadRequestException('Առաջադրանքի նախագիծը որոշված չէ — պահեստային հայտն արգելափակված է');
+    return card;
+  }
+
+  /** isOnTask's rule on a card already fetched: the creator or a role slot. */
+  private onTask(card: CrmTaskCard, userId: number): boolean {
+    return card.createdById === userId || card.people.includes(userId);
+  }
+
+  /**
+   * The task as the catalog chip shows it (/catalog?taskId=): title, project,
+   * object — answered only to someone who may order for it, so the chip never
+   * pins a task the checkout would refuse. Object label from CRM's catalogue.
+   */
+  async taskForRequester(taskId: number, actor: WarehouseActor) {
+    const card = await this.taskForCheckout(taskId, actor);
+    const [projectNames, objectOf] = await Promise.all([
+      card.projectId ? this.crmProjectNames() : Promise.resolve(new Map<number, string>()),
+      card.objectId ? this.objectLabels([card.objectId]) : Promise.resolve(new Map()),
+    ]);
+    const object = card.objectId ? (objectOf.get(card.objectId) ?? { id: card.objectId, code: null, name: null }) : null;
+    return {
+      id: card.id,
+      title: card.title,
+      projectId: card.projectId,
+      projectName: card.projectId ? (projectNames.get(card.projectId) ?? null) : null,
+      objectId: card.objectId,
+      objectName: object?.name ?? null,
+    };
+  }
+
+  /**
+   * A task's catalog submissions — the CRM task modal's warehouse block. Read
+   * as GET /reservations/task/:id is read: being on the task opens all of
+   * them; so does being warehouse staff (the reservation readers) or the queue;
+   * otherwise the task's own company may follow its orders. CRM unreachable
+   * is "not on it": nothing is guessed. Nobody with standing: 403.
+   */
+  async forTask(taskId: number, actor: WarehouseActor): Promise<SubmissionView[]> {
+    if (!(await this.mayReadTask(taskId, actor))) throw new ForbiddenException('Առաջադրանքի հայտերը դիտելու իրավունք չկա');
+    return this.views({ taskId }, actor.userId);
+  }
+
+  private async mayReadTask(taskId: number, actor: WarehouseActor): Promise<boolean> {
+    if (actor.isSuperAdmin || isReservationReader(actor) || this.isQueueViewer(actor)) return true;
+    if (await this.reservations.isOnTask(taskId, actor.userId)) return true;
+    try {
+      const card = await this.reservations.taskCard(taskId);
+      const requester = card.projectId ? await this.reservations.requesterOfProject(card.projectId) : null;
+      return requester != null && decideWorkspace(actor, requester).allowed;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Title + project of the tasks some submissions name — CRM's card, kept briefly; CRM down → ids only. */
+  private taskLabelCache = new Map<number, { at: number; value: { id: number; title: string | null; projectId: number | null } }>();
+  private static readonly TASK_LABEL_FRESH_MS = 120_000;
+  private async taskLabels(ids: number[]): Promise<Map<number, { id: number; title: string | null; projectId: number | null }>> {
+    const map = new Map<number, { id: number; title: string | null; projectId: number | null }>();
+    const now = Date.now();
+    const missing: number[] = [];
+    for (const id of ids) {
+      const hit = this.taskLabelCache.get(id);
+      if (hit && now - hit.at < CatalogService.TASK_LABEL_FRESH_MS) map.set(id, hit.value);
+      else missing.push(id);
+    }
+    // A few at a time: the queue may list hundreds of task submissions on one page.
+    for (let i = 0; i < missing.length; i += 8) {
+      await Promise.all(
+        missing.slice(i, i + 8).map(async (id) => {
+          const value = await this.reservations
+            .taskCard(id)
+            .then((c) => ({ id: c.id, title: c.title || null, projectId: c.projectId }))
+            .catch(() => ({ id, title: null, projectId: null }));
+          this.taskLabelCache.set(id, { at: Date.now(), value });
+          map.set(id, value);
+        }),
+      );
+    }
+    return map;
+  }
+
+  /** Code + name of the objects some submissions name; CRM down → ids only, the list still works. */
+  private async objectLabels(ids: number[]): Promise<Map<number, { id: number; code: string | null; name: string | null }>> {
+    const map = new Map<number, { id: number; code: string | null; name: string | null }>();
+    if (!ids.length || !this.objects) return map;
+    try {
+      const want = new Set(ids);
+      for (const o of await this.objects.crmObjects()) if (want.has(o.id)) map.set(o.id, { id: o.id, code: o.code, name: o.name });
+    } catch { /* labels are cosmetic */ }
+    return map;
   }
 
   private async nextNumber(): Promise<string> {
@@ -602,7 +874,7 @@ export class CatalogService {
       actorId: userId,
       title: 'Հարցմանը ֆայլ է կցվել',
       body: `Հարցում ${loaded.sub.number}՝ ներկայացնողը կցել է «${Buffer.from(file.originalname, 'latin1').toString('utf8')}» ֆայլը։`,
-      path: `/catalog/requests/${id}`,
+      path: `/goods-requests?tab=approve&id=${id}`,
       details: [{ label: 'Հարցում', value: loaded.sub.number }],
     });
     return this.getOne(id, actor);
@@ -610,7 +882,14 @@ export class CatalogService {
 
   // ── Reading ───────────────────────────────────────────────────────────────
 
+  /** May open the queue and read any submission: the desk, the keepers (QUEUE_VIEWER_PERMISSIONS), the warehouse super-permission. */
   isQueueViewer(actor: WarehouseActor): boolean {
+    const names = actor.permissionNames ?? [];
+    return actor.isSuperAdmin || names.includes('manage_warehouse') || QUEUE_VIEWER_PERMISSIONS.some((p) => names.includes(p));
+  }
+
+  /** The catalog desk proper (view_catalog_requests): the only ones who remind a submitter. */
+  private isDesk(actor: WarehouseActor): boolean {
     const names = actor.permissionNames ?? [];
     return actor.isSuperAdmin || names.includes(QUEUE_PERMISSION) || names.includes('manage_warehouse');
   }
@@ -629,11 +908,18 @@ export class CatalogService {
     return this.pageOf(this.filterViews(all, query), query);
   }
 
-  /** The admin queue («Կատալոգի հարցումներ»): every submission, filtered as the design filters. */
+  /**
+   * The queue («Ապրանքների հարցումներ» → «Հաստատում»): every submission —
+   * catalog, object, task, direct supply — filtered as the design filters,
+   * plus the keeper's two (2026-10-08): `warehouseId` ('main' or a sub's id:
+   * requests with a stock line drawn from that pool) and `source`.
+   */
   async queue(query: Record<string, string | undefined>, actor: WarehouseActor) {
     const where: any = {};
     if (Number(query.entityId) > 0) where.entityId = Number(query.entityId);
     if (Number(query.requesterId) > 0) where.createdBy = Number(query.requesterId);
+    if (query.warehouseId === 'main') where.reservations = { some: { warehouseId: null } };
+    else if (Number(query.warehouseId) > 0) where.reservations = { some: { warehouseId: Number(query.warehouseId) } };
     if (query.from || query.to) {
       where.createdAt = {
         ...(query.from ? { gte: this.dayOf(query.from, 'Ամսաթիվը սխալ է') } : {}),
@@ -653,12 +939,17 @@ export class CatalogService {
     let out = all;
     const status = query.status?.trim().toUpperCase();
     if (status && (SUBMISSION_STATUSES as string[]).includes(status)) out = out.filter((v) => v.status === status);
+    // «Տրված» (2026-10-08): the former «Հատկացումներ» page / «Տրամադրում» filter —
+    // requests with goods handed out and not yet confirmed received.
+    if (status === 'ISSUED') out = out.filter((v) => v.lines.some((l) => l.kind === 'STOCK' && l.reclaimableQuantity > 0));
+    const source = query.source?.trim().toUpperCase();
+    if (source && (SUBMISSION_SOURCES as string[]).includes(source)) out = out.filter((v) => v.source === source);
     const kind = query.kind?.trim().toUpperCase();
     if (kind && ['STOCK', 'PURCHASE', 'NEW'].includes(kind)) out = out.filter((v) => v.lines.some((l) => l.kind === kind));
     const q = query.q?.trim().toLowerCase();
     if (q) {
       out = out.filter((v) =>
-        [v.number, v.purpose, v.projectName, v.costCenter, `${v.requester.firstName} ${v.requester.lastName}`, ...v.lines.map((l) => l.itemName)]
+        [v.number, v.purpose, v.projectName, v.costCenter, v.object?.code, v.object?.name, `${v.requester.firstName} ${v.requester.lastName}`, ...v.lines.map((l) => l.itemName)]
           .filter(Boolean)
           .some((s) => String(s).toLowerCase().includes(q)),
       );
@@ -686,8 +977,11 @@ export class CatalogService {
         where: { submissionId: { in: ids } },
         include: {
           item: { select: { id: true, name: true, unit: true, code: true, variantLabel: true, type: true } },
-          allocations: { where: { releasedAt: null }, select: { quantity: true, assetId: true } },
+          // The keeper's view (2026-10-08): the live allocations by id and serial, both histories, the pool.
+          allocations: { where: { releasedAt: null }, select: { id: true, quantity: true, assetId: true, asset: { select: { serialNumber: true, name: true } } }, orderBy: { id: 'asc' } },
+          allocationHistory: { include: { asset: { select: { serialNumber: true, name: true } } }, orderBy: { performedAt: 'asc' } },
           statusHistory: { orderBy: { performedAt: 'asc' } },
+          warehouse: { select: { id: true, name: true } },
         },
         orderBy: { id: 'asc' },
       }),
@@ -725,13 +1019,19 @@ export class CatalogService {
       l.requisition?.rejectionRequestedBy,
       ...((l.requisition?.comments ?? []) as any[]).map((c) => c.userId),
       ...l.reservations.flatMap((r) => (r.statusHistory as any[]).map((h) => h.performedBy)),
+      ...l.reservations.flatMap((r) => ((r.allocationHistory ?? []) as any[]).map((h) => h.performedBy)),
       l.sub.lastReminderBy,
       ...this.remindersOf(l.sub).map((x) => x.by),
     ]);
-    const [free, users, dir] = await Promise.all([
+    const reservationIds = loaded.flatMap((l) => l.reservations.map((r) => r.id));
+    const [free, users, dir, objectOf, taskOf, pool, requisitionOf] = await Promise.all([
       this.freeStock(itemIds, { raw: true }),
       this.usersPrisma.getUsersByIds([...new Set(userIds.filter((x): x is number => typeof x === 'number'))]),
       this.directory(),
+      this.objectLabels([...new Set(loaded.map((l) => l.sub.objectId).filter((x): x is number => typeof x === 'number'))]),
+      this.taskLabels([...new Set(loaded.map((l) => l.sub.taskId).filter((x): x is number => typeof x === 'number'))]),
+      this.poolFree(loaded.flatMap((l) => l.reservations)),
+      this.lineRequisitions(reservationIds),
     ]);
     const userOf = new Map(users.map((u) => [u.id, u]));
     const person = (id: number | null | undefined): Person => {
@@ -739,14 +1039,101 @@ export class CatalogService {
       const u = userOf.get(id);
       return { id, name: u ? `${u.firstName} ${u.lastName}`.trim() : `#${id}` };
     };
-    return loaded.map((l) => this.toView(l, { free, userOf, person, dir, viewerId }));
+    return loaded.map((l) => this.toView(l, { free, userOf, person, dir, viewerId, objectOf, taskOf, pool, requisitionOf }));
   }
 
-  private lineOfReservation(r: any, free: Map<number, number>): SubmissionLine {
+  /**
+   * The purchase requisition raised for each short line, if any — the
+   * reservation service's own lookup (the old Reservations page's «Հայտ #N»
+   * chip). Specs that mock the service without it get none.
+   */
+  private async lineRequisitions(reservationIds: number[]): Promise<Map<number, { id: number; status: string }>> {
+    try {
+      const found = await (this.reservations as any).requisitionsFor?.(reservationIds);
+      return found instanceof Map ? found : new Map();
+    } catch {
+      return new Map();
+    }
+  }
+
+  /**
+   * What is free in a SUB-warehouse pool for the lines drawn from it (2026-10-08):
+   * the sub's shelf (or its AVAILABLE units with a responsible person) less the
+   * other live claims on that pool, raw — the line adds its own claim back, as
+   * the main-pool figure does. Main-pool rows keep freeStock's answer. The
+   * figure is for the keeper's eye; the hand-out itself re-measures under lock.
+   */
+  private async poolFree(rows: any[]): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    const pairs = new Map<string, { warehouseId: number; itemId: number; type: string | null }>();
+    for (const r of rows) if (r.warehouseId) pairs.set(`${r.warehouseId}:${r.itemId}`, { warehouseId: r.warehouseId, itemId: r.itemId, type: r.item?.type ?? null });
+    if (!pairs.size) return out;
+    try {
+      const list = [...pairs.values()];
+      const now = new Date();
+      const consumables = list.filter((p) => p.type !== ItemType.ASSET);
+      const assets = list.filter((p) => p.type === ItemType.ASSET);
+      const [stocks, units, claims] = await Promise.all([
+        consumables.length
+          ? this.prisma.warehouseStock.findMany({
+              where: { OR: consumables.map((p) => ({ warehouseId: p.warehouseId, itemId: p.itemId })) },
+              select: { warehouseId: true, itemId: true, quantity: true },
+            })
+          : [],
+        assets.length
+          ? this.prisma.asset.groupBy({
+              by: ['itemId', 'warehouseId'],
+              where: {
+                OR: assets.map((p) => ({ warehouseId: p.warehouseId, itemId: p.itemId })),
+                status: 'AVAILABLE',
+                custodies: { some: { releasedAt: null, holderType: 'USER' } },
+              },
+              _count: { id: true },
+            })
+          : [],
+        this.prisma.resourceReservation.findMany({
+          where: {
+            OR: list.map((p) => ({ warehouseId: p.warehouseId, itemId: p.itemId })),
+            status: { in: ['PENDING', 'APPROVED', 'PARTIALLY_ALLOCATED', 'ALLOCATED'] },
+            AND: [{ OR: [{ endDate: null }, { endDate: { gte: now } }] }],
+          },
+          select: { itemId: true, warehouseId: true, quantity: true, status: true },
+        }),
+      ]);
+      const shelf = new Map<string, number>();
+      for (const s of stocks as any[]) shelf.set(`${s.warehouseId}:${s.itemId}`, Number(s.quantity ?? 0));
+      for (const u of units as any[]) shelf.set(`${u.warehouseId}:${u.itemId}`, Number(u._count?.id ?? 0));
+      const claimed = new Map<string, number>();
+      for (const c of claims as any[]) {
+        const key = `${c.warehouseId}:${c.itemId}`;
+        const type = pairs.get(key)?.type;
+        const live = type === ItemType.ASSET ? ['PENDING', 'APPROVED', 'PARTIALLY_ALLOCATED', 'ALLOCATED'] : ['PENDING', 'APPROVED'];
+        if (live.includes(c.status)) claimed.set(key, (claimed.get(key) ?? 0) + Number(c.quantity ?? 0));
+      }
+      for (const key of pairs.keys()) out.set(key, roundQty((shelf.get(key) ?? 0) - (claimed.get(key) ?? 0)));
+    } catch (e: any) {
+      this.logger.warn(`pool free-stock lookup failed: ${e?.message ?? e}`);
+    }
+    return out;
+  }
+
+  private lineOfReservation(
+    r: any,
+    free: Map<number, number>,
+    extra: { pool?: Map<string, number>; person?: (id: number | null | undefined) => Person; requisition?: { id: number; status: string } | null } = {},
+  ): SubmissionLine {
     const issued = roundQty((r.allocations ?? []).reduce((s: number, a: any) => s + (a.quantity ?? 0), 0));
     const stage = stageOf('STOCK', r.status, { issued });
     const isAsset = r.item?.type === ItemType.ASSET;
-    const inStock = availableForLine(free.get(r.itemId) ?? 0, ownClaim({ ...r, type: r.item?.type }));
+    const type = r.item?.type;
+    // Main pool: freeStock's figure plus the line's own claim. A sub-warehouse
+    // row: that pool's figure (poolFree), its own claim added back the same way.
+    const inStock = r.warehouseId
+      ? availableForLine(extra.pool?.get(`${r.warehouseId}:${r.itemId}`) ?? 0, ownClaim({ ...r, warehouseId: null, type }))
+      : availableForLine(free.get(r.itemId) ?? 0, ownClaim({ ...r, type }));
+    const accepted = roundQty(Number(r.acceptedQuantity ?? 0));
+    const person = extra.person ?? (() => null);
+    const iso = (d: Date | string | null | undefined) => (d ? new Date(d).toISOString() : '');
     return {
       id: lineIdOf('STOCK', r.id),
       kind: 'STOCK',
@@ -760,14 +1147,54 @@ export class CatalogService {
       inStock,
       isAsset,
       issuedQuantity: issued,
+      acceptedQuantity: accepted,
       status: r.status,
       statusLabel: stockLineLabel(stage, inStock, r.quantity, reservationStatusLabel(r.status)),
       reservationId: r.id,
       requisitionId: null,
       requisitionLineId: null,
+      warehouse: r.warehouse ? { id: r.warehouse.id, name: r.warehouse.name } : null,
+      freeQuantity: inStock,
+      outstandingQuantity: roundQty(Math.max(0, Number(r.quantity) - issued)),
+      reclaimableQuantity: roundQty(Math.max(0, issued - accepted)),
+      allocations: ((r.allocations ?? []) as any[]).map((a) => ({
+        id: a.id,
+        assetId: a.assetId ?? null,
+        serialNumber: a.asset?.serialNumber ?? a.asset?.name ?? null,
+        quantity: Number(a.quantity ?? 1),
+      })),
+      allocationHistory: ((r.allocationHistory ?? []) as any[]).map((h) => ({
+        at: iso(h.performedAt),
+        action: h.action,
+        by: person(h.performedBy),
+        serialNumber: h.asset?.serialNumber ?? h.asset?.name ?? null,
+        notes: h.notes ?? null,
+      })),
+      statusHistory: ((r.statusHistory ?? []) as any[]).map((h) => ({
+        at: iso(h.performedAt),
+        from: h.fromStatus ?? null,
+        to: h.toStatus,
+        by: person(h.performedBy),
+        reason: h.reason ?? null,
+        previousQuantity: h.previousQuantity ?? null,
+        newQuantity: h.newQuantity ?? null,
+      })),
+      requisition: extra.requisition ?? null,
       stage,
     };
   }
+
+  /** The empty keeper's shape of a purchase/new line. */
+  private static readonly NO_STOCK_VIEW = {
+    warehouse: null,
+    freeQuantity: 0,
+    outstandingQuantity: 0,
+    reclaimableQuantity: 0,
+    allocations: [] as SubmissionLine['allocations'],
+    allocationHistory: [] as SubmissionLine['allocationHistory'],
+    statusHistory: [] as SubmissionLine['statusHistory'],
+    requisition: null,
+  };
 
   private lineOfRequisition(req: any, line: any, free: Map<number, number>): SubmissionLine {
     const kind: LineKind = line.itemId ? 'PURCHASE' : 'NEW';
@@ -785,28 +1212,44 @@ export class CatalogService {
       inStock: line.itemId ? Math.max(0, free.get(line.itemId) ?? 0) : null,
       isAsset: false,
       issuedQuantity: 0,
+      acceptedQuantity: 0,
       status: req.status,
       statusLabel: REQUISITION_LABELS[req.status] ?? req.status,
       reservationId: null,
       requisitionId: req.id,
       requisitionLineId: line.id,
+      ...CatalogService.NO_STOCK_VIEW,
       stage,
     };
   }
 
-  private linesOf(l: Loaded, free: Map<number, number>): SubmissionLine[] {
+  private linesOf(
+    l: Loaded,
+    free: Map<number, number>,
+    extra: { pool?: Map<string, number>; person?: (id: number | null | undefined) => Person; requisitionOf?: Map<number, { id: number; status: string }> } = {},
+  ): SubmissionLine[] {
     return [
-      ...l.reservations.map((r) => this.lineOfReservation(r, free)),
+      ...l.reservations.map((r) => this.lineOfReservation(r, free, { pool: extra.pool, person: extra.person, requisition: extra.requisitionOf?.get(r.id) ?? null })),
       ...((l.requisition?.lines ?? []) as any[]).map((line) => this.lineOfRequisition(l.requisition, line, free)),
     ];
   }
 
   private toView(
     l: Loaded,
-    ctx: { free: Map<number, number>; userOf: Map<number, any>; person: (id: number | null | undefined) => Person; dir: Directory; viewerId: number },
+    ctx: {
+      free: Map<number, number>;
+      userOf: Map<number, any>;
+      person: (id: number | null | undefined) => Person;
+      dir: Directory;
+      viewerId: number;
+      objectOf?: Map<number, { id: number; code: string | null; name: string | null }>;
+      taskOf?: Map<number, { id: number; title: string | null; projectId: number | null }>;
+      pool?: Map<string, number>;
+      requisitionOf?: Map<number, { id: number; status: string }>;
+    },
   ): SubmissionView {
     const { sub, requisition } = l;
-    const lines = this.linesOf(l, ctx.free);
+    const lines = this.linesOf(l, ctx.free, { pool: ctx.pool, person: ctx.person, requisitionOf: ctx.requisitionOf });
     const stages = lines.map((x) => x.stage);
     const cancelled = !!sub.cancelledAt;
     const infoOpen = !!sub.infoRequestAt;
@@ -885,6 +1328,10 @@ export class CatalogService {
     const requesterUser = ctx.userOf.get(sub.createdBy);
     const unit = ctx.dir.unitOf.get(sub.createdBy) ?? null;
     const entityName = (sub.entityId && ctx.dir.entityName.get(sub.entityId)) || (unit && ctx.dir.entityName.get(unit.entityId)) || null;
+    const direct =
+      !!sub.objectId &&
+      (sub.purpose === DIRECT_SUPPLY_PURPOSE ||
+        (l.reservations.length > 0 && l.reservations.every((r) => (r.statusHistory as any[])?.[0]?.reason === 'Պահեստը տրամադրում է օբյեկտին')));
 
     return {
       id: sub.id,
@@ -902,6 +1349,12 @@ export class CatalogService {
       projectId: sub.projectId ?? null,
       projectName: sub.projectName ?? null,
       costCenter: sub.costCenter ?? null,
+      objectId: sub.objectId ?? null,
+      object: sub.objectId ? (ctx.objectOf?.get(sub.objectId) ?? { id: sub.objectId, code: null, name: null }) : null,
+      taskId: sub.taskId ?? null,
+      task: sub.taskId ? (ctx.taskOf?.get(sub.taskId) ?? { id: sub.taskId, title: null, projectId: sub.projectId ?? null }) : null,
+      direct,
+      source: sourceOf({ taskId: sub.taskId, objectId: sub.objectId, direct }),
       purpose: sub.purpose,
       neededBy: new Date(sub.neededBy).toISOString().slice(0, 10),
       comment: sub.comment ?? null,
@@ -1079,7 +1532,7 @@ export class CatalogService {
         actorId: userId,
         title: 'Կատալոգի հարցումը խմբագրվել է',
         body: `Հարցում ${loaded.sub.number}՝ ներկայացնողը փոխել է՝ ${changed.join(', ')}։`,
-        path: `/catalog/requests/${id}`,
+        path: `/goods-requests?tab=approve&id=${id}`,
         details: [{ label: 'Հարցում', value: loaded.sub.number }, { label: 'Փոփոխություններ', value: changed.join(', ') }],
       });
     }
@@ -1112,7 +1565,7 @@ export class CatalogService {
       actorId: userId,
       title: 'Կատալոգի հարցումը չեղարկվել է',
       body: `Հարցում ${loaded.sub.number}՝ չեղարկվել է ներկայացնողի կողմից${withdrawn.length ? ` (${withdrawn.join(', ')})` : ''}։`,
-      path: `/catalog/requests/${id}`,
+      path: `/goods-requests?tab=approve&id=${id}`,
       details: [{ label: 'Հարցում', value: loaded.sub.number }],
     });
     return this.getOne(id, actor);
@@ -1151,7 +1604,7 @@ export class CatalogService {
       actorId: userId,
       title: 'Պատասխան կատալոգի հարցմանը',
       body: `Հարցում ${loaded.sub.number}՝ ներկայացնողը պատասխանել է՝ ${answer}`,
-      path: `/catalog/requests/${id}`,
+      path: `/goods-requests?tab=approve&id=${id}`,
       details: [
         { label: 'Հարցում', value: loaded.sub.number },
         ...(loaded.sub.infoRequestText ? [{ label: 'Հարց', value: loaded.sub.infoRequestText }] : []),
@@ -1397,6 +1850,54 @@ export class CatalogService {
     };
   }
 
+  /**
+   * «Տրամադրել» from the queue (owner 2026-10-08): the keeper hands out part
+   * or all of ONE stock line — the former Reservations page's «Տրամադրել»
+   * (consumable quantity, #1880 partial issuance) and unit picker, now inside
+   * the request. The reservation routes refuse catalog rows, so this is the
+   * way: manage_reservations (rights.stock), a live line with something still
+   * outstanding, the same service calls the catalog's approve makes —
+   * approveConsumable with the quantity, allocate with the picked units —
+   * quiet, and the submitter told once (ready to collect when it now is).
+   */
+  async issueLine(id: number, lineId: string, dto: IssueLineDto, userId: number, actor: WarehouseActor): Promise<SubmissionView> {
+    const loaded = await this.loadOne(id);
+    this.assertDecidable(loaded);
+    const rights = await this.rightsOf(actor, loaded);
+    if (!rights.stock) throw new ForbiddenException('Դուք պահեստից տրամադրելու թույլտվություն չունեք');
+    const parsed = parseLineId(lineId);
+    const r = parsed?.table === 'reservation' ? loaded.reservations.find((x) => x.id === parsed.rowId) : undefined;
+    if (!r) throw new NotFoundException(`Տողը չի գտնվել (${lineId})`);
+    const name = r.item?.name ?? `#${r.itemId}`;
+    if (!['PENDING', 'APPROVED', 'PARTIALLY_ALLOCATED'].includes(r.status)) {
+      throw new BadRequestException(`«${name}» — տողն արդեն «${reservationStatusLabel(r.status)}» կարգավիճակում է`);
+    }
+    const issued = roundQty(((r.allocations ?? []) as any[]).reduce((s: number, a: any) => s + Number(a.quantity ?? 0), 0));
+    const outstanding = roundQty(Number(r.quantity) - issued);
+    if (outstanding <= 0) throw new BadRequestException(`«${name}» — տողն արդեն ամբողջությամբ տրամադրված է`);
+
+    if (r.item?.type === ItemType.ASSET) {
+      const ids = (dto.assetIds ?? []).map(Number);
+      if (!ids.length) throw new BadRequestException(`«${name}» — ընտրեք տրվող միավորները`);
+      if (new Set(ids).size !== ids.length) throw new BadRequestException(`«${name}» — նույն միավորն ընտրված է երկու անգամ`);
+      if (ids.length > outstanding) throw new BadRequestException(`«${name}» — ընտրեք առավելագույնը ${outstanding} միավոր (ընտրված է ${ids.length})`);
+      const free = await this.freeUnitsOf(r);
+      const freeIds = new Set(free.map((a) => a.id));
+      const bad = ids.filter((x) => !freeIds.has(x));
+      if (bad.length) throw new BadRequestException(`«${name}» — միավոր #${bad.join(', #')}-ը ազատ չէ կամ այս ապրանքից չէ`);
+      await this.reservations.allocate({ allocations: ids.map((assetId) => ({ reservationId: r.id, assetId })) }, userId, { quiet: true });
+    } else {
+      const quantity = roundQty(Number(dto.quantity ?? outstanding));
+      if (!(quantity > 0)) throw new BadRequestException('Տրամադրվող քանակը պետք է լինի դրական թիվ');
+      if (quantity > outstanding) {
+        throw new BadRequestException(`Տրամադրվող քանակը (${quantity}) գերազանցում է չտրամադրված մնացորդը (${outstanding})`);
+      }
+      await this.reservations.approveConsumable(r.id, userId, quantity, actor, { quiet: true });
+    }
+    void this.announceToSubmitter(id, actor, { kind: 'approved' });
+    return this.getOne(id, actor);
+  }
+
   async reject(id: number, reason: string, userId: number, actor: WarehouseActor) {
     const loaded = await this.loadOne(id);
     this.assertDecidable(loaded);
@@ -1465,7 +1966,7 @@ export class CatalogService {
    * history («Հիշեցում ուղարկվեց»).
    */
   async remind(id: number, actor: WarehouseActor): Promise<SubmissionView> {
-    if (!this.isQueueViewer(actor)) throw new ForbiddenException('Հիշեցնել կարող է միայն կատալոգի հարցումների պատասխանատուն');
+    if (!this.isDesk(actor)) throw new ForbiddenException('Հիշեցնել կարող է միայն կատալոգի հարցումների պատասխանատուն');
     const loaded = await this.loadOne(id);
     this.assertDecidable(loaded);
     const sub = loaded.sub;
@@ -1501,7 +2002,7 @@ export class CatalogService {
       actorId: actor.userId,
       title: 'Հիշեցում՝ պատասխանեք կատալոգային հարցմանը',
       body: `Հարցում ${sub.number}՝ ${who} հիշեցնում է, որ սպասում են Ձեր պատասխանին ${asked}-ի հարցին՝ «${question}»։`,
-      path: `/catalog/my-requests/${id}`,
+      path: `/goods-requests?tab=mine&id=${id}`,
       details: [
         { label: 'Հարցում', value: sub.number },
         { label: 'Հարց', value: question },

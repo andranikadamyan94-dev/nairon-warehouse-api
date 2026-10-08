@@ -7,6 +7,7 @@ import { CategoriesModule } from '../categories/categories.module';
 import { FileService } from '../common/file.service';
 import { PurchaseRequisitionsModule } from '../purchase-requisitions/purchase-requisitions.module';
 import { ReservationsModule } from '../reservations/reservations.module';
+import { ObjectsModule } from '../objects/objects.module';
 
 /**
  * Warehouse «Կատալոգ» (2026-10-01): the employee-facing front door onto
@@ -14,7 +15,7 @@ import { ReservationsModule } from '../reservations/reservations.module';
  * re-implemented — the catalog only groups what they make.
  */
 @Module({
-  imports: [ReservationsModule, PurchaseRequisitionsModule, CategoriesModule, AssetsModule],
+  imports: [ReservationsModule, PurchaseRequisitionsModule, CategoriesModule, AssetsModule, ObjectsModule],
   controllers: [CatalogController],
   providers: [CatalogService, FileService],
 })

@@ -1070,6 +1070,19 @@ model CatalogSubmission {
   projectName String?
   costCenter  String?
 
+  /// Object requests through the catalog (2026-10-08): the CRM construction
+  /// object this checkout was filed for by its responsible person. Its
+  /// reservations carry the same objectId; projectId/projectName are the
+  /// object's project, filled server-side. NULL for every plain checkout.
+  objectId Int?
+
+  /// Task requests through the catalog (2026-10-08): the CRM task this
+  /// checkout was filed for by one of its people (creator or a role slot).
+  /// Its reservations carry the same taskId (and the task's object, so costs
+  /// land on the object); projectId/projectName are the task's project,
+  /// filled server-side. NULL for every plain checkout.
+  taskId Int?
+
   purpose  String
   neededBy DateTime @db.Date
   comment  String?
@@ -1098,6 +1111,8 @@ model CatalogSubmission {
   @@index([createdBy])
   @@index([entityId])
   @@index([createdAt])
+  @@index([objectId])
+  @@index([taskId])
 
   /// Project duplicate (2026-10-07): the crm ProjectCopyJob that made this row;
   /// null for every row made any other way. Idempotency and exact rollback.

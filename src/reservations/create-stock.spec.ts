@@ -117,6 +117,9 @@ function world(opts: {
     inventoryMovement: { create: refuse('inventoryMovement.create') },
     $queryRawUnsafe: async () => [{ id: 7 }],
     $executeRaw: refuse('$executeRaw'),
+    // 2026-10-08: the deprecated route files a submission for its rows (the REQ sequence + one row).
+    $queryRaw: async () => [{ nextval: 1070 }],
+    catalogSubmission: { create: async ({ data }: any) => ({ id: 1, number: data.number }) },
   };
   db.$transaction = async (fn: (tx: any) => Promise<unknown>) => {
     const snapshot = state.reservations.length;

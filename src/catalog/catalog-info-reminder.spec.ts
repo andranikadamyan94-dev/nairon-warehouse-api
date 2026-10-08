@@ -112,7 +112,7 @@ describe('POST /catalog/submissions/:id/remind', () => {
       userIds: [10],
       actorId: 30,
       title: 'Հիշեցում՝ պատասխանեք կատալոգային հարցմանը',
-      path: '/catalog/my-requests/4',
+      path: '/goods-requests?tab=mine&id=4',
     });
     expect(sent[0].permissions).toBeUndefined();
     expect(sent[0].body).toContain('REQ-1051');

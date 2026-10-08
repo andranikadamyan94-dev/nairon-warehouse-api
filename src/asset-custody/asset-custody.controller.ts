@@ -155,9 +155,9 @@ export class AssetCustodyController {
   }
 
   @Get('custody')
-  @ApiOperation({ summary: 'The custody register (filters: holderUserId, holderObjectId, assetId, open=1)' })
+  @ApiOperation({ summary: 'The custody register (filters: holderUserId, holderObjectId, assetId, itemId, open=1)' })
   async list(@Query() q: any, @Req() req: any) {
-    return this.service.list({ holderUserId: q.holderUserId ? Number(q.holderUserId) : undefined, holderObjectId: q.holderObjectId ? Number(q.holderObjectId) : undefined, assetId: q.assetId ? Number(q.assetId) : undefined, open: q.open === '1' || q.open === 'true' }, await this.actor(req));
+    return this.service.list({ holderUserId: q.holderUserId ? Number(q.holderUserId) : undefined, holderObjectId: q.holderObjectId ? Number(q.holderObjectId) : undefined, assetId: q.assetId ? Number(q.assetId) : undefined, itemId: q.itemId ? Number(q.itemId) : undefined, open: q.open === '1' || q.open === 'true' }, await this.actor(req));
   }
 
   @Get('custody/mine')

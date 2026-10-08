@@ -202,6 +202,36 @@ export function partitionByRights<T extends { id: string; kind: LineKind }>(
 // ── Numbers and ids ─────────────────────────────────────────────────────────
 
 /** REQ-1001, REQ-1002, … — zero-padded to four digits, wider once past 9999. */
+/**
+ * Object rows the warehouse makes without a checkout (owner 2026-10-08): the
+ * purpose of a submission wrapping a direct supply («Տրամադրել օբյեկտին»),
+ * and of one wrapping a request filed before the catalog (the data migration
+ * and the deprecated POST /reservations/object/:id).
+ */
+export const DIRECT_SUPPLY_PURPOSE = 'Պահեստից՝ առանց հայտի';
+export const LEGACY_OBJECT_PURPOSE = 'Պահեստային հայտ (մինչև կատալոգը)';
+/**
+ * Task rows made outside the catalog (owner 2026-10-08): the deprecated
+ * POST /reservations and PATCH /reservations/task/:id (the AI tools) file a
+ * submission too, so every reservation is in the one queue; its purpose.
+ */
+export const TASK_REQUEST_PURPOSE = 'Առաջադրանքի հայտ';
+
+/**
+ * Where a submission came from — the queue's «Աղբյուր» filter (owner
+ * 2026-10-08): the catalog, an object's request, a task's request, or the
+ * keeper's direct supply («Պահեստից՝ առանց հայտի»).
+ */
+export type SubmissionSource = 'CATALOG' | 'OBJECT' | 'TASK' | 'DIRECT';
+export const SUBMISSION_SOURCES: SubmissionSource[] = ['CATALOG', 'OBJECT', 'TASK', 'DIRECT'];
+
+export function sourceOf(sub: { taskId?: number | null; objectId?: number | null; direct?: boolean }): SubmissionSource {
+  if (sub.direct) return 'DIRECT';
+  if (sub.taskId) return 'TASK';
+  if (sub.objectId) return 'OBJECT';
+  return 'CATALOG';
+}
+
 export function formatSubmissionNumber(sequence: number | bigint): string {
   const n = typeof sequence === 'bigint' ? sequence : BigInt(Math.trunc(Number(sequence)));
   if (n < 0n) throw new RangeError('A submission number cannot be negative');

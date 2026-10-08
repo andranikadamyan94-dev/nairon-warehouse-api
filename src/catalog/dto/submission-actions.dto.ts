@@ -96,6 +96,27 @@ export class ApproveSubmissionDto {
   comment?: string;
 }
 
+/**
+ * PATCH /catalog/submissions/:id/lines/:lineId/issue — «Տրամադրել» from the
+ * queue (2026-10-08): a consumable line hands out `quantity` (part or all of
+ * what is outstanding; none = everything outstanding), an asset line hands
+ * out the picked `assetIds` (any number up to what is outstanding).
+ */
+export class IssueLineDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsNumber({}, { message: 'Տրամադրվող քանակը պետք է լինի թիվ' })
+  @IsPositive({ message: 'Տրամադրվող քանակը պետք է լինի դրական թիվ' })
+  quantity?: number;
+
+  @ApiPropertyOptional({ type: [Number] })
+  @IsOptional()
+  @IsArray({ message: 'Միավորների ցանկը սխալ է' })
+  @ArrayMaxSize(500, { message: 'Չափազանց շատ միավորներ' })
+  @IsInt({ each: true, message: 'Միավորը նշված չէ' })
+  assetIds?: number[];
+}
+
 /** PATCH /catalog/submissions/:id/reject — the reason is required. */
 export class RejectSubmissionDto {
   @ApiProperty()

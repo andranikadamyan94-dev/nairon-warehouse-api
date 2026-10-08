@@ -105,7 +105,10 @@ export const crmLinks = {
  */
 export const warehouseLinks = {
   order: (id: number) => `/procurement?order=${id}`,
-  reservation: (id: number) => `/reservations?reservation=${id}`,
+  // 2026-10-08: every reservation belongs to a request in «Ապրանքների հարցումներ» → «Հաստատում» (the one
+  // queue); the page resolves the reservation's submission and opens it with the line marked. The old
+  // /reservations paths and ?tab=issue redirect there too.
+  reservation: (id: number) => `/goods-requests?tab=approve&reservation=${id}`,
   stockRequest: (id: number) => `/stock-requests?request=${id}`,
   maintenance: (id: number) => `/maintenance?maintenance=${id}`,
   return: (id: number) => `/returns?return=${id}`,

@@ -80,6 +80,28 @@ export class CheckoutDto {
   @IsInt({ message: 'Նախագիծը սխալ է նշված' })
   projectId?: number;
 
+  /**
+   * Object requests (2026-10-08): the CRM construction object the goods are
+   * for. Only the object's responsible person (or manage_reservations / a
+   * super admin) may name it; the project is then the object's own.
+   */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt({ message: 'Օբյեկտը սխալ է նշված' })
+  objectId?: number;
+
+  /**
+   * Task requests (2026-10-08): the CRM task the goods are for. One of the
+   * task's people (its creator or a role slot) — or manage_reservations / a
+   * super admin — may name it; the project is then the task's own and the
+   * object the task's, so the rows follow the task rules (receipt by the task
+   * roles, the «Կատարված» gate, costs on the object).
+   */
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsInt({ message: 'Առաջադրանքը սխալ է նշված' })
+  taskId?: number;
+
   /** The project's name as the picker showed it — a label for the rows, never authority. */
   @ApiPropertyOptional()
   @IsOptional()

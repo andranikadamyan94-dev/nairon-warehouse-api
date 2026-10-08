@@ -74,6 +74,12 @@ export class ObjectsService {
     return this.crmObject(objectId);
   }
 
+  /** The whole list past the cache — for a picker that must show an object made a moment ago (catalog, 2026-10-08). */
+  async crmObjectsFresh() {
+    this.objectsCache = null;
+    return this.crmObjects();
+  }
+
   async crmObject(objectId: number) {
     let all = await this.crmObjects();
     let row = all.find((o) => o.id === objectId);

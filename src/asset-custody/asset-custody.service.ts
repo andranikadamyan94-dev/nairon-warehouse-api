@@ -135,7 +135,7 @@ export class AssetCustodyService {
         actorId: request.requestedBy ?? null,
         title: 'Նոր գույքի հայտ',
         body: `${who}՝ ${request.item.name} × ${request.quantity}${request.reason ? ` — ${request.reason}` : ''}`,
-        path: '/responsibilities?tab=requests',
+        path: '/assets?tab=custody&view=requests',
         details: [{ label: 'Հայտ', value: `#${request.id}` }],
       });
     })().catch((e: any) => this.logger.warn(`asset request notification failed: ${e?.message ?? e}`));
@@ -201,7 +201,7 @@ export class AssetCustodyService {
         actorId: actor.userId,
         title: 'Հաստատված գույքի հայտ՝ տրամադրման',
         body: `${who}՝ ${r.item.name} × ${r.quantity}`,
-        path: '/responsibilities?tab=requests',
+        path: '/assets?tab=custody&view=requests',
         details: [{ label: 'Հայտ', value: `#${r.id}` }],
       });
     }
@@ -249,7 +249,7 @@ export class AssetCustodyService {
         permissions: [r.status === 'APPROVED' ? PERM.issue : PERM.approve],
         entityIds: [r.entityId],
         excludeUserIds: named,
-        path: '/responsibilities?tab=requests',
+        path: '/assets?tab=custody&view=requests',
       });
     } catch (e: any) {
       this.logger.warn(`asset request cancel notification failed: ${e?.message ?? e}`);
@@ -394,6 +394,53 @@ export class AssetCustodyService {
       await tx.asset.update({ where: { id: assetId }, data: { responsibleUserId: null } });
       return row;
     });
+  }
+
+  /**
+   * Object requests through the catalog (owner 2026-10-08): a unit allocated to
+   * a reservation that carries an object goes to the OBJECT exactly as the old
+   * object asset-request hand-over put it there — holderType OBJECT, the
+   * object as origin, receipt still the responsible person's (accept()). The
+   * unit leaves whoever held it (a person's open custody is closed, as
+   * reassign closes the previous holder's) and the asset's responsible mirror
+   * is cleared. Runs inside the allocation's transaction; the caller has
+   * already checked the asset is AVAILABLE and of the reservation's item.
+   */
+  async handOverToObjectInTx(tx: any, input: { assetId: number; objectId: number; reservationId: number; assignedBy?: number | null; notes?: string | null }) {
+    await tx.assetCustody.updateMany({
+      where: { assetId: input.assetId, releasedAt: null },
+      data: { releasedAt: new Date(), releasedBy: input.assignedBy ?? null },
+    });
+    const row = await tx.assetCustody.create({
+      data: {
+        assetId: input.assetId,
+        holderType: 'OBJECT',
+        holderObjectId: input.objectId,
+        originObjectId: input.objectId,
+        via: 'TASK_ALLOCATION',
+        reservationId: input.reservationId,
+        assignedBy: input.assignedBy ?? null,
+        acceptedAt: null,
+        notes: input.notes?.trim() || null,
+      },
+    });
+    await tx.asset.update({ where: { id: input.assetId }, data: { responsibleUserId: null } });
+    return row;
+  }
+
+  /**
+   * The allocation that put a unit at an object is released (cancelled,
+   * reclaimed, reallocated, released by hand): the object's custody row closes
+   * the same way the old flow closed it — dated, by whom, condition OK. Rows
+   * the allocation did not make (a direct issue to the object) are left alone.
+   */
+  async closeObjectCustodyInTx(tx: any, input: { assetId: number | null | undefined; reservationId: number; releasedBy?: number | null }) {
+    if (!input.assetId) return 0;
+    const { count } = await tx.assetCustody.updateMany({
+      where: { assetId: input.assetId, reservationId: input.reservationId, holderType: 'OBJECT', releasedAt: null },
+      data: { releasedAt: new Date(), releasedBy: input.releasedBy ?? null, releaseCondition: 'OK' },
+    });
+    return count as number;
   }
 
   /**
@@ -579,7 +626,7 @@ export class AssetCustodyService {
         actorId: actor.userId,
         title: 'Գույքի ստացումը հաստատվել է',
         body: `${what}${holder ? ` — ${holder}` : ''} · ստացումը հաստատված է։`,
-        path: '/responsibilities',
+        path: '/assets?tab=custody',
       });
     }
     return accepted;
@@ -637,7 +684,7 @@ export class AssetCustodyService {
           actorId: actor.userId,
           title: damaged ? 'Գույքը վերադարձվել է վնասված' : 'Գույքը նշվել է կորած',
           body: `${what}${holder ? ` — ${holder}` : ''}${dto.notes?.trim() ? ` · ${dto.notes.trim()}` : ''}`,
-          path: '/responsibilities',
+          path: '/assets?tab=custody',
           details: [
             { label: 'Գույք', value: what },
             ...(holder ? [{ label: 'Պատասխանատու', value: holder }] : []),
@@ -669,7 +716,8 @@ export class AssetCustodyService {
    * (holderObjectId) follows GET /custody/object/:objectId's rule.
    */
   async list(
-    query: { holderUserId?: number; holderObjectId?: number; open?: boolean; assetId?: number },
+    // itemId (2026-10-08): every unit of one item — the «Ռեսուրսներ» history drawer's «Պատասխանատու» section.
+    query: { holderUserId?: number; holderObjectId?: number; open?: boolean; assetId?: number; itemId?: number },
     actor: Actor,
   ) {
     if (query.holderObjectId) {
@@ -682,6 +730,7 @@ export class AssetCustodyService {
         ...(query.holderUserId ? { holderUserId: query.holderUserId } : {}),
         ...(query.holderObjectId ? { holderObjectId: query.holderObjectId } : {}),
         ...(query.assetId ? { assetId: query.assetId } : {}),
+        ...(query.itemId ? { asset: { itemId: query.itemId } } : {}),
         ...(query.open ? { releasedAt: null } : {}),
       },
       include: custodyInclude,

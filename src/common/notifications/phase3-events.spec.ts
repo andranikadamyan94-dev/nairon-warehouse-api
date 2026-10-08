@@ -340,7 +340,7 @@ describe('items · changed while requests are open', () => {
     };
     const reservations: any = {
       requesterSide: jest.fn(async (r: any) =>
-        r.taskId ? { kind: 'task', userIds: [21, 22], path: '/assignments/3?task=5' } : { kind: 'catalog', userIds: [10], path: '/catalog/my-requests/4' }),
+        r.taskId ? { kind: 'task', userIds: [21, 22], path: '/assignments/3?task=5' } : { kind: 'catalog', userIds: [10], path: '/goods-requests?tab=mine&id=4' }),
     };
     const svc = new ItemsService(prisma, {} as any, { check: jest.fn() } as any, { of: jest.fn() } as any, {} as any, n as any, reservations);
     (svc as any).findOne = jest.fn(async () => ({ id: 3, name: 'Ցեմենտ', quantity: 10, unit: 'KG', catalogVisible: true, parentItemId: null, variants: [] }));
@@ -356,7 +356,7 @@ describe('items · changed while requests are open', () => {
     expect(body).toContain('քանակ՝ 10 → 4');
     expect(body).toContain('կգ → տոննա');
     expect(body).toContain('հանվել է կատալոգից');
-    expect(n.toUsers.find((t) => t.ids.includes(10))!.n.path).toBe('/catalog/my-requests/4');
+    expect(n.toUsers.find((t) => t.ids.includes(10))!.n.path).toBe('/goods-requests?tab=mine&id=4');
   });
 
   it('an edit of other fields tells nobody', async () => {
@@ -420,7 +420,7 @@ describe('reservations · partial acceptance / allocation changed / reactivated'
       permissions: ['receive_reservation_alerts', 'manage_warehouse'],
       entityIds: [7],
       actorId: 21,
-      path: '/reservations?reservation=1',
+      path: '/goods-requests?tab=approve&reservation=1',
     });
     expect(n.sent[0].body).toContain('Երկու պարկ պատռված էր');
     expect(n.sent[0].details).toContainEqual({ label: 'Պատճառ', value: 'Երկու պարկ պատռված էր' });
@@ -454,7 +454,7 @@ describe('reservations · partial acceptance / allocation changed / reactivated'
     (cat.svc as any).prisma.catalogSubmission = { findUnique: jest.fn(async () => ({ createdBy: 10, number: 'REQ-1004' })) };
     await cat.svc.uncancel(1, 40);
     await settle();
-    expect(cat.n.toUsers[0]).toMatchObject({ ids: [10], n: { type: 'warehouse.reservation_reactivated', path: '/catalog/my-requests/4' } });
+    expect(cat.n.toUsers[0]).toMatchObject({ ids: [10], n: { type: 'warehouse.reservation_reactivated', path: '/goods-requests?tab=mine&id=4' } });
   });
 });
 
@@ -494,7 +494,7 @@ describe('catalog · edited by the requester / file attached', () => {
       permissions: ['view_catalog_requests'],
       entityIds: [7],
       actorId: 10,
-      path: '/catalog/requests/4',
+      path: '/goods-requests?tab=approve&id=4',
     });
     expect(n.sent[0].body).toContain('Ցեմենտ: 5 → 7');
     expect(n.sent[0].body).toContain('նպատակ');
@@ -769,9 +769,9 @@ describe('daily reminders (09:00 Asia/Yerevan)', () => {
     await svc.run(now);
     expect(n.toUsers.map((t) => [t.ids[0], t.n.type, t.n.path])).toEqual([
       [21, 'warehouse.receipt_unconfirmed', '/profile?tab=assets'],
-      [40, 'warehouse.receipt_unconfirmed', '/responsibilities'],
+      [40, 'warehouse.receipt_unconfirmed', '/assets?tab=custody'],
       [31, 'warehouse.receipt_unconfirmed', '/objects/8'],
-      [40, 'warehouse.receipt_unconfirmed', '/responsibilities'],
+      [40, 'warehouse.receipt_unconfirmed', '/assets?tab=custody'],
     ]);
     const where = prisma.assetCustody.findMany.mock.calls[0][0].where;
     expect(where).toMatchObject({ releasedAt: null, acceptedAt: null });

@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Injectable,
   Logger,
+  Optional,
   NotFoundException,
 } from '@nestjs/common';
 
@@ -14,7 +15,7 @@ import { AvailabilityService } from '../availability/availability.service';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
 import { RESERVATION_STATUS_LABELS, reservationStatusLabel } from '../common/status-labels';
-import { WarehouseActor } from '../auth/actor';
+import { WarehouseActor, decideWorkspace } from '../auth/actor';
 import { holdsObjectRight, isResponsibleOf, OBJECT_PAGE_RIGHT } from '../objects/object-page-rights';
 import { CrmObjectCard, fetchCrmObjectCard } from '../objects/objects.service';
 import { ResourceWorkspaceService } from '../common/workspace/resource-workspace.service';
@@ -32,6 +33,20 @@ const UPDATE_REFUSED =
 /** Whether `userId` holds one of the task's three role slots, as CRM's internal route lists them. */
 const inTaskRole = (task: any, userId: number): boolean =>
   ['acceptors', 'executors', 'responsibles'].some((r) => (task?.[r] ?? []).some((u: any) => (u.id ?? u.userId) === userId));
+
+/**
+ * A CRM task as the catalog needs it (2026-10-08): whose project and object
+ * the rows follow, and who is on it — the creator and the three role slots
+ * (`people`), which is isOnTask's rule.
+ */
+export type CrmTaskCard = {
+  id: number;
+  title: string;
+  projectId: number | null;
+  objectId: number | null;
+  createdById: number | null;
+  people: number[];
+};
 import { quantitiesOf } from './quantities';
 import { lockItem, lockReservation } from '../common/operations/row-lock';
 import { WAREHOUSE_TYPES, WarehouseNotificationsService, crmLinks, warehouseLinks } from '../common/notifications/notifications.service';
@@ -51,6 +66,8 @@ import { AllocateReservationDto } from './dto/allocate-reservation.dto';
 import { ReallocateResourceDto } from './dto/reallocate-resource.dto';
 import { requireInternalSecret } from '../common/internal-headers';
 import { roundQty } from '../common/quantity';
+import { AssetCustodyService } from '../asset-custody/asset-custody.service';
+import { DIRECT_SUPPLY_PURPOSE, LEGACY_OBJECT_PURPOSE, TASK_REQUEST_PURPOSE, formatSubmissionNumber } from '../catalog/catalog.rules';
 
 const INACTIVE_STATUSES = [
   ResourceReservationStatus.CANCELLED,
@@ -169,6 +186,9 @@ function formatUTCasYerevan(d: Date): string {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
 }
 
+/** The reservation routes refuse to decide a catalog-origin row (2026-10-08). */
+export const CATALOG_DECISION_REFUSAL = 'Կատալոգի հարցումը հաստատվում է «Ապրանքների հարցումներ» → «Հաստատում» բաժնում';
+
 @Injectable()
 export class ReservationsService {
   private readonly logger = new Logger(ReservationsService.name);
@@ -181,7 +201,20 @@ export class ReservationsService {
     private readonly usersPrisma: UsersPrismaService,
     private readonly workspaces: ResourceWorkspaceService,
     private readonly requesters: RequesterWorkspaceService,
+    /** Object custody on equipment hand-out (owner 2026-10-08): a unit allocated to an object's row is handed to the object. */
+    @Optional() private readonly custody?: AssetCustodyService,
   ) {}
+
+  /** An object's own row (not a task's): its allocations hand units to the object and take them back. */
+  private isObjectRow(reservation: { taskId?: number | null; objectId?: number | null } | null | undefined): boolean {
+    return !!reservation && !reservation.taskId && !!(reservation as any).objectId;
+  }
+
+  /** An allocation of an object's row is released: the object's custody row the allocation made closes with it. */
+  private async closeObjectCustody(tx: any, reservation: { taskId?: number | null; objectId?: number | null } | null | undefined, alloc: { assetId?: number | null; reservationId: number }, releasedBy?: number | null) {
+    if (!this.custody || !this.isObjectRow(reservation) || !alloc.assetId) return;
+    await this.custody.closeObjectCustodyInTx(tx, { assetId: alloc.assetId, reservationId: alloc.reservationId, releasedBy: releasedBy ?? null });
+  }
 
   /**
    * Full event history for a task, independent of the `items` list.
@@ -392,7 +425,7 @@ export class ReservationsService {
         return {
           kind: 'catalog',
           userIds: sub?.createdBy ? [sub.createdBy] : [],
-          path: `/catalog/my-requests/${reservation.submissionId}`,
+          path: `/goods-requests?tab=mine&id=${reservation.submissionId}`,
           label: sub?.number ?? undefined,
         };
       }
@@ -403,12 +436,13 @@ export class ReservationsService {
   }
 
   /**
-   * The reservations page, opened on the reservation when the notice is about
-   * exactly one (2026-10-08); several rows or none → the bare list.
+   * The one queue («Ապրանքների հարցումներ» → «Հաստատում»), opened on the
+   * reservation's request when the notice is about exactly one row
+   * (2026-10-08); several rows or none → the bare queue.
    */
   private reservationsPath(ids: (number | null | undefined)[]): string {
     const unique = [...new Set(ids.filter((id): id is number => Number.isInteger(id) && (id as number) > 0))];
-    return unique.length === 1 ? warehouseLinks.reservation(unique[0]) : '/reservations';
+    return unique.length === 1 ? warehouseLinks.reservation(unique[0]) : '/goods-requests?tab=approve';
   }
 
   /** CRM's task, or null — a notification never fails on CRM. */
@@ -511,6 +545,12 @@ export class ReservationsService {
    */
   private async resolveTaskWarehouse(
     taskId?: number | null,
+    /**
+     * Catalog task rows (owner 2026-10-08): a project linked to no warehouse —
+     * or to an inactive one — is served by MAIN, exactly as object rows are
+     * ("project warehouse else main"). The manual route keeps refusing.
+     */
+    opts: { fallbackToMain?: boolean } = {},
   ): Promise<{ warehouseId: number | null; objectId: number | null }> {
     if (!taskId) return { warehouseId: null, objectId: null };
     // Binding freeze (2026-09-04): once a task has any non-cancelled
@@ -554,14 +594,16 @@ export class ReservationsService {
       );
     }
     const link = await this.linkForProject(crmUrl, projectId);
+    const objectId = task?.objectId ?? null;
     if (!link) {
+      if (opts.fallbackToMain) return { warehouseId: null, objectId };
       throw new BadRequestException(
         'Նախագիծը կապված չէ որևէ պահեստի հետ — դիմեք պահեստի պատասխանատուին',
       );
     }
-    const objectId = task?.objectId ?? null;
     if (link.warehouse.type === 'MAIN') return { warehouseId: null, objectId };
     if (link.warehouse.status !== 'ACTIVE') {
+      if (opts.fallbackToMain) return { warehouseId: null, objectId };
       throw new BadRequestException('Նախագծի պահեստը ակտիվ չէ');
     }
     return { warehouseId: link.warehouseId, objectId };
@@ -806,6 +848,17 @@ export class ReservationsService {
 
     const startDate = new Date(dto.startDate);
     const endDate = dto.endDate ? new Date(dto.endDate) : null;
+    // Owner 2026-10-08: every reservation belongs to a request in the one
+    // queue — this (deprecated, AI-tool) route files one submission per call.
+    const submissionInput = {
+      taskId: dto.taskId ?? null,
+      projectId: dto.projectId ?? null,
+      projectName: dto.projectName ?? null,
+      entityId: dto.entityId ?? requesterWorkspaceId,
+      objectId: objectId ?? null,
+      createdBy: performedBy,
+      neededBy: endDate ?? startDate,
+    };
 
     // Hourly slots only make sense for bounded reservations
     const hourlySlots = new Map<number, DaySlot[]>();
@@ -829,8 +882,10 @@ export class ReservationsService {
      * replay of a retried request, not somebody reconciling by hand.
      */
     const created: CreatedReservation[] = [];
+    let submission: { id: number; number: string } | null = null;
 
     await this.prisma.$transaction(async (tx) => {
+      submission = await this.fileTaskSubmission(tx, submissionInput);
       for (const resource of dto.resources) {
         const slots = hourlySlots.get(resource.itemId);
 
@@ -858,7 +913,8 @@ export class ReservationsService {
                 startDate: slot.startDate,
                 endDate: slot.endDate,
                 status,
-              },
+                submissionId: submission!.id,
+              } as any,
             });
             await this.writeStatusHistory(tx, row.id, null, status, { performedBy });
             created.push(await this.describeCreated(tx, row, requesterWorkspaceId));
@@ -919,7 +975,8 @@ export class ReservationsService {
               startDate,
               endDate,
               status,
-            },
+              submissionId: submission!.id,
+            } as any,
           });
           await this.writeStatusHistory(tx, row.id, null, status, { performedBy });
           created.push(await this.describeCreated(tx, row, requesterWorkspaceId));
@@ -972,7 +1029,61 @@ export class ReservationsService {
        * what having the id is for.
        */
       created,
+      /** The request these rows belong to in «Ապրանքների հարցումներ» (2026-10-08). */
+      submission: submission as { id: number; number: string } | null,
     };
+  }
+
+  /**
+   * The submission a task row made outside the catalog belongs to (owner
+   * 2026-10-08): the deprecated POST /reservations files one per call, and
+   * PATCH /reservations/task/:id attaches new rows to the task's open one
+   * (taskSubmissionFor) or files one. Purpose «Առաջադրանքի հայտ»; the REQ
+   * sequence the catalog uses; the task's project and object on it, so the
+   * queue's filters and the object page see it as any task request.
+   */
+  private async fileTaskSubmission(
+    tx: any,
+    input: {
+      taskId: number | null;
+      projectId: number | null;
+      projectName: string | null;
+      entityId: number | null;
+      objectId: number | null;
+      createdBy: number | undefined;
+      neededBy: Date;
+    },
+  ): Promise<{ id: number; number: string }> {
+    const seq = await tx.$queryRaw<{ nextval: bigint | number }[]>`SELECT nextval('"CatalogSubmission_number_seq"') AS nextval`;
+    const number = formatSubmissionNumber(seq[0].nextval);
+    return tx.catalogSubmission.create({
+      data: {
+        number,
+        createdBy: input.createdBy ?? 0,
+        entityId: input.entityId,
+        projectId: input.projectId,
+        projectName: input.projectName,
+        objectId: input.objectId,
+        taskId: input.taskId,
+        purpose: TASK_REQUEST_PURPOSE,
+        neededBy: new Date(`${getYerevanDateKey(input.neededBy)}T00:00:00.000Z`),
+      },
+      select: { id: true, number: true },
+    });
+  }
+
+  /** The task's open (not cancelled) request, newest first — else a new one. */
+  private async taskSubmissionFor(
+    tx: any,
+    taskId: number,
+    input: Parameters<ReservationsService['fileTaskSubmission']>[1],
+  ): Promise<{ id: number; number: string }> {
+    const open = await tx.catalogSubmission.findFirst({
+      where: { taskId, cancelledAt: null },
+      orderBy: { id: 'desc' },
+      select: { id: true, number: true },
+    });
+    return open ?? this.fileTaskSubmission(tx, { ...input, taskId });
   }
 
   /** One created row, as a caller needs to see it. */
@@ -1352,6 +1463,27 @@ export class ReservationsService {
     };
   }
 
+  // ─── catalog-origin rows (2026-10-08) ──────────────────────────────────────
+
+  /**
+   * A reservation the catalog filed (submissionId set) is decided in the
+   * catalog queue — «Ապրանքների հարցումներ» → «Հաստատում» — where the
+   * approver sees the whole request, picks asset units and the requester is
+   * told once. The reservation ROUTES (approve / reject / allocate) refuse
+   * such rows; the catalog service calls the same service methods directly,
+   * so its own flow is untouched. Post-issue actions (return, reclaim,
+   * release) stay open on the reservation routes.
+   */
+  async assertNotCatalogDecision(reservationIds: number[]): Promise<void> {
+    const ids = [...new Set(reservationIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))];
+    if (!ids.length) return;
+    const catalogRow = await this.prisma.resourceReservation.findFirst({
+      where: { id: { in: ids }, submissionId: { not: null } },
+      select: { id: true },
+    });
+    if (catalogRow) throw new BadRequestException(CATALOG_DECISION_REFUSAL);
+  }
+
   // ─── allocate (assets) ───────────────────────────────────────────────────────
 
   /** quiet: the catalog page tells its submitter itself, in one notice for the whole decision. */
@@ -1384,7 +1516,11 @@ export class ReservationsService {
         // a responsible person — the truck comes with its driver. The warehouse
         // assigns that person in the custody register first; the allocation
         // leaves the custody as it is.
-        await this.assertHasResponsiblePerson(tx, asset.id);
+        // An OBJECT's own row (owner 2026-10-08) takes the unit for the object
+        // instead: custody moves to the object below, as the old object
+        // asset-request hand-over did, and the responsible person confirms receipt.
+        const objectRow = this.isObjectRow(reservation);
+        if (!objectRow) await this.assertHasResponsiblePerson(tx, asset.id);
         if (asset.itemId !== reservation.itemId)
           throw new BadRequestException(`Ակտիվ #${asset.id}-ը ամրագրման ռեսուրսից չէ`);
         // #1989 workspaces: the asset must be homed in the reservation's pool.
@@ -1428,6 +1564,14 @@ export class ReservationsService {
         await tx.reservationAllocationHistory.create({
           data: { reservationId: allocation.reservationId, assetId: allocation.assetId, action: 'ALLOCATED', performedBy: allocatedBy },
         });
+        if (objectRow && this.custody) {
+          await this.custody.handOverToObjectInTx(tx, {
+            assetId: allocation.assetId,
+            objectId: (reservation as any).objectId,
+            reservationId: reservation.id,
+            assignedBy: allocatedBy ?? null,
+          });
+        }
 
         const updatedCount = await tx.reservationAllocation.count({
           where: { reservationId: allocation.reservationId, releasedAt: null },
@@ -1959,6 +2103,7 @@ export class ReservationsService {
             where: { id: alloc.id },
             data: { releasedAt: new Date() },
           });
+          await this.closeObjectCustody(tx, reservation, alloc, performedBy);
         } else {
           await tx.reservationAllocation.update({
             where: { id: alloc.id },
@@ -2059,6 +2204,39 @@ export class ReservationsService {
       keepType: true,
     }).catch(() => undefined);
     return outcome;
+  }
+
+  /**
+   * The task's card for the catalog (2026-10-08): id, title, project, object
+   * and who is on it — CRM's internal answer, trimmed. The one lookup behind
+   * CatalogService.taskForCheckout; a missing task is 404, CRM down a 400.
+   */
+  async taskCard(taskId: number): Promise<CrmTaskCard> {
+    if (!Number.isInteger(taskId) || taskId <= 0) throw new BadRequestException('Առաջադրանքը սխալ է նշված');
+    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+    let res: Response;
+    try {
+      res = await fetch(`${crmUrl}/api/project-tasks/${taskId}/internal`, { headers: { 'x-internal-secret': requireInternalSecret() } });
+    } catch {
+      throw new BadRequestException('Առաջադրանքի տվյալները հասանելի չեն (CRM) — փորձեք կրկին');
+    }
+    if (res.status === 404) throw new NotFoundException('Առաջադրանքը չի գտնվել');
+    if (!res.ok) throw new BadRequestException('Առաջադրանքի տվյալները հասանելի չեն (CRM) — փորձեք կրկին');
+    const task: any = await res.json();
+    const ids = (role: string) => ((task?.[role] ?? []) as any[]).map((u) => Number(u?.id ?? u?.userId)).filter((n) => n > 0);
+    return {
+      id: Number(task?.id ?? taskId),
+      title: String(task?.title ?? ''),
+      projectId: Number(task?.projectId ?? 0) || null,
+      objectId: Number(task?.objectId ?? 0) || null,
+      createdById: Number(task?.createdById ?? 0) || null,
+      people: [...new Set([...ids('executors'), ...ids('acceptors'), ...ids('responsibles')])],
+    };
+  }
+
+  /** The company a project's requests are filed by (the project's workspace), for the catalog's task read rule. */
+  requesterOfProject(projectId: number): Promise<number | null> {
+    return this.requesters.ofProject(projectId);
   }
 
   /** The task as CRM's internal route answers it — its project, its people.
@@ -2215,6 +2393,7 @@ export class ReservationsService {
             notes: reason ?? 'Չեղարկված',
           },
         });
+        await this.closeObjectCustody(tx, reservation, alloc, performedBy);
       }
 
       await tx.resourceReservation.update({
@@ -2356,6 +2535,7 @@ export class ReservationsService {
             notes: reason ?? 'Մերժված',
           },
         });
+        await this.closeObjectCustody(tx, reservation, alloc, performedBy);
       }
 
       await tx.resourceReservation.update({
@@ -2430,6 +2610,7 @@ export class ReservationsService {
           notes: reason,
         },
       });
+      await this.closeObjectCustody(tx, allocation.reservation, allocation, releasedBy);
 
       let newStatus: ResourceReservationStatus;
 
@@ -2538,7 +2719,8 @@ export class ReservationsService {
     const newAsset = await this.prisma.asset.findUnique({ where: { id: dto.newAssetId } });
     if (!newAsset) throw new NotFoundException('Նոր ակտիվը չի գտնվել');
     if (newAsset.status !== AssetStatus.AVAILABLE) throw new BadRequestException('Ակտիվը հասանելի չէ');
-    await this.assertHasResponsiblePerson(this.prisma, newAsset.id);
+    // An object's row takes the replacement for the object (custody moves below); a task's row needs its driver.
+    if (!this.isObjectRow(allocation.reservation)) await this.assertHasResponsiblePerson(this.prisma, newAsset.id);
     if (newAsset.itemId !== allocation.reservation.itemId)
       throw new BadRequestException('Ակտիվը ամրագրման ռեսուրսից չէ');
 
@@ -2582,6 +2764,7 @@ export class ReservationsService {
           notes: dto.reason,
         },
       });
+      await this.closeObjectCustody(tx, allocation.reservation, allocation, performedBy);
 
       const newAllocation = await tx.reservationAllocation.create({
         data: { reservationId: allocation.reservationId, assetId: dto.newAssetId, allocatedBy: performedBy },
@@ -2595,6 +2778,15 @@ export class ReservationsService {
           notes: dto.reason,
         },
       });
+      // An object's row: the replacement unit goes to the object as the first one did.
+      if (this.custody && this.isObjectRow(allocation.reservation)) {
+        await this.custody.handOverToObjectInTx(tx, {
+          assetId: dto.newAssetId,
+          objectId: (allocation.reservation as any).objectId,
+          reservationId: allocation.reservationId,
+          assignedBy: performedBy ?? null,
+        });
+      }
 
       return newAllocation;
     });
@@ -2653,6 +2845,10 @@ export class ReservationsService {
     // the old unlabeled default read as "all" while quietly filtering.
     if (query.status === 'ALL') {
       // no status filter
+    } else if (query.status === 'ISSUED') {
+      // «Տրված» (2026-10-08): what the former «Հատկացումներ» page listed — goods
+      // that went out, in full or in part.
+      where.status = { in: [ResourceReservationStatus.ALLOCATED, ResourceReservationStatus.PARTIALLY_ALLOCATED] };
     } else if (query.status) {
       where.status = query.status;
     } else {
@@ -2869,7 +3065,7 @@ export class ReservationsService {
    * line pointing at it, with its request's status, so the list can show
    * «Հայտ #N» next to a short reservation (2026-09-16).
    */
-  private async requisitionsFor(reservationIds: number[]): Promise<Map<number, { id: number; lineId: number; status: string }>> {
+  async requisitionsFor(reservationIds: number[]): Promise<Map<number, { id: number; lineId: number; status: string }>> {
     const map = new Map<number, { id: number; lineId: number; status: string }>();
     if (!reservationIds.length) return map;
     const lines = await (this.prisma as any).purchaseRequisitionLine.findMany({
@@ -2955,7 +3151,27 @@ export class ReservationsService {
     const endDate = new Date(startDate.getTime() + 365 * 86400000);
 
     const created: any[] = [];
+    let submission: { id: number; number: string } | null = null;
     await this.prisma.$transaction(async (tx) => {
+      // Owner 2026-10-08: every object row is a catalog submission's, so the
+      // object page reads one list — a direct supply («Պահեստից՝ առանց հայտի»,
+      // filed by the keeper) and a request through the deprecated route alike.
+      // The same REQ sequence the catalog uses; receipt per line as for any request.
+      const seq = await tx.$queryRaw<{ nextval: bigint | number }[]>`SELECT nextval('"CatalogSubmission_number_seq"') AS nextval`;
+      const number = formatSubmissionNumber(seq[0].nextval);
+      submission = await tx.catalogSubmission.create({
+        data: {
+          number,
+          createdBy: performedBy ?? card.responsibleId!,
+          entityId: card.entityId ?? requesterWorkspaceId,
+          projectId: card.projectId,
+          projectName: card.projectName,
+          objectId: card.id,
+          purpose: opts.asWarehouse ? DIRECT_SUPPLY_PURPOSE : opts.note?.trim() || LEGACY_OBJECT_PURPOSE,
+          neededBy: new Date(`${getYerevanDateKey(startDate)}T00:00:00.000Z`),
+        } as any,
+        select: { id: true, number: true },
+      });
       for (const l of lines) {
         const free = await this.stillReservable(tx, l.itemId, l.quantity, startDate, endDate, warehouseId);
         const status = free ? ResourceReservationStatus.APPROVED : ResourceReservationStatus.PENDING;
@@ -2974,7 +3190,8 @@ export class ReservationsService {
             startDate,
             endDate,
             status,
-          },
+            submissionId: submission!.id,
+          } as any,
         });
         await this.writeStatusHistory(tx, row.id, null, status, {
           performedBy,
@@ -3001,7 +3218,7 @@ export class ReservationsService {
         ],
       });
     }
-    return { created, warehouseId };
+    return { created, warehouseId, submission: submission as { id: number; number: string } | null };
   }
 
   /**
@@ -3030,7 +3247,7 @@ export class ReservationsService {
         throw new BadRequestException(`«${item.name}» — ${warehouseId ? 'նախագծային պահեստում' : 'պահեստում'} առկա է ${onShelf}, տրամադրվում է ${qty}`);
       }
     }
-    const { created } = await this.createForObject(objectId, resources, performedBy, { asWarehouse: true });
+    const { created, submission } = await this.createForObject(objectId, resources, performedBy, { asWarehouse: true });
     const issued: number[] = [];
     try {
       for (const row of created) {
@@ -3057,7 +3274,7 @@ export class ReservationsService {
       }
       throw e;
     }
-    return { issued: issued.length, reservationIds: issued };
+    return { issued: issued.length, reservationIds: issued, submissionId: submission?.id ?? null, number: submission?.number ?? null };
   }
 
   /**
@@ -3090,9 +3307,32 @@ export class ReservationsService {
     neededBy: Date;
     performedBy: number;
     actor?: WarehouseActor;
+    /**
+     * Object requests through the catalog (2026-10-08): the construction
+     * object's card, when the checkout was filed for one. The rows then follow
+     * the object rules createForObject set — stamped with the object, drawn
+     * from the project's warehouse (else main), the object's organization as
+     * requester — and receipt is the responsible person's (accept()). The
+     * catalog service has already checked that the caller may ask for it.
+     */
+    object?: CrmObjectCard | null;
+    /**
+     * Task requests through the catalog (2026-10-08): the CRM task's card,
+     * when the checkout was filed for one. The rows then ARE task rows — the
+     * same ones POST /reservations made: stamped with the task and its object,
+     * drawn from the project's warehouse (binding freeze and all, via
+     * resolveTaskWarehouse), the task's project as requester — so receipt stays
+     * with the task roles, the «Կատարված» gate sees them, and the object's
+     * ledger gets the issuance. The catalog service has already checked that
+     * the caller may ask for it and that the project is the task's.
+     */
+    task?: CrmTaskCard | null;
+    /** The task's project name (CRM), for the rows' label. */
+    taskProjectName?: string | null;
   }) {
     const lines = input.lines.map((l) => ({ itemId: Number(l.itemId), quantity: Number(l.quantity) }));
     if (!lines.length) return { created: [] as any[] };
+    if (input.task) return this.createForCatalogTask(input as typeof input & { task: CrmTaskCard }, lines);
     const items = await this.prisma.item.findMany({
       where: { id: { in: lines.map((l) => l.itemId) } },
       select: { id: true, type: true, name: true },
@@ -3103,23 +3343,37 @@ export class ReservationsService {
     }
     this.normalizeQuantities(lines, new Map(items.map((i) => [i.id, i.type])));
 
-    const requesterWorkspaceId =
-      (input.projectId ? await this.requesters.ofProject(input.projectId) : null) ?? input.entityId ?? null;
+    const object = input.object ?? null;
+    const requesterWorkspaceId = object
+      ? ((await this.requesters.forRequest({ projectId: object.projectId })) ?? object.entityId ?? input.entityId ?? null)
+      : ((input.projectId ? await this.requesters.ofProject(input.projectId) : null) ?? input.entityId ?? null);
     if (requesterWorkspaceId === null) {
-      throw new BadRequestException('Ընտրեք կազմակերպությունը, որի անունից ներկայացնում եք հարցումը');
+      throw new BadRequestException(object ? 'Պարզ չէ, թե որ կազմակերպությանն է օբյեկտը' : 'Ընտրեք կազմակերպությունը, որի անունից ներկայացնում եք հարցումը');
     }
-    if (input.actor) {
+    // An object's rows answer to the object's responsible person, not to the
+    // caller's workspace (createForObject never asked either).
+    if (input.actor && !object) {
       const verdict = decideOperation(
         input.actor,
         { requester: requesterWorkspaceId, stockOwner: null },
         'reservation.create',
       );
-      if (!verdict.allowed) {
+      /*
+       * 2026-10-08: a catalog order is the employee's own way in. The catalog
+       * route already demanded page_warehouse / view_warehouse; what is left to
+       * ask is that they order for a company they belong to. Without this an
+       * employee holding only the catalog right (no manage_reservations, no
+       * update_project_task, no task) could browse but every in-stock line
+       * failed here.
+       */
+      const ownCompany = decideWorkspace(input.actor, requesterWorkspaceId).allowed;
+      if (!verdict.allowed && !ownCompany) {
         throw new ForbiddenException('Այս նախագիծն այլ կազմակերպությանն է, դրա համար պահանջել հնարավոր չէ');
       }
     }
 
-    const warehouseId: number | null = null;
+    // Owner 2026-09-29 (objects): the project's warehouse, else main. Plain checkouts: main.
+    const warehouseId: number | null = object ? await this.objectWarehouse(object) : null;
     const startDate = new Date();
     // The day the goods are needed by, to its end (Yerevan); never before the start.
     const endOfDay = new Date(`${getYerevanDateKey(input.neededBy)}T23:59:59.999+04:00`);
@@ -3135,13 +3389,13 @@ export class ReservationsService {
             itemId: l.itemId,
             quantity: l.quantity,
             taskId: null,
-            projectId: input.projectId ?? null,
-            projectName: input.projectName ?? null,
-            entityId: input.entityId ?? null,
+            projectId: object ? object.projectId : (input.projectId ?? null),
+            projectName: object ? object.projectName : (input.projectName ?? null),
+            entityId: object ? (object.entityId ?? input.entityId ?? null) : (input.entityId ?? null),
             entityName: null,
             requesterWorkspaceId,
             warehouseId,
-            objectId: null,
+            objectId: object ? object.id : null,
             startDate,
             endDate,
             status,
@@ -3151,7 +3405,7 @@ export class ReservationsService {
         });
         await this.writeStatusHistory(tx, row.id, null, status, {
           performedBy: input.performedBy,
-          reason: `Կատալոգի հարցում ${input.number}`,
+          reason: object ? `Կատալոգի հարցում ${input.number} — օբյեկտ ${object.name}` : `Կատալոգի հարցում ${input.number}`,
         });
         created.push({ ...row, itemName: byId.get(l.itemId)?.name });
       }
@@ -3161,6 +3415,74 @@ export class ReservationsService {
     // reservation desk — the catalog checkout announces the whole submission,
     // shortage included, once, to the catalog desk (view_catalog_requests),
     // who are the ones who decide it (CatalogService.announceCheckout).
+    return { created };
+  }
+
+  /**
+   * The task branch of createForCatalog (2026-10-08): one row per stocked
+   * line, each a task row as POST /reservations would have made it. The
+   * requester is the task's project (the authority), the warehouse and object
+   * come from resolveTaskWarehouse (the task's binding, frozen once any row
+   * exists), and the status is APPROVED when the shelf covers the line,
+   * PENDING for the desk when it does not. Quiet, like the plain branch.
+   */
+  private async createForCatalogTask(
+    input: { submissionId: number; number: string; projectId: number | null; entityId: number | null; purpose: string; neededBy: Date; performedBy: number; task: CrmTaskCard; taskProjectName?: string | null },
+    lines: { itemId: number; quantity: number }[],
+  ) {
+    const task = input.task;
+    const items = await this.prisma.item.findMany({
+      where: { id: { in: lines.map((l) => l.itemId) } },
+      select: { id: true, type: true, name: true },
+    });
+    const byId = new Map(items.map((i) => [i.id, i]));
+    for (const l of lines) {
+      if (!byId.has(l.itemId)) throw new NotFoundException(`Ռեսուրս #${l.itemId}-ը չի գտնվել`);
+    }
+    this.normalizeQuantities(lines, new Map(items.map((i) => [i.id, i.type])));
+
+    const requesterWorkspaceId =
+      (await this.requesters.forRequest({ projectId: task.projectId, taskId: task.id })) ?? input.entityId ?? null;
+    if (requesterWorkspaceId === null) {
+      throw new BadRequestException('Պարզ չէ, թե որ կազմակերպությանն է առաջադրանքի նախագիծը');
+    }
+    // Owner 2026-10-08: project warehouse else MAIN — an unlinked project is not refused here.
+    const { warehouseId, objectId } = await this.resolveTaskWarehouse(task.id, { fallbackToMain: true });
+    const startDate = new Date();
+    const endOfDay = new Date(`${getYerevanDateKey(input.neededBy)}T23:59:59.999+04:00`);
+    const endDate = endOfDay.getTime() > startDate.getTime() + 3600_000 ? endOfDay : new Date(startDate.getTime() + 3600_000);
+
+    const created: any[] = [];
+    await this.prisma.$transaction(async (tx) => {
+      for (const l of lines) {
+        const free = await this.stillReservable(tx, l.itemId, l.quantity, startDate, endDate, warehouseId);
+        const status = free ? ResourceReservationStatus.APPROVED : ResourceReservationStatus.PENDING;
+        const row = await tx.resourceReservation.create({
+          data: {
+            itemId: l.itemId,
+            quantity: l.quantity,
+            taskId: task.id,
+            projectId: task.projectId ?? input.projectId ?? null,
+            projectName: input.taskProjectName ?? null,
+            entityId: input.entityId ?? null,
+            entityName: null,
+            requesterWorkspaceId,
+            warehouseId,
+            objectId: objectId ?? task.objectId ?? null,
+            startDate,
+            endDate,
+            status,
+            notes: input.purpose,
+            submissionId: input.submissionId,
+          } as any,
+        });
+        await this.writeStatusHistory(tx, row.id, null, status, {
+          performedBy: input.performedBy,
+          reason: `Կատալոգի հարցում ${input.number} — առաջադրանք #${task.id}`,
+        });
+        created.push({ ...row, itemName: byId.get(l.itemId)?.name });
+      }
+    });
     return { created };
   }
 
@@ -3179,6 +3501,9 @@ export class ReservationsService {
       const card = await this.objectCard(objectId).catch(() => null);
       if (!isResponsibleOf(card, actor.userId)) throw new ForbiddenException('Օբյեկտի հայտերը դիտելու իրավունք չկա');
     }
+    // 2026-10-08: the CRM object page reads the object's requests as catalog
+    // submissions (GET /catalog/submissions/object/:id); this row-level read
+    // stays for the AI tools (crm-object-tabs, warehouse-v2-receipts).
     const rows = await this.prisma.resourceReservation.findMany({
       where: { objectId, taskId: null },
       include: {
@@ -3251,6 +3576,13 @@ export class ReservationsService {
       stockOwnerWorkspaceId: reservation.item.category?.entityId ?? null,
       quantities: q,
       requisition: (await this.requisitionsFor([id])).get(id) ?? null,
+      /**
+       * The request this row belongs to in «Ապրանքների հարցումներ» → «Հաստատում»
+       * (2026-10-08): a ?reservation= link resolves it and opens the request
+       * with the line marked. Every row has one since the deprecated routes
+       * file submissions too; null only for a row older than the migrations.
+       */
+      submissionId: ((reservation as any).submissionId ?? null) as number | null,
     };
   }
 
@@ -3547,6 +3879,22 @@ export class ReservationsService {
         where: { taskId: taskId, status: { notIn: [ResourceReservationStatus.CANCELLED, ResourceReservationStatus.COMPLETED] } },
       });
 
+      // Owner 2026-10-08: a row this edit adds joins the task's open request
+      // in the one queue (or files one) — looked up once, only when needed.
+      let submission: { id: number; number: string } | null = null;
+      const submissionId = async () => {
+        submission ??= await this.taskSubmissionFor(tx, taskId, {
+          taskId,
+          projectId: dto.projectId ?? null,
+          projectName: dto.projectName ?? null,
+          entityId: dto.entityId ?? requesterWorkspaceId,
+          objectId: objectId ?? null,
+          createdBy: performedBy,
+          neededBy: endDate,
+        });
+        return submission.id;
+      };
+
       const incomingItemIds = dto.resources.map((x) => x.itemId);
 
       // Cancel rows for items completely removed from the task
@@ -3732,7 +4080,8 @@ export class ReservationsService {
                   startDate: slot.startDate,
                   endDate: slot.endDate,
                   status,
-                },
+                  submissionId: await submissionId(),
+                } as any,
               });
               await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Առաջադրանքը թարմացվել է', performedBy });
             }
@@ -3845,7 +4194,8 @@ export class ReservationsService {
                 startDate,
                 endDate,
                 status,
-              },
+                submissionId: await submissionId(),
+              } as any,
             });
             await this.writeStatusHistory(tx, created.id, null, status, { reason: 'Առաջադրանքը թարմացվել է', performedBy });
           }

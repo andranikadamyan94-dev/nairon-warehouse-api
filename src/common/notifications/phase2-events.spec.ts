@@ -353,7 +353,7 @@ describe('catalog', () => {
       permissions: ['view_catalog_requests'],
       entityIds: [7],
       actorId: 10,
-      path: '/catalog/requests/4',
+      path: '/goods-requests?tab=approve&id=4',
     });
     expect(n.sent[0].body).toContain('Պաշարը չի բավարարում՝ Ցեմենտ');
     expect(requisitions.announceSubmitted).toHaveBeenCalledWith(expect.objectContaining({ id: 8 }), 10, [70, 71]);
@@ -362,7 +362,7 @@ describe('catalog', () => {
   it('approved: ready to collect when every live line is ready, else decided; rejected / info → decided; never the approver', async () => {
     const ready = world({ status: 'READY' });
     await (ready.svc as any).announceToSubmitter(4, actor, { kind: 'approved' });
-    expect(ready.n.sent[0]).toMatchObject({ type: 'warehouse.catalog_ready', userIds: [10], actorId: 30, path: '/catalog/my-requests/4' });
+    expect(ready.n.sent[0]).toMatchObject({ type: 'warehouse.catalog_ready', userIds: [10], actorId: 30, path: '/goods-requests?tab=mine&id=4' });
     const progress = world({ status: 'IN_PROGRESS' });
     await (progress.svc as any).announceToSubmitter(4, actor, { kind: 'approved' });
     expect(progress.n.sent[0].type).toBe('warehouse.catalog_request_decided');
@@ -410,8 +410,8 @@ describe('reservations', () => {
     await (svc as any).notifyRequesters({ submissionId: 4 }, { title: 't', type: WAREHOUSE_TYPES.reservationApproved, text, ready: true });
     await (svc as any).notifyRequesters({ submissionId: 4 }, { title: 't', type: WAREHOUSE_TYPES.reservationRejected, text });
     expect(n.toUsers.map((u) => [u.ids, u.n.type, u.n.path])).toEqual([
-      [[10], 'warehouse.catalog_ready', '/catalog/my-requests/4'],
-      [[10], 'warehouse.catalog_request_decided', '/catalog/my-requests/4'],
+      [[10], 'warehouse.catalog_ready', '/goods-requests?tab=mine&id=4'],
+      [[10], 'warehouse.catalog_request_decided', '/goods-requests?tab=mine&id=4'],
     ]);
   });
 
@@ -433,7 +433,7 @@ describe('reservations', () => {
       permissions: ['receive_reservation_alerts', 'manage_warehouse'],
       entityIds: [7],
       actorId: 21,
-      path: '/reservations?reservation=1',
+      path: '/goods-requests?tab=approve&reservation=1',
     });
     expect(byRequester.n.toUsers).toHaveLength(0);
   });
@@ -442,9 +442,9 @@ describe('reservations', () => {
     const { svc, n } = world();
     await (svc as any).notifyWarehouseSide([1, 2], { type: WAREHOUSE_TYPES.reservationBackToPending, title: 't', body: 'b', actorId: 21 });
     // several rows → the list; one row → that reservation
-    expect(n.sent[0]).toMatchObject({ type: 'warehouse.reservation_back_to_pending', entityIds: [7, 7], actorId: 21, path: '/reservations' });
+    expect(n.sent[0]).toMatchObject({ type: 'warehouse.reservation_back_to_pending', entityIds: [7, 7], actorId: 21, path: '/goods-requests?tab=approve' });
     await (svc as any).notifyWarehouseSide([2], { type: WAREHOUSE_TYPES.reservationBackToPending, title: 't', body: 'b', actorId: 21 });
-    expect(n.sent[1]).toMatchObject({ path: '/reservations?reservation=2' });
+    expect(n.sent[1]).toMatchObject({ path: '/goods-requests?tab=approve&reservation=2' });
   });
 });
 

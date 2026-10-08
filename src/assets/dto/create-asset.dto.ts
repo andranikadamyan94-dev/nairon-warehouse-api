@@ -22,7 +22,11 @@ export class CreateAssetDto {
   @IsEnum(AssetStatus)
   status?: AssetStatus;
 
-  @ApiPropertyOptional()
+  /**
+   * Accepted for old clients and IGNORED (2026-10-08): the responsible person is
+   * the live custody holder, written by asset custody only (see AssetsService).
+   */
+  @ApiPropertyOptional({ deprecated: true, description: 'Ignored — custody is the only writer' })
   @IsOptional()
   @IsInt()
   responsibleUserId?: number;

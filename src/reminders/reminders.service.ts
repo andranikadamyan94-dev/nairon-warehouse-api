@@ -257,7 +257,7 @@ export class WarehouseRemindersService {
             type: WAREHOUSE_TYPES.receiptUnconfirmed,
             title: 'Գույքի ստացումը չի հաստատվել',
             body: `${what}՝ ձեր տրամադրած գույքի ստացումը ${RECEIPT_GRACE_DAYS} օրից ավելի է չի հաստատվել։`,
-            path: '/responsibilities',
+            path: '/assets?tab=custody',
             details,
           });
         }

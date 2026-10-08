@@ -157,7 +157,9 @@ export class ReservationsController {
   @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Allocate physical assets to reservations' })
   @ApiResponse({ status: 201 })
-  allocate(@Body() dto: AllocateReservationDto, @LoggedInUser('id') userId: number) {
+  async allocate(@Body() dto: AllocateReservationDto, @LoggedInUser('id') userId: number) {
+    // A catalog-origin row is decided in the catalog queue (2026-10-08).
+    await this.reservationsService.assertNotCatalogDecision((dto?.allocations ?? []).map((a) => a.reservationId));
     return this.reservationsService.allocate(dto, userId);
   }
 
@@ -186,12 +188,13 @@ export class ReservationsController {
   @UseGuards(PermissionGuard)
   @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Approve consumable reservation (optionally a partial quantity)' })
-  approveConsumable(
+  async approveConsumable(
     @Param('id') id: string,
     @LoggedInUser('id') userId: number,
     @Actor() actor: WarehouseActor,
     @Body() body?: { quantity?: number },
   ) {
+    await this.reservationsService.assertNotCatalogDecision([+id]);
     return this.reservationsService.approveConsumable(+id, userId, body?.quantity, actor);
   }
 
@@ -225,7 +228,13 @@ export class ReservationsController {
     return this.reservationsService.forObject(+objectId, actor);
   }
 
-  /** The object's responsible person asks for goods (only they — checked against CRM). */
+  /**
+   * The object's responsible person asks for goods (only they — checked against CRM).
+   *
+   * @deprecated 2026-10-08: object requests go through the catalog
+   * (POST /catalog/checkout with `objectId`); the CRM object page no longer
+   * calls this. Kept for one release for anything still pointing here.
+   */
   @Post('object/:objectId')
   @ApiOperation({ summary: 'Request goods for a construction object' })
   createForObject(
@@ -301,7 +310,8 @@ export class ReservationsController {
   @UseGuards(PermissionGuard)
   @Permissions('manage_reservations')
   @ApiOperation({ summary: 'Reject a pending reservation' })
-  reject(@Param('id') id: string, @Body() dto: ReasonDto, @Actor() actor: WarehouseActor) {
+  async reject(@Param('id') id: string, @Body() dto: ReasonDto, @Actor() actor: WarehouseActor) {
+    await this.reservationsService.assertNotCatalogDecision([+id]);
     return this.reservationsService.reject(+id, actor?.userId, dto.reason, actor);
   }
 

@@ -11,6 +11,18 @@ import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifi
 import { ObjectsService } from '../objects/objects.service';
 import { ReservationsService } from '../reservations/reservations.service';
 
+/**
+ * «Պատասխանատու» is the live custody holder (2026-10-08, owner): asset custody
+ * (asset-custody.service) is the only writer of the `responsibleUserId` mirror —
+ * it sets it on a hand-over and clears it on a return. The asset form shows the
+ * field read-only, and whatever a client still sends for it is dropped here.
+ */
+export function withoutResponsible<T extends { responsibleUserId?: unknown }>(dto: T): Omit<T, 'responsibleUserId'> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { responsibleUserId, ...rest } = dto ?? ({} as T);
+  return rest;
+}
+
 @Injectable()
 export class AssetsService {
   constructor(
@@ -104,7 +116,7 @@ export class AssetsService {
     await this.assertMayCreateFor(actor, dto.itemId);
 
     return this.prisma.asset.create({
-      data: dto,
+      data: withoutResponsible(dto),
     });
   }
 
@@ -177,7 +189,7 @@ export class AssetsService {
     const holders = retiring ? await this.holdersOf(id).catch(() => []) : [];
     const updated = await this.prisma.asset.update({
       where: { id },
-      data: dto,
+      data: withoutResponsible(dto),
     });
     if (retiring && before) {
       void this.announceStatusChanged(holders, before, 'նշվել է դուրս գրված (կորած / շահագործումից հանված)', actor?.userId ?? null);
