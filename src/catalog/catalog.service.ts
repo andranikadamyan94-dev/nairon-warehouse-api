@@ -707,7 +707,14 @@ export class CatalogService {
   }
 
   /** CRM's project names (the list warehouses.service reads for its picker); unreachable → no names, the picker still works. */
-  private async crmProjectNames(): Promise<Map<number, string>> {
+  private async crmProjectNames(wanted?: number): Promise<Map<number, string>> {
+    const names = await this.fetchCrmProjectNames();
+    // One retry when the project asked for is missing: a transient CRM miss must not leave a card without its project (2026-10-08).
+    if (wanted != null && !names.has(wanted)) return this.fetchCrmProjectNames();
+    return names;
+  }
+
+  private async fetchCrmProjectNames(): Promise<Map<number, string>> {
     try {
       const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
       const res = await fetch(`${crmUrl}/api/projects/internal`, { headers: { 'x-internal-secret': requireInternalSecret() } });
@@ -765,7 +772,7 @@ export class CatalogService {
   async taskForRequester(taskId: number, actor: WarehouseActor) {
     const card = await this.taskForCheckout(taskId, actor);
     const [projectNames, objectOf] = await Promise.all([
-      card.projectId ? this.crmProjectNames() : Promise.resolve(new Map<number, string>()),
+      card.projectId ? this.crmProjectNames(card.projectId) : Promise.resolve(new Map<number, string>()),
       card.objectId ? this.objectLabels([card.objectId]) : Promise.resolve(new Map()),
     ]);
     const object = card.objectId ? (objectOf.get(card.objectId) ?? { id: card.objectId, code: null, name: null }) : null;
@@ -838,6 +845,10 @@ export class CatalogService {
     try {
       const want = new Set(ids);
       for (const o of await this.objects.crmObjects()) if (want.has(o.id)) map.set(o.id, { id: o.id, code: o.code, name: o.name });
+      // An object made a moment ago postdates the 60 s catalogue — read past the cache once (2026-10-08).
+      if (map.size < want.size) {
+        for (const o of await this.objects.crmObjectsFresh()) if (want.has(o.id)) map.set(o.id, { id: o.id, code: o.code, name: o.name });
+      }
     } catch { /* labels are cosmetic */ }
     return map;
   }

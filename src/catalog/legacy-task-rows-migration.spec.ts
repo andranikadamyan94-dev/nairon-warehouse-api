@@ -160,7 +160,8 @@ describe('legacy task rows → catalog submissions (data migration)', () => {
     expect(await prisma.catalogSubmission.count({ where: { taskId: { in: [TASK_A, TASK_B] } } })).toBe(before + 4);
     const again = await prisma.resourceReservation.findMany({ where: { id: { in: made.reservations } } });
     for (const r of again) expect(r.submissionId).toBe(byId.get(r.id).submissionId);
-    expect(Number((await prisma.$queryRaw`SELECT last_value FROM "CatalogSubmission_number_seq"`)[0].last_value)).toBe(Number(next));
+    // >= : another DB-backed spec may draw from the same counter while this one runs.
+    expect(Number((await prisma.$queryRaw`SELECT last_value FROM "CatalogSubmission_number_seq"`)[0].last_value)).toBeGreaterThanOrEqual(Number(next));
   });
 
   itDb('nothing to wrap: the migration runs through on a table with no legacy rows', async () => {

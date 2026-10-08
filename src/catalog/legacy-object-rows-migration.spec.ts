@@ -105,7 +105,8 @@ describe('legacy object rows → catalog submissions (data migration)', () => {
     const orphan = await seed({}, null);
     const taskRow = await seed({ taskId: 1 }, { performedBy: 7, reason: 'task' });
 
-    const before = await prisma.catalogSubmission.count();
+    // Only this spec's object: other DB-backed specs and the local app may add submissions meanwhile.
+    const before = await prisma.catalogSubmission.count({ where: { objectId: OBJECT } });
     await migrate();
 
     const rows = await prisma.resourceReservation.findMany({ where: { id: { in: made.reservations } } });
@@ -114,7 +115,7 @@ describe('legacy object rows → catalog submissions (data migration)', () => {
     expect(byId.get(taskRow.id).submissionId).toBeNull();
     const subIds = [asked, plain, direct, noted, orphan].map((r) => byId.get(r.id).submissionId);
     expect(new Set(subIds).size).toBe(5);
-    expect(await prisma.catalogSubmission.count()).toBe(before + 5);
+    expect(await prisma.catalogSubmission.count({ where: { objectId: OBJECT } })).toBe(before + 5);
 
     const subs = await prisma.catalogSubmission.findMany({ where: { id: { in: subIds } } });
     const subOf = (r: any) => subs.find((s: any) => s.id === byId.get(r.id).submissionId);
@@ -142,14 +143,15 @@ describe('legacy object rows → catalog submissions (data migration)', () => {
 
     // Idempotent: a second run wraps nothing and renumbers nothing.
     await migrate();
-    expect(await prisma.catalogSubmission.count()).toBe(before + 5);
+    expect(await prisma.catalogSubmission.count({ where: { objectId: OBJECT } })).toBe(before + 5);
     const again = await prisma.resourceReservation.findMany({ where: { id: { in: made.reservations } } });
     for (const r of again) expect(r.submissionId).toBe(byId.get(r.id).submissionId);
     expect(Number((await prisma.$queryRaw`SELECT last_value FROM "CatalogSubmission_number_seq"`)[0].last_value)).toBe(Number(next));
   });
 
   itDb('nothing to wrap: the migration runs through on a table with no legacy rows', async () => {
-    const before = await prisma.catalogSubmission.count();
+    // Only this spec's object: other DB-backed specs and the local app may add submissions meanwhile.
+    const before = await prisma.catalogSubmission.count({ where: { objectId: OBJECT } });
     await migrate();
     expect(await prisma.catalogSubmission.count()).toBe(before);
   });

@@ -96,9 +96,13 @@ export class ObjectsService {
     return fetchCrmObjectCard(objectId);
   }
 
-  /** The CRM object list, for pickers/labels on the warehouse side. */
+  /**
+   * The CRM object list, for pickers/labels on the warehouse side. Read past
+   * the cache (2026-10-08): the direct-supply picker is opened right after an
+   * object was made on the CRM side, and a 60 s old list left it out.
+   */
   list() {
-    return this.crmObjects();
+    return this.crmObjectsFresh();
   }
 
   /** Cross-service delete guard: does the warehouse hold data for this object? */
