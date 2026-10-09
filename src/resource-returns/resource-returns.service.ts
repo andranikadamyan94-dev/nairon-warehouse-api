@@ -501,6 +501,23 @@ export class ResourceReturnsService {
         dataPatch = { quantity: newQuantity, acceptedQuantity: newAccepted, status: newStatus };
       }
 
+      // REQ-1105 (2026-10-09): the patch above was computed but never written
+      // since the 09-15 integration — a line kept its pre-return quantity, so
+      // «Ստացել եմ» on the request page sent the full count (400) while the
+      // task block, counting issued − accepted, offered nothing to confirm.
+      await tx.resourceReservation.update({ where: { id: ret.reservationId }, data: dataPatch });
+      if (newStatus !== prevStatus) {
+        await tx.reservationStatusHistory.create({
+          data: {
+            reservationId: ret.reservationId,
+            fromStatus: prevStatus,
+            toStatus: newStatus,
+            ...(isAsset ? {} : { previousQuantity: ret.reservation.quantity, newQuantity: dataPatch.quantity }),
+            performedBy: receivedBy ?? null,
+            reason: `Վերադարձ #${ret.id} ստացված — ${ret.quantity} հատ`,
+          },
+        });
+      }
 
       const rc = await this.reverseCostInfo(tx, {
         taskId: ret.reservation.taskId,
