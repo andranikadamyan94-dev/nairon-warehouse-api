@@ -706,6 +706,16 @@ export class CatalogService {
     }));
   }
 
+  /**
+   * The cart's project picker (GET /catalog/projects, 2026-10-09): id and name
+   * only, by name. CRM unreachable → an empty list, never an error, so the
+   * cart still files without a project.
+   */
+  async projectsForRequester(): Promise<{ id: number; name: string }[]> {
+    const names = await this.crmProjectNames();
+    return [...names].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, 'hy'));
+  }
+
   /** CRM's project names (the list warehouses.service reads for its picker); unreachable → no names, the picker still works. */
   private async crmProjectNames(wanted?: number): Promise<Map<number, string>> {
     const names = await this.fetchCrmProjectNames();

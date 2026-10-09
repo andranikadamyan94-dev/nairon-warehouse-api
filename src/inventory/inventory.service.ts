@@ -12,6 +12,7 @@ import { PrismaService } from 'prisma/prisma.service';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
 import { UsersPrismaService } from '../common/users-prisma.service';
 import { ObjectsService } from '../objects/objects.service';
+import { TaskLabelsService } from '../common/task-labels.service';
 import { WAREHOUSE_TYPES, WarehouseNotificationsService } from '../common/notifications/notifications.service';
 
 import { ItemType } from '../common/enums/item-type.enum';
@@ -29,6 +30,8 @@ export class InventoryService {
     private readonly usersPrisma: UsersPrismaService,
     private readonly objectsService: ObjectsService,
     @Optional() private readonly notifications?: WarehouseNotificationsService,
+    /** #2616 task titles for the movements list; last and optional so older constructions keep their shape. */
+    @Optional() private readonly taskLabels?: TaskLabelsService,
   ) {}
 
   private readonly logger = new Logger(InventoryService.name);
@@ -200,11 +203,17 @@ export class InventoryService {
       }
     }
 
+    // #2616: task titles for the report's «Առաջադրանք» column — one cached round of CRM cards per distinct task.
+    const taskIds = [...new Set(rows.map((r: any) => r.taskId).filter((x: unknown): x is number => typeof x === 'number'))];
+    const titleOf = taskIds.length && this.taskLabels ? await this.taskLabels.titles(taskIds) : new Map();
+
     return {
       data: rows.map((r: any) => ({
         ...r,
         performedByName: r.performedBy ? nameOf.get(r.performedBy) ?? null : null,
         objectLabel: r.objectId != null ? objOf.get(r.objectId) ?? `#${r.objectId}` : null,
+        taskTitle: r.taskId != null ? titleOf.get(r.taskId)?.title ?? null : null,
+        taskLabel: r.taskId != null ? TaskLabelsService.label(r.taskId, titleOf.get(r.taskId)?.title) : null,
       })),
       total,
       page,

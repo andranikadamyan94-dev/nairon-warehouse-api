@@ -14,10 +14,9 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
  * Create is a POST: name and code are the warehouse's required identity, so
  * they must be present and non-empty. `@Transform` trims first so a
  * whitespace-only value is rejected as empty (matches the service's own
- * `.trim()`). The remaining fields are optional. `status` is accepted but
- * ignored — the create form always sends it (default ACTIVE) and the global
- * pipe's forbidNonWhitelisted would otherwise 400 the whole request; the
- * service creates every new warehouse ACTIVE regardless.
+ * `.trim()`). The remaining fields are optional. `status` is honoured (#2338,
+ * 2026-10-09): a warehouse created as «Ոչ ակտիվ» is stored INACTIVE; absent,
+ * the service defaults to ACTIVE. (It used to be accepted and ignored.)
  */
 export class CreateWarehouseDto {
   @ApiProperty()
@@ -42,7 +41,7 @@ export class CreateWarehouseDto {
   @IsString()
   location?: string;
 
-  // Accepted-and-ignored: the form always posts it, the service forces ACTIVE.
+  /** The chosen status; ACTIVE when absent (#2338). */
   @ApiPropertyOptional({ enum: ['ACTIVE', 'INACTIVE'] })
   @IsOptional()
   @IsIn(['ACTIVE', 'INACTIVE'])

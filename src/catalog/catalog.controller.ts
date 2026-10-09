@@ -97,6 +97,20 @@ export class CatalogController {
 
   // ── Construction objects (2026-10-08) ─────────────────────────────────────
 
+  /**
+   * The CRM projects for the cart's «Նախագիծ / ծախսերի կենտրոն» picker
+   * (2026-10-09). Open to every requester, like /catalog/objects: the
+   * warehouse-side list (GET /warehouses/projects) needs manage_warehouses,
+   * which an ordinary requester does not hold — the select came back empty.
+   */
+  @Get('projects')
+  @UseGuards(PermissionGuard)
+  @Permissions(...EMPLOYEE_PERMISSIONS)
+  @ApiOperation({ summary: 'CRM projects a requester may file a catalog request under ({ id, name }[])' })
+  projects() {
+    return this.catalog.projectsForRequester();
+  }
+
   /** The objects this person may order for — the cart's «Օբյեկտ» picker. */
   @Get('objects')
   @UseGuards(PermissionGuard)

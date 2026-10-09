@@ -255,6 +255,8 @@ export class WarehousesService {
       code: string;
       responsibleId?: number;
       location?: string;
+      /** #2338 (2026-10-09): honoured — a warehouse may be created «Ոչ ակտիվ»; ACTIVE when absent. */
+      status?: 'ACTIVE' | 'INACTIVE';
       projectIds?: number[];
       employeeIds?: number[];
     },
@@ -271,6 +273,7 @@ export class WarehousesService {
         name: dto.name.trim(),
         code: dto.code.trim(),
         type: 'PROJECT',
+        status: dto.status ?? 'ACTIVE',
         responsibleId: dto.responsibleId ?? null,
         location: dto.location?.trim() || null,
         createdBy: createdBy ?? null,
@@ -286,6 +289,8 @@ export class WarehousesService {
       },
       include: { projects: true, employees: true },
     });
+    // `before` is null: the people named hear of their assignment only — no
+    // «closed» notice for a warehouse that starts INACTIVE (#2338).
     this.announceAssignment(
       created,
       null,
