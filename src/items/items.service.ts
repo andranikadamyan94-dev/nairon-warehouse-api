@@ -152,6 +152,9 @@ export class ItemsService {
           unit: dto.unit ?? null,
           quantity: dto.quantity ?? 0,
           minQuantity: dto.minQuantity ?? null,
+          // #2042: the cost movements freeze at write time. Left out here, it
+          // stayed NULL and every issue of the item cost 0 (WH08-01).
+          unitCost: dto.unitCost ?? null,
           notes: dto.notes ?? null,
           categoryId: dto.categoryId ?? null,
           // Catalog (2026-10-01)
@@ -375,6 +378,8 @@ export class ItemsService {
       ...(dto.type !== undefined ? { type: dto.type } : {}),
       ...(dto.unit !== undefined ? { unit: dto.unit ?? null } : {}),
       ...(dto.minQuantity !== undefined ? { minQuantity: dto.minQuantity } : {}),
+      // Null clears it, like minQuantity; already-written movements keep theirs.
+      ...(dto.unitCost !== undefined ? { unitCost: dto.unitCost } : {}),
       ...(dto.notes !== undefined ? { notes: dto.notes ?? null } : {}),
       ...(dto.categoryId !== undefined ? { categoryId: dto.categoryId ?? null } : {}),
       ...(dto.quantity !== undefined ? { quantity: dto.quantity } : {}),
