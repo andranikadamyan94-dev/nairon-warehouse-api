@@ -1,5 +1,16 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
+import { TtlCache } from './cache/ttl-cache';
+
+type AccessInfo = { isSuperAdmin: boolean; isGlobalSuperAdmin: boolean; permissionNames: string[]; readOnly: boolean };
+
+/**
+ * How long a person's resolved access is reused (performance audit 2026-10-13,
+ * owner-approved ≤ 20 s). Every request resolves it, and the polls alone made
+ * `UserRole`/`Role` the most-scanned tables in the users DB. The cost: a role
+ * granted or revoked in auth-api takes up to this long to reach the warehouse.
+ */
+export const ACCESS_INFO_TTL_MS = 20_000;
 
 // Small cap: this pool only runs point lookups against the shared users DB.
 // See prisma/prisma.service.ts — uncapped pools saturated prod Postgres (P2037).
@@ -113,11 +124,29 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
    * isSuperAdmin is derived from role level 0 via a LEFT JOIN, so a super-admin
    * role resolves even when it has no explicit permission grants.
    */
-  async getUserAccessInfo(
+  private readonly accessCache = new TtlCache<string, AccessInfo>(ACCESS_INFO_TTL_MS);
+  private readonly workspaceCache = new TtlCache<number, { wildcard: boolean; entityIds: number[] }>(
+    ACCESS_INFO_TTL_MS,
+  );
+
+  /**
+   * Cached per (userId, entityId) for ACCESS_INFO_TTL_MS, with concurrent
+   * misses sharing one query. Department-scoped asks are rare and stay uncached.
+   * Callers get a copy, so nothing can mutate the remembered answer.
+   */
+  async getUserAccessInfo(userId: number, entityId = 0, targetDepartmentIds?: number[]): Promise<AccessInfo> {
+    if (targetDepartmentIds !== undefined) return this.loadUserAccessInfo(userId, entityId, targetDepartmentIds);
+    const info = await this.accessCache.get(`${userId}:${entityId}`, () =>
+      this.loadUserAccessInfo(userId, entityId),
+    );
+    return { ...info, permissionNames: [...info.permissionNames] };
+  }
+
+  private async loadUserAccessInfo(
     userId: number,
     entityId = 0,
     targetDepartmentIds?: number[],
-  ): Promise<{ isSuperAdmin: boolean; isGlobalSuperAdmin: boolean; permissionNames: string[]; readOnly: boolean }> {
+  ): Promise<AccessInfo> {
     // Context-aware resolution. An assignment applies when its entity matches
     // the entity in play (assignment entityId 0 = every entity; request
     // entityId 0 = no entity context, everything counts) and, for
@@ -193,6 +222,12 @@ export class UsersPrismaService extends PrismaClient implements OnModuleInit, On
    * not re-checked; AuthGuard has already refused a deactivated caller.
    */
   async getUserWorkspaces(userId: number): Promise<{ wildcard: boolean; entityIds: number[] }> {
+    // Same TTL as access info: both are read on every request (AuthGuard).
+    const ws = await this.workspaceCache.get(userId, () => this.loadUserWorkspaces(userId));
+    return { wildcard: ws.wildcard, entityIds: [...ws.entityIds] };
+  }
+
+  private async loadUserWorkspaces(userId: number): Promise<{ wildcard: boolean; entityIds: number[] }> {
     const rows = await this.$queryRaw<{ entityId: number }[]>`
       SELECT DISTINCT ur."entityId" AS "entityId"
       FROM "UserRole" ur

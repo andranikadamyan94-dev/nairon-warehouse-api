@@ -68,6 +68,9 @@ async function bootstrap() {
     // request never reaches a route — crm-api, hr-api and auth-api were
     // already fixed for this, this one was missed.
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Entity-ID', 'Idempotency-Key'],
+    // Browsers may reuse a preflight for 2 h (Chrome caps at 2 h). Without it
+    // ~40 % of all prod requests were OPTIONS (performance audit 2026-10-13).
+    maxAge: 7200,
     credentials: true,
   });
 
