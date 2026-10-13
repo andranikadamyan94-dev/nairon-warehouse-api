@@ -1,4 +1,4 @@
-import { requireInternalSecret } from '../common/internal-headers';
+import { CrmProjectRow, crmProjects } from '../common/crm/crm-projects';
 import {
   BadRequestException,
   ForbiddenException,
@@ -75,10 +75,6 @@ export class WarehousesService {
     }
   }
 
-  private crmUrl() {
-    return process.env.CRM_API_URL || 'http://localhost:3003';
-  }
-
   /**
    * Membership scoping (#1989 wave 2). 'all' for superadmins and warehouse
    * admins; otherwise the warehouses the user belongs to (employee or
@@ -144,13 +140,13 @@ export class WarehousesService {
    * used to be per backlog). `parentId` lets the client show a sub-project's path.
    */
   async listProjects() {
-    const res = await fetch(`${this.crmUrl()}/api/projects/internal`, {
-      headers: { 'x-internal-secret': requireInternalSecret() },
-    });
-    if (!res.ok) {
+    // The shared 60 s list (common/crm/crm-projects.ts), not a fresh download per open.
+    let projects: CrmProjectRow[];
+    try {
+      projects = await crmProjects();
+    } catch {
       throw new BadRequestException('Նախագծերի ցանկը հասանելի չէ (CRM)');
     }
-    const projects = (await res.json()) as { id: number; name: string; entityId: number | null; parentId?: number | null }[];
     const links = await this.prisma.warehouseProject.findMany({
       select: { projectId: true, warehouseId: true },
     });

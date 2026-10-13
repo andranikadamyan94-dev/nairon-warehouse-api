@@ -1,4 +1,5 @@
 import { requireInternalSecret } from '../common/internal-headers';
+import { TtlCache } from '../common/cache/ttl-cache';
 import {
   BadRequestException,
   Injectable,
@@ -48,6 +49,14 @@ export class ObjectsService {
   // movements enrichment off CRM's back on every page load.
   private objectsCache: { at: number; data: any[] } | null = null;
   private static readonly OBJECTS_TTL_MS = 60_000;
+  /** The read in flight, shared by concurrent callers (performance audit 2026-10-13). */
+  private objectsLoading: Promise<any[]> | null = null;
+  /**
+   * Object ids asked for and still absent after a read past the cache —
+   * deleted objects, mostly. Remembered for the TTL so that one such id named
+   * by old records does not bust the catalogue on every queue load (W1).
+   */
+  private readonly missingObjects = new TtlCache<number, true>(ObjectsService.OBJECTS_TTL_MS);
 
   async crmObjects(): Promise<
     { id: number; code: string; name: string; projectId: number | null; entityId: number | null; status: string; plannedCost: number | null; responsibleId?: number | null }[]
@@ -55,14 +64,47 @@ export class ObjectsService {
     if (this.objectsCache && Date.now() - this.objectsCache.at < ObjectsService.OBJECTS_TTL_MS) {
       return this.objectsCache.data;
     }
-    const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
-    const res = await fetch(`${crmUrl}/api/construction-objects/internal/all`, {
-      headers: { 'x-internal-secret': requireInternalSecret() },
-    });
-    if (!res.ok) throw new BadRequestException('Օբյեկտների ցանկը հասանելի չէ (CRM)');
-    const data = (await res.json()) as any[];
-    this.objectsCache = { at: Date.now(), data };
-    return data;
+    if (this.objectsLoading) return this.objectsLoading;
+    const load = (async () => {
+      const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
+      let res: Response;
+      try {
+        res = await fetch(`${crmUrl}/api/construction-objects/internal/all`, {
+          headers: { 'x-internal-secret': requireInternalSecret() },
+          signal: AbortSignal.timeout(ObjectsService.CRM_TIMEOUT_MS),
+        });
+      } catch {
+        throw new BadRequestException('Օբյեկտների ցանկը հասանելի չէ (CRM)');
+      }
+      if (!res.ok) throw new BadRequestException('Օբյեկտների ցանկը հասանելի չէ (CRM)');
+      const data = (await res.json()) as any[];
+      this.objectsCache = { at: Date.now(), data };
+      return data;
+    })();
+    this.objectsLoading = load;
+    try {
+      return await load;
+    } finally {
+      if (this.objectsLoading === load) this.objectsLoading = null;
+    }
+  }
+
+  private static readonly CRM_TIMEOUT_MS = 5_000;
+
+  /**
+   * The catalogue, read past the cache only when it lacks one of `ids` that is
+   * not already known to be gone; ids still absent afterwards are remembered
+   * as gone for the TTL. For labels — one lookup per list, not one per row.
+   */
+  async crmObjectsCovering(ids: number[]) {
+    const all = await this.crmObjects();
+    const have = new Set(all.map((o) => o.id));
+    const unknown = ids.filter((id) => !have.has(id) && !this.missingObjects.peek(id));
+    if (!unknown.length) return all;
+    const fresh = await this.crmObjectsFresh();
+    const now = new Set(fresh.map((o) => o.id));
+    for (const id of unknown) if (!now.has(id)) this.missingObjects.set(id, true);
+    return fresh;
   }
 
   /** One object's catalog row. A freshly created object may postdate the
@@ -70,8 +112,8 @@ export class ObjectsService {
    *  object's summary is never served with null metadata for a TTL. */
   /** The same row, read past the cache — for decisions (who may act), not labels. */
   async crmObjectFresh(objectId: number) {
-    this.objectsCache = null;
-    return this.crmObject(objectId);
+    this.missingObjects.delete(objectId);
+    return (await this.crmObjectsFresh()).find((o) => o.id === objectId);
   }
 
   /** The whole list past the cache — for a picker that must show an object made a moment ago (catalog, 2026-10-08). */
@@ -81,14 +123,7 @@ export class ObjectsService {
   }
 
   async crmObject(objectId: number) {
-    let all = await this.crmObjects();
-    let row = all.find((o) => o.id === objectId);
-    if (!row && this.objectsCache) {
-      this.objectsCache = null;
-      all = await this.crmObjects();
-      row = all.find((o) => o.id === objectId);
-    }
-    return row;
+    return (await this.crmObjectsCovering([objectId])).find((o) => o.id === objectId);
   }
 
   /** One object's card, fresh from CRM (fetchCrmObjectCard) — for decisions, not labels. */

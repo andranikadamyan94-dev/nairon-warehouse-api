@@ -4,6 +4,7 @@ import { Reflector } from '@nestjs/core';
 import { PermissionGuard, PERMISSIONS_KEY } from '../auth/guards/permission.guard';
 import { CatalogController } from './catalog.controller';
 import { CatalogService, EMPLOYEE_PERMISSIONS } from './catalog.service';
+import { resetCrmProjectsCache } from '../common/crm/crm-projects';
 
 /**
  * The cart's project picker (Arshak, staging, 2026-10-09): CartPage asked
@@ -64,7 +65,7 @@ describe('GET /catalog/projects · guard', () => {
 describe('GET /catalog/projects · shape', () => {
   const service = () => new CatalogService({} as any, {} as any, {} as any, {} as any, {} as any, {} as any);
   const realFetch = global.fetch;
-  beforeEach(() => { process.env.INTERNAL_SECRET = 'test-secret'; });
+  beforeEach(() => { process.env.INTERNAL_SECRET = 'test-secret'; resetCrmProjectsCache(); });
   afterEach(() => { global.fetch = realFetch; });
 
   it('answers { id, name }[] by name — CRM\'s other columns are not passed on', async () => {

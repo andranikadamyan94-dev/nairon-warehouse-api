@@ -15,6 +15,7 @@ import { WarehouseActor } from '../auth/actor';
 import { CategoriesService } from '../categories/categories.service';
 import { FileService } from '../common/file.service';
 import { requireInternalSecret } from '../common/internal-headers';
+import { crmProjectNameMap } from '../common/crm/crm-projects';
 import { roundQty } from '../common/quantity';
 import { reservationStatusLabel } from '../common/status-labels';
 import { UsersPrismaService } from '../common/users-prisma.service';
@@ -526,7 +527,7 @@ export class CatalogService {
     if (task && dto.objectId != null && task.objectId != null && Number(dto.objectId) !== task.objectId) {
       throw new BadRequestException('Օբյեկտը չի համընկնում առաջադրանքի օբյեկտի հետ');
     }
-    const taskProjectName = task?.projectId ? ((await this.crmProjectNames()).get(task.projectId) ?? dto.projectName?.trim() ?? null) : null;
+    const taskProjectName = task?.projectId ? ((await this.crmProjectNames(task.projectId)).get(task.projectId) ?? dto.projectName?.trim() ?? null) : null;
     // Object requests (2026-10-08): the object decides the project; CRM's card decides who may ask.
     // A task's object is the task's own (no responsible-person rule): it rides on the task.
     const object = !task && dto.objectId != null ? await this.objectForCheckout(Number(dto.objectId), actor) : null;
@@ -691,9 +692,16 @@ export class CatalogService {
    */
   async objectsForRequester(actor: WarehouseActor) {
     if (!this.objects) return [];
-    // Past the 60 s cache: the CRM object page sends people here right after an object (or its responsible person) was set.
-    const all = await this.objects.crmObjectsFresh();
-    const mine = this.ordersForAnyObject(actor) ? all : all.filter((o) => o.responsibleId != null && o.responsibleId === actor.userId);
+    // The 60 s catalogue (performance audit 2026-10-13: this read went past it
+    // on every cart open). The CRM object page sends people here right after
+    // an object (or its responsible person) was set: the cart keeps an object
+    // pinned from there even when the list lacks it, and a requester who finds
+    // none of their own in the cached list gets one read past it.
+    const desk = this.ordersForAnyObject(actor);
+    const ownOf = (all: Awaited<ReturnType<ObjectsService['crmObjects']>>) =>
+      desk ? all : all.filter((o) => o.responsibleId != null && o.responsibleId === actor.userId);
+    let mine = ownOf(await this.objects.crmObjects());
+    if (!mine.length) mine = ownOf(await this.objects.crmObjectsFresh());
     const projectName = mine.some((o) => o.projectId) ? await this.crmProjectNames() : new Map<number, string>();
     return mine.map((o) => ({
       id: o.id,
@@ -716,22 +724,23 @@ export class CatalogService {
     return [...names].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name, 'hy'));
   }
 
-  /** CRM's project names (the list warehouses.service reads for its picker); unreachable → no names, the picker still works. */
+  /**
+   * CRM's project names — the shared 60 s list (common/crm/crm-projects.ts),
+   * the one warehouses.service reads for its picker too; unreachable → no
+   * names, the picker still works. `wanted` reads past the cache once when
+   * that project is missing, and a failed read is retried once for it: a
+   * transient CRM miss must not leave a card without its project (2026-10-08).
+   */
   private async crmProjectNames(wanted?: number): Promise<Map<number, string>> {
-    const names = await this.fetchCrmProjectNames();
-    // One retry when the project asked for is missing: a transient CRM miss must not leave a card without its project (2026-10-08).
-    if (wanted != null && !names.has(wanted)) return this.fetchCrmProjectNames();
-    return names;
-  }
-
-  private async fetchCrmProjectNames(): Promise<Map<number, string>> {
     try {
-      const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
-      const res = await fetch(`${crmUrl}/api/projects/internal`, { headers: { 'x-internal-secret': requireInternalSecret() } });
-      if (!res.ok) return new Map();
-      return new Map(((await res.json()) as { id: number; name: string }[]).map((p) => [p.id, p.name]));
+      return await crmProjectNameMap(wanted);
     } catch {
-      return new Map();
+      if (wanted == null) return new Map();
+      try {
+        return await crmProjectNameMap(wanted);
+      } catch {
+        return new Map();
+      }
     }
   }
 
@@ -854,11 +863,9 @@ export class CatalogService {
     if (!ids.length || !this.objects) return map;
     try {
       const want = new Set(ids);
-      for (const o of await this.objects.crmObjects()) if (want.has(o.id)) map.set(o.id, { id: o.id, code: o.code, name: o.name });
-      // An object made a moment ago postdates the 60 s catalogue — read past the cache once (2026-10-08).
-      if (map.size < want.size) {
-        for (const o of await this.objects.crmObjectsFresh()) if (want.has(o.id)) map.set(o.id, { id: o.id, code: o.code, name: o.name });
-      }
+      // An object made a moment ago postdates the 60 s catalogue — read past the cache once (2026-10-08);
+      // one already found gone is not re-asked within the TTL (performance audit 2026-10-13).
+      for (const o of await this.objects.crmObjectsCovering([...want])) if (want.has(o.id)) map.set(o.id, { id: o.id, code: o.code, name: o.name });
     } catch { /* labels are cosmetic */ }
     return map;
   }

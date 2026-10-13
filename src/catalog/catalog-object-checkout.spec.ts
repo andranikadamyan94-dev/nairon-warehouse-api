@@ -99,6 +99,7 @@ function world() {
       { id: 602, code: 'O-602', name: 'Այլ', projectId: 21, entityId: 1, status: 'PLANNED', responsibleId: 77 },
     ]),
     crmObjects: jest.fn(async () => objects.crmObjectsFresh()),
+    crmObjectsCovering: jest.fn(async () => objects.crmObjectsFresh()),
   };
   const svc = new CatalogService(prisma, users, reservations, requisitions, {} as any, {} as any, undefined, undefined, objects);
   (svc as any).directory = jest.fn(async () => ({ unitOf: new Map(), entityName: new Map() }));

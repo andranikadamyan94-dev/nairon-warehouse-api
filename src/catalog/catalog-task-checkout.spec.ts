@@ -120,6 +120,7 @@ function world() {
   const objects: any = {
     crmObjects: jest.fn(async () => [{ id: 600, code: 'O-600', name: 'Արաբկիր', projectId: 20, entityId: 1, status: 'IN_PROGRESS', responsibleId: 77 }]),
     crmObjectsFresh: jest.fn(async () => objects.crmObjects()),
+    crmObjectsCovering: jest.fn(async () => objects.crmObjects()),
   };
   const svc = new CatalogService(prisma, users, reservations, requisitions, {} as any, {} as any, undefined, undefined, objects);
   (svc as any).directory = jest.fn(async () => ({ unitOf: new Map(), entityName: new Map() }));
