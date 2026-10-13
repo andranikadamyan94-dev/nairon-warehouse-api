@@ -125,13 +125,15 @@ export class AssetsService {
    * looking at. Nothing narrows by who is asking: `view_assets`/`manage_assets`
    * on the route is the authority, and the pool is shared by every company.
    */
-  findAll(
+  async findAll(
     query?: {
       status?: string;
       search?: string;
       sortBy?: string;
       sortOrder?: string;
       warehouseId?: string;
+      page?: string;
+      limit?: string;
     },
     _actor?: WarehouseActor,
   ) {
@@ -152,6 +154,29 @@ export class AssetsService {
       : query?.sortBy === 'itemName' ? { item: { name: order } }
       : query?.sortBy === 'status' ? { status: order }
       : { createdAt: 'desc' };
+    /*
+     * Paged when the caller asks with `limit` (performance audit 2026-10-13):
+     * the «Ակտիվներ» list (CrudPage) always sends page + limit and reads
+     * { data, total }, so it shows the same rows per page while downloading one
+     * page; nairon-ai-api's asset list reads that shape too. Without `limit`
+     * the whole list, as before (the maintenance and custody pickers). The id
+     * breaks ties so a page boundary never repeats or skips a row.
+     */
+    if (query?.limit !== undefined && query.limit !== '') {
+      const limit = Math.min(Math.max(Math.trunc(Number(query.limit)) || 10, 1), 500);
+      const page = Math.max(Math.trunc(Number(query.page)) || 1, 1);
+      const [data, total] = await Promise.all([
+        this.prisma.asset.findMany({
+          where,
+          include: { item: true },
+          orderBy: [orderBy, { id: 'desc' }],
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        this.prisma.asset.count({ where }),
+      ]);
+      return { data, total, page, limit };
+    }
     return this.prisma.asset.findMany({ where, include: { item: true }, orderBy });
   }
 
