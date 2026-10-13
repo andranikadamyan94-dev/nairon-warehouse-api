@@ -184,7 +184,14 @@ export class ObjectsService {
     return result;
   }
 
-  private taskIdsCache = new Map<number, { at: number; ids: number[] }>();
+  /**
+   * CRM's task ids per object, a minute. Concurrent asks share one read: the
+   * object page opens summary, materials and movements together and each one
+   * resolves the scope (summary twice, through materials) — three identical
+   * CRM calls on every cold open, the slowest prod endpoints (performance
+   * audit 2026-10-13). Time-boxed so a stuck CRM costs 5 s, not the request.
+   */
+  private readonly taskIdsCache = new TtlCache<number, number[]>(60_000);
 
   /**
    * The movements that belong to an object (2026-09-29): those stamped with it
@@ -193,20 +200,18 @@ export class ObjectsService {
    * from before the object existed counts too. CRM unreachable → stamped only.
    */
   private async scopeOf(objectId: number): Promise<any> {
-    const hit = this.taskIdsCache.get(objectId);
-    let ids = hit && Date.now() - hit.at < 60_000 ? hit.ids : null;
-    if (!ids) {
+    const ids = await this.taskIdsCache.get(objectId, async () => {
       try {
         const crmUrl = process.env.CRM_API_URL || 'http://localhost:3003';
         const res = await fetch(`${crmUrl}/api/construction-objects/internal/${objectId}/task-ids`, {
           headers: { 'x-internal-secret': requireInternalSecret() },
+          signal: AbortSignal.timeout(ObjectsService.CRM_TIMEOUT_MS),
         });
-        ids = res.ok ? (((await res.json()) as any)?.taskIds ?? []) : [];
+        return res.ok ? (((await res.json()) as any)?.taskIds ?? []) : [];
       } catch {
-        ids = [];
+        return [];
       }
-      this.taskIdsCache.set(objectId, { at: Date.now(), ids: ids ?? [] });
-    }
+    });
     return ids && ids.length ? { OR: [{ objectId }, { taskId: { in: ids }, type: { in: ['OUT', 'IN'] } }] } : { objectId };
   }
 
@@ -251,7 +256,9 @@ export class ObjectsService {
     const page = Number(query?.page ?? 1);
     const limit = Number(query?.limit ?? 20);
     const scope = await this.scopeOf(objectId);
-    const [rows, total] = await this.prisma.$transaction([
+    // Side by side rather than in one transaction: the page and its count are
+    // two independent reads, and a transaction ran them back to back.
+    const [rows, total] = await Promise.all([
       this.prisma.inventoryMovement.findMany({
         where: scope,
         include: {
