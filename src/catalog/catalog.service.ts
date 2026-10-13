@@ -932,8 +932,7 @@ export class CatalogService {
   }
 
   async mine(userId: number, query: Record<string, string | undefined>) {
-    const all = await this.views({ createdBy: userId }, userId);
-    return this.pageOf(this.filterViews(all, query), query);
+    return this.listPage({ createdBy: userId }, userId, query, {});
   }
 
   /**
@@ -954,13 +953,174 @@ export class CatalogService {
         ...(query.to ? { lt: new Date(this.dayOf(query.to, 'Ամսաթիվը սխալ է').getTime() + 86_400_000) } : {}),
       };
     }
-    let all = await this.views(where, actor.userId);
-    if (Number(query.unitId) > 0) {
-      const dir = await this.directory();
-      all = all.filter((v) => dir.unitOf.get(v.createdBy)?.unitId === Number(query.unitId));
+    return this.listPage(where, actor.userId, query, {
+      unitId: Number(query.unitId) > 0 ? Number(query.unitId) : undefined,
+      oldest: query.sort === 'oldest',
+    });
+  }
+
+  /**
+   * One page of a list (queue or «Իմ հարցումները») — performance audit
+   * 2026-10-13, W2. Both lists used to build the full view of every
+   * submission ever (histories, stock, people, CRM task titles 8 at a time)
+   * and then slice 20. Now:
+   *  - no filter that needs a built view → the page and the total straight
+   *    from the database;
+   *  - otherwise a light pass computes, for every candidate, exactly the
+   *    fields filterViews reads (status, source, line kinds, reclaimable
+   *    quantities and, for a search, the texts), filterViews runs on that,
+   *    and the page is cut from it;
+   * then only the page's rows are built in full, as before. Same rows, same
+   * order, same total, same 20-row slice as the old path — see
+   * catalog-list-paging.spec.ts, which runs both on one fixture.
+   */
+  private async listPage(
+    where: any,
+    viewerId: number,
+    query: Record<string, string | undefined>,
+    opts: { unitId?: number; oldest?: boolean },
+  ): Promise<{ items: SubmissionView[]; total: number }> {
+    const page = Math.max(1, Number(query.page ?? 1) || 1);
+    const orderBy = opts.oldest
+      ? [{ createdAt: 'asc' as const }, { id: 'asc' as const }]
+      : [{ createdAt: 'desc' as const }, { id: 'desc' as const }];
+    let ids: number[];
+    let total: number;
+    if (!opts.unitId && !this.needsBuiltFilter(query)) {
+      const [count, rows] = await Promise.all([
+        this.prisma.catalogSubmission.count({ where }),
+        this.prisma.catalogSubmission.findMany({ where, orderBy, skip: (page - 1) * PAGE, take: PAGE, select: { id: true } }),
+      ]);
+      total = count;
+      ids = rows.map((r) => r.id);
+    } else {
+      let light = await this.lightViews(where, orderBy, { texts: !!query.q?.trim() });
+      if (opts.unitId) {
+        const dir = await this.directory();
+        light = light.filter((v) => dir.unitOf.get(v.createdBy)?.unitId === opts.unitId);
+      }
+      const matched = this.filterViews(light as unknown as SubmissionView[], query);
+      total = matched.length;
+      ids = matched.slice((page - 1) * PAGE, page * PAGE).map((v) => v.id);
     }
-    if (query.sort === 'oldest') all = [...all].reverse();
-    return this.pageOf(this.filterViews(all, query), query);
+    if (!ids.length) return { items: [], total };
+    const built = new Map((await this.views({ id: { in: ids } }, viewerId)).map((v) => [v.id, v]));
+    return { items: ids.map((id) => built.get(id)).filter((v): v is SubmissionView => !!v), total };
+  }
+
+  /** Whether filterViews would narrow anything for this query (the same tests it makes). */
+  private needsBuiltFilter(query: Record<string, string | undefined>): boolean {
+    const status = query.status?.trim().toUpperCase();
+    const source = query.source?.trim().toUpperCase();
+    const kind = query.kind?.trim().toUpperCase();
+    return (
+      (!!status && ((SUBMISSION_STATUSES as string[]).includes(status) || status === 'ISSUED')) ||
+      (!!source && (SUBMISSION_SOURCES as string[]).includes(source)) ||
+      (!!kind && ['STOCK', 'PURCHASE', 'NEW'].includes(kind)) ||
+      !!query.q?.trim()
+    );
+  }
+
+  /**
+   * Every candidate submission with only what filterViews reads, derived by
+   * the same rules toView uses (status from the line stages, source from the
+   * task/object/direct-supply marks, reclaimable = issued − accepted). The
+   * texts a search matches — requester names, object labels — are read only
+   * when there is a search.
+   */
+  private async lightViews(where: any, orderBy: any, opts: { texts: boolean }) {
+    const subs = await this.prisma.catalogSubmission.findMany({
+      where,
+      orderBy,
+      select: {
+        id: true, number: true, createdBy: true, objectId: true, taskId: true, purpose: true,
+        projectName: true, costCenter: true, cancelledAt: true, infoRequestAt: true,
+      },
+    });
+    if (!subs.length) return [];
+    const subIds = subs.map((s) => s.id);
+    // Direct supply is told by the first history row of each reservation, read only where it can decide.
+    const mayBeDirect = new Set(subs.filter((s) => s.objectId && s.purpose !== DIRECT_SUPPLY_PURPOSE).map((s) => s.id));
+    const [reservations, requisitions] = await Promise.all([
+      this.prisma.resourceReservation.findMany({
+        where: { submissionId: { in: subIds } },
+        select: {
+          id: true, submissionId: true, itemId: true, status: true, acceptedQuantity: true,
+          item: { select: { name: true } },
+          allocations: { where: { releasedAt: null }, select: { quantity: true } },
+        },
+        orderBy: { id: 'asc' },
+      }),
+      this.prisma.purchaseRequisition.findMany({
+        where: { submissionId: { in: subIds } },
+        select: { id: true, submissionId: true, status: true, lines: { select: { itemId: true, itemName: true }, orderBy: { id: 'asc' } } },
+        orderBy: { id: 'asc' },
+      }),
+    ]);
+    const directIds = (reservations as any[]).filter((r) => mayBeDirect.has(r.submissionId)).map((r) => r.id);
+    const firstReason = new Map<number, string | null>();
+    if (directIds.length) {
+      const history = await this.prisma.resourceReservation.findMany({
+        where: { id: { in: directIds } },
+        select: { id: true, statusHistory: { orderBy: { performedAt: 'asc' }, select: { reason: true } } },
+      });
+      for (const r of history as any[]) firstReason.set(r.id, r.statusHistory?.[0]?.reason ?? null);
+    }
+    const resOf = new Map<number, any[]>();
+    for (const r of reservations as any[]) {
+      if (!resOf.has(r.submissionId)) resOf.set(r.submissionId, []);
+      resOf.get(r.submissionId)!.push(r);
+    }
+    const reqOf = new Map<number, any>();
+    for (const r of requisitions as any[]) if (!reqOf.has(r.submissionId)) reqOf.set(r.submissionId, r);
+
+    const [userOf, objectOf] = opts.texts
+      ? await Promise.all([
+          this.usersPrisma
+            .getUsersByIds([...new Set(subs.map((s) => s.createdBy))])
+            .then((users) => new Map(users.map((u) => [u.id, u]))),
+          this.objectLabels([...new Set(subs.map((s) => s.objectId).filter((x): x is number => typeof x === 'number'))]),
+        ])
+      : [new Map<number, any>(), new Map<number, { id: number; code: string | null; name: string | null }>()];
+
+    return subs.map((sub) => {
+      const rows = resOf.get(sub.id) ?? [];
+      const req = reqOf.get(sub.id) ?? null;
+      const lines = [
+        ...rows.map((r) => {
+          const issued = roundQty((r.allocations ?? []).reduce((s: number, a: any) => s + (a.quantity ?? 0), 0));
+          const accepted = roundQty(Number(r.acceptedQuantity ?? 0));
+          return {
+            kind: 'STOCK' as LineKind,
+            itemName: r.item?.name ?? `#${r.itemId}`,
+            reclaimableQuantity: roundQty(Math.max(0, issued - accepted)),
+            stage: stageOf('STOCK', r.status, { issued }),
+          };
+        }),
+        ...((req?.lines ?? []) as any[]).map((line) => {
+          const kind: LineKind = line.itemId ? 'PURCHASE' : 'NEW';
+          return { kind, itemName: line.itemName, reclaimableQuantity: 0, stage: stageOf(kind, req.status) };
+        }),
+      ];
+      const direct =
+        !!sub.objectId &&
+        (sub.purpose === DIRECT_SUPPLY_PURPOSE ||
+          (rows.length > 0 && rows.every((r) => firstReason.get(r.id) === 'Պահեստը տրամադրում է օբյեկտին')));
+      const u = userOf.get(sub.createdBy);
+      return {
+        id: sub.id,
+        number: sub.number,
+        createdBy: sub.createdBy,
+        purpose: sub.purpose,
+        projectName: sub.projectName ?? null,
+        costCenter: sub.costCenter ?? null,
+        object: sub.objectId ? (objectOf.get(sub.objectId) ?? { id: sub.objectId, code: null, name: null }) : null,
+        requester: { firstName: u?.firstName ?? '', lastName: u?.lastName ?? '' },
+        source: sourceOf({ taskId: sub.taskId, objectId: sub.objectId, direct }),
+        status: deriveStatus(lines.map((l) => l.stage), { cancelled: !!sub.cancelledAt, infoOpen: !!sub.infoRequestAt }),
+        lines,
+      };
+    });
   }
 
   private filterViews(all: SubmissionView[], query: Record<string, string | undefined>) {
@@ -983,11 +1143,6 @@ export class CatalogService {
       );
     }
     return out;
-  }
-
-  private pageOf(all: SubmissionView[], query: Record<string, string | undefined>) {
-    const page = Math.max(1, Number(query.page ?? 1) || 1);
-    return { items: all.slice((page - 1) * PAGE, page * PAGE), total: all.length };
   }
 
   private async loadOne(id: number): Promise<Loaded> {

@@ -69,7 +69,11 @@ function world() {
   ];
   const prisma: any = {
     catalogSubmission: {
-      findMany: jest.fn(async ({ where }: any) => subs.filter((s) => (where?.id != null ? s.id === where.id : true))),
+      findMany: jest.fn(async ({ where }: any) =>
+        subs.filter((s) => (where?.id?.in ? where.id.in.includes(s.id) : where?.id != null ? s.id === where.id : true)),
+      ),
+      // The list's page read (performance audit 2026-10-13): no filter here narrows the four.
+      count: jest.fn(async () => subs.length),
       findUnique: jest.fn(async ({ where }: any) => subs.find((s) => s.id === where.id) ?? null),
     },
     // The submissions' rows by submissionId; the pool's other live claims (poolFree) — none here.
@@ -154,12 +158,15 @@ describe('what a stock line carries for the keeper', () => {
 
   it('the warehouse filter: main = requests with a row drawn from the main pool, a sub = rows drawn from it', async () => {
     const w = world();
-    await w.svc.queue({ warehouseId: 'main' }, actor(KEEPER));
-    expect(w.prisma.catalogSubmission.findMany.mock.calls.at(-1)[0].where).toEqual({ reservations: { some: { warehouseId: null } } });
-    await w.svc.queue({ warehouseId: '3' }, actor(KEEPER));
-    expect(w.prisma.catalogSubmission.findMany.mock.calls.at(-1)[0].where).toEqual({ reservations: { some: { warehouseId: 3 } } });
-    await w.svc.queue({}, actor(KEEPER));
-    expect(w.prisma.catalogSubmission.findMany.mock.calls.at(-1)[0].where).toEqual({});
+    // The list read is the first submission read of each call (the page's full views follow, by id).
+    const listRead = async (query: any) => {
+      const before = w.prisma.catalogSubmission.findMany.mock.calls.length;
+      await w.svc.queue(query, actor(KEEPER));
+      return w.prisma.catalogSubmission.findMany.mock.calls[before][0].where;
+    };
+    expect(await listRead({ warehouseId: 'main' })).toEqual({ reservations: { some: { warehouseId: null } } });
+    expect(await listRead({ warehouseId: '3' })).toEqual({ reservations: { some: { warehouseId: 3 } } });
+    expect(await listRead({})).toEqual({});
   });
 });
 
