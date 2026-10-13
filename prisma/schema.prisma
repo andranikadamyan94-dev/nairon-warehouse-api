@@ -192,6 +192,9 @@ model Item {
 
   @@index([type])
   @@index([parentItemId])
+  // Performance audit 2026-10-13: the catalog grid (parents, visible, by name) and category tabs.
+  @@index([parentItemId, catalogVisible, name])
+  @@index([categoryId])
 
   assetRequests AssetRequest[]
 }
@@ -279,6 +282,7 @@ model Asset {
   @@index([itemId])
   @@index([status])
   @@index([warehouseId])
+  @@index([createdAt])
 }
 
 model InventoryMovement {
@@ -326,6 +330,10 @@ model InventoryMovement {
   @@index([type])
   @@index([warehouseId])
   @@index([objectId])
+  // Performance audit 2026-10-13: the movements register (newest first, per warehouse) and object/task scopes.
+  @@index([createdAt])
+  @@index([warehouseId, createdAt])
+  @@index([taskId])
 }
 
 /// #1989 sub-warehouses. The MAIN row is identity only — its stock is and
@@ -661,6 +669,7 @@ model ResourceReservation {
   @@index([status])
   @@index([startDate, endDate])
   @@index([submissionId])
+  @@index([itemId, warehouseId, status])
 
   /// Project duplicate (2026-10-07): the crm ProjectCopyJob that made this row;
   /// null for every row made any other way. Idempotency and exact rollback.
@@ -957,6 +966,7 @@ model ProcurementOrder {
   @@index([supplierId])
   @@index([entityId])
   @@index([status])
+  @@index([createdAt, id])
 }
 
 /// #1885/#1888-#1894 — the demand side of procurement: any department files
