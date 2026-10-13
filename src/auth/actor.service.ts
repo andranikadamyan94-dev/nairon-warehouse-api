@@ -44,7 +44,11 @@ export class WarehouseActorService {
   private readonly logger = new Logger(WarehouseActorService.name);
   /** HR's answer per person, briefly — it is asked on every request. */
   private readonly homes = new Map<number, { ids: number[]; at: number }>();
-  private static readonly FRESH_MS = 30_000;
+  /** One HR call per person at a time: a page load fires several requests at once. */
+  private readonly asking = new Map<number, Promise<number[]>>();
+  // Two minutes (was 30 s), as in crm: membership changes are rare and every
+  // request asks (perf pass 2026-10-13).
+  static readonly FRESH_MS = 2 * 60_000;
 
   constructor(private readonly usersPrisma: UsersPrismaService) {}
 
@@ -58,12 +62,30 @@ export class WarehouseActorService {
     if (typeof authorization !== 'string' || !authorization) return [];
     const cached = this.homes.get(userId);
     if (cached && Date.now() - cached.at < WarehouseActorService.FRESH_MS) return cached.ids;
+    const running = this.asking.get(userId);
+    if (running) return running;
+    const lookup = this.askHr(userId, authorization, cached).finally(() => this.asking.delete(userId));
+    this.asking.set(userId, lookup);
+    return lookup;
+  }
+
+  private async askHr(
+    userId: number,
+    authorization: string,
+    cached: { ids: number[]; at: number } | undefined,
+  ): Promise<number[]> {
     const hrUrl = process.env.HR_SERVICE_URL || 'http://localhost:3001';
     try {
-      const res = await fetch(`${hrUrl}/api/entities`, {
-        headers: { Authorization: authorization },
-        signal: AbortSignal.timeout(5000),
-      });
+      // GET /entities/mine: the same list, id + name only (no logos, no
+      // legacy department join). An hr-api that predates it answers 404 —
+      // then the full list, so the deploy order never empties anyone's homes.
+      const ask = (path: string) =>
+        fetch(`${hrUrl}${path}`, {
+          headers: { Authorization: authorization },
+          signal: AbortSignal.timeout(5000),
+        });
+      let res = await ask('/api/entities/mine');
+      if (res.status === 404) res = await ask('/api/entities');
       if (!res.ok) throw new Error(`HR ${res.status}`);
       const body = (await res.json()) as { id?: unknown }[];
       const ids = (Array.isArray(body) ? body : [])

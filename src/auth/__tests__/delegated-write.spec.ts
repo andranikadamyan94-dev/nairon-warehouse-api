@@ -76,7 +76,7 @@ global.fetch = (async (url: any, init?: any) => {
     const [entityId, userId] = [Number(internal[1]), Number(internal[2])];
     return new Response(JSON.stringify((state.members.get(entityId) ?? []).includes(userId) ? [userId] : []), { status: 200 });
   }
-  if (href === 'http://hr.test/api/entities') {
+  if (href === 'http://hr.test/api/entities/mine') {
     state.calls.withToken++;
     const claims: any = jwt.decode(String(init?.headers?.Authorization ?? '').replace(/^Bearer /, ''));
     // hr-api's delegated policy: a write-scoped token is refused there.

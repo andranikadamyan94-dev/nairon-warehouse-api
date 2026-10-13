@@ -63,7 +63,7 @@ const usersPrisma = {
 // HR, asked with the caller's token for the organisations the person belongs to: company 6 for everyone here.
 const realFetch = global.fetch;
 global.fetch = (async (url: any, init?: any) => {
-  if (String(url) !== 'http://hr.test/api/entities') return realFetch(url, init);
+  if (!/^http:\/\/hr\.test\/api\/entities(\/mine)?$/.test(String(url))) return realFetch(url, init);
   return new Response(JSON.stringify([{ id: 6 }]), { status: 200 });
 }) as typeof fetch;
 afterAll(() => {
