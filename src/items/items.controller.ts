@@ -23,6 +23,7 @@ import { UpdateImageDto } from './dto/update-image.dto';
 
 import { ItemsService } from './items.service';
 import { GetItemsQueryDto } from './dto/get-items-query.dto';
+import { ItemOptionsQueryDto } from './dto/item-options-query.dto';
 import { PermissionGuard, Permissions } from '../auth/guards/permission.guard';
 import { Actor } from '../auth/decorators/actor.decorator';
 import { WarehouseActor } from '../auth/actor';
@@ -141,6 +142,19 @@ export class ItemsController {
       (tx) => this.itemsService.assignCode(id, actor, tx),
     );
     return result;
+  }
+
+  /**
+   * A picker's remote search: id, code, names, type and unit of at most
+   * `take` items (default 50, max 200), by name. Readable by the same callers
+   * as GET /items. Declared before ':id'. (Performance audit 2026-10-13: the
+   * full list is ~200 KB with categories, pictures and variants, which a
+   * picker never shows.)
+   */
+  @Get('options')
+  @ApiOperation({ summary: 'Lean item options for a remote-search picker ({ id, code, name, secondaryName, type, unit }[])' })
+  options(@Query() query: ItemOptionsQueryDto) {
+    return this.itemsService.options(query);
   }
 
   @Get()

@@ -182,6 +182,30 @@ export class ItemsService {
     return item;
   }
 
+  /** GET /items/options — see the controller. Same pool and search fields as findAll. */
+  async options(query: { search?: string; take?: number; type?: string; includeVariants?: string } = {}) {
+    const take = Math.min(Math.max(Math.trunc(Number(query.take) || 50), 1), 200);
+    const search = query.search?.trim();
+    return this.prisma.item.findMany({
+      where: {
+        ...(query.type ? { type: query.type as any } : {}),
+        ...(query.includeVariants === '1' ? {} : { parentItemId: null }),
+        ...(search
+          ? {
+              OR: [
+                { name: { contains: search, mode: 'insensitive' } },
+                { secondaryName: { contains: search, mode: 'insensitive' } },
+                { code: { contains: search, mode: 'insensitive' } },
+              ],
+            }
+          : {}),
+      },
+      select: { id: true, code: true, name: true, secondaryName: true, type: true, unit: true },
+      orderBy: [{ name: 'asc' }, { id: 'asc' }],
+      take,
+    });
+  }
+
   async findAll(query?: GetItemsQueryDto, _actor?: WarehouseActor) {
     let categoryFilter: number[] | undefined;
 
