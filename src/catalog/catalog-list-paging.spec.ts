@@ -234,15 +234,16 @@ function world() {
 
 // ── The old path, verbatim (catalog.service.ts before 2026-10-13) ───────────
 
-const oldPageOf = (all: any[], query: any) => {
+// size: the fixed 20 of the old path, or (page-size checks below) the size the screen asked for.
+const oldPageOf = (all: any[], query: any, size = PAGE) => {
   const page = Math.max(1, Number(query.page ?? 1) || 1);
-  return { items: all.slice((page - 1) * PAGE, page * PAGE), total: all.length };
+  return { items: all.slice((page - 1) * size, page * size), total: all.length };
 };
-async function oldMine(svc: any, userId: number, query: any) {
+async function oldMine(svc: any, userId: number, query: any, size = PAGE) {
   const all = await svc.views({ createdBy: userId }, userId);
-  return oldPageOf(svc.filterViews(all, query), query);
+  return oldPageOf(svc.filterViews(all, query), query, size);
 }
-async function oldQueue(svc: any, query: any, viewerId: number) {
+async function oldQueue(svc: any, query: any, viewerId: number, size = PAGE) {
   const where: any = {};
   if (Number(query.entityId) > 0) where.entityId = Number(query.entityId);
   if (Number(query.requesterId) > 0) where.createdBy = Number(query.requesterId);
@@ -260,7 +261,7 @@ async function oldQueue(svc: any, query: any, viewerId: number) {
     all = all.filter((v: any) => dir.unitOf.get(v.createdBy)?.unitId === Number(query.unitId));
   }
   if (query.sort === 'oldest') all = [...all].reverse();
-  return oldPageOf(svc.filterViews(all, query), query);
+  return oldPageOf(svc.filterViews(all, query), query, size);
 }
 
 // ── The queries ─────────────────────────────────────────────────────────────
@@ -365,5 +366,69 @@ describe('queue and «Իմ հարցումները» — the database-paged path 
     const res = await svc.queue({ status: 'SUBMITTED' }, { userId: 40 } as any);
     expect(views).toHaveBeenCalledTimes(1);
     expect((views.mock.calls[0][0] as any).id.in).toEqual(res.items.map((v) => v.id));
+  });
+});
+
+// ── Page sizes (B1, 2026-10-13) ─────────────────────────────────────────────
+// The screens send pageSize 10 / 20 / 50; the server used to ignore it and
+// always cut 20 (a 10-row page showed rows again on the next one and left
+// empty pages at the end). Reference: the old path, sliced at the asked size.
+
+const SIZES: [string | undefined, number][] = [
+  ['10', 10], ['20', 20], ['50', 50], [undefined, 20], ['100', 50], ['0', 20], ['x', 20], ['7', 7],
+];
+
+describe('queue and «Իմ հարցումները» — the page size the screen sends', () => {
+  it('the queue: filter × sort × page × pageSize', async () => {
+    const { svc } = world();
+    const filters = [{}, { status: 'SUBMITTED' }, { q: 'ցեմենտ' }, { sort: 'oldest' }, { unitId: '1' }, { warehouseId: '3', sort: 'oldest' }, { requesterId: '8' }];
+    for (const f of filters) {
+      for (const [pageSize, size] of SIZES) {
+        for (const page of ['1', '2', '3', undefined]) {
+          const query = { ...f, page, pageSize };
+          const expected = await oldQueue(svc, query, 40, size);
+          const actual = await svc.queue(query, { userId: 40 } as any);
+          expect({ query, result: plain(actual) }).toEqual({ query, result: plain(expected) });
+        }
+      }
+    }
+  });
+
+  it('«Իմ հարցումները»: filter × page × pageSize, for each requester', async () => {
+    const { svc } = world();
+    for (const userId of USERS) {
+      for (const f of [{}, { status: 'IN_PROGRESS' }, { kind: 'STOCK' }]) {
+        for (const [pageSize, size] of SIZES) {
+          for (const page of ['1', '2']) {
+            const query = { ...f, page, pageSize };
+            const expected = await oldMine(svc, userId, query, size);
+            const actual = await svc.mine(userId, query);
+            expect({ userId, query, result: plain(actual) }).toEqual({ userId, query, result: plain(expected) });
+          }
+        }
+      }
+    }
+  });
+
+  it('pages of 10 walk the whole list once: no repeated rows, no empty last page', async () => {
+    const { svc } = world();
+    for (const f of [{}, { status: 'SUBMITTED' }]) {
+      const first = await svc.queue({ ...f, page: '1', pageSize: '10' }, { userId: 40 } as any);
+      const seen: number[] = [];
+      for (let p = 1; p <= Math.ceil(first.total / 10); p++) {
+        const res = await svc.queue({ ...f, page: String(p), pageSize: '10' }, { userId: 40 } as any);
+        expect(res.items.length).toBeGreaterThan(0);
+        expect(res.items.length).toBeLessThanOrEqual(10);
+        seen.push(...res.items.map((v) => v.id));
+      }
+      expect(seen).toHaveLength(first.total);
+      expect(new Set(seen).size).toBe(first.total);
+    }
+  });
+
+  it('the database path reads exactly the asked page', async () => {
+    const { svc, prisma } = world();
+    await svc.queue({ page: '2', pageSize: '50' }, { userId: 40 } as any);
+    expect(prisma.catalogSubmission.findMany.mock.calls[0][0]).toMatchObject({ skip: 50, take: 50 });
   });
 });

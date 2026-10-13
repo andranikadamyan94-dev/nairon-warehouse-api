@@ -75,7 +75,9 @@ export const QUEUE_VIEWER_PERMISSIONS = [QUEUE_PERMISSION, 'view_reservations', 
 /** Ordering from the catalog: the right that opens the warehouse app is enough (2026-10-08). */
 export const EMPLOYEE_PERMISSIONS = ['page_warehouse', 'view_warehouse'];
 
+/** Rows a list page holds when the caller sends no pageSize; the screens offer 10 / 20 / 50. */
 const PAGE = 20;
+const MAX_PAGE = 50;
 
 /** One reminder per request per hour. */
 export const REMINDER_INTERVAL_MS = 60 * 60 * 1000;
@@ -971,7 +973,7 @@ export class CatalogService {
    *    quantities and, for a search, the texts), filterViews runs on that,
    *    and the page is cut from it;
    * then only the page's rows are built in full, as before. Same rows, same
-   * order, same total, same 20-row slice as the old path — see
+   * order, same total, same slice as the old path (pageSize rows, 20 without one, at most 50) — see
    * catalog-list-paging.spec.ts, which runs both on one fixture.
    */
   private async listPage(
@@ -981,6 +983,9 @@ export class CatalogService {
     opts: { unitId?: number; oldest?: boolean },
   ): Promise<{ items: SubmissionView[]; total: number }> {
     const page = Math.max(1, Number(query.page ?? 1) || 1);
+    // The page size the screen asks for (it used to be ignored: 20 rows came
+    // back for a 10-row page — repeated rows, empty last pages).
+    const size = Math.min(MAX_PAGE, Math.max(1, Math.floor(Number(query.pageSize ?? PAGE)) || PAGE));
     const orderBy = opts.oldest
       ? [{ createdAt: 'asc' as const }, { id: 'asc' as const }]
       : [{ createdAt: 'desc' as const }, { id: 'desc' as const }];
@@ -989,7 +994,7 @@ export class CatalogService {
     if (!opts.unitId && !this.needsBuiltFilter(query)) {
       const [count, rows] = await Promise.all([
         this.prisma.catalogSubmission.count({ where }),
-        this.prisma.catalogSubmission.findMany({ where, orderBy, skip: (page - 1) * PAGE, take: PAGE, select: { id: true } }),
+        this.prisma.catalogSubmission.findMany({ where, orderBy, skip: (page - 1) * size, take: size, select: { id: true } }),
       ]);
       total = count;
       ids = rows.map((r) => r.id);
@@ -1001,7 +1006,7 @@ export class CatalogService {
       }
       const matched = this.filterViews(light as unknown as SubmissionView[], query);
       total = matched.length;
-      ids = matched.slice((page - 1) * PAGE, page * PAGE).map((v) => v.id);
+      ids = matched.slice((page - 1) * size, page * size).map((v) => v.id);
     }
     if (!ids.length) return { items: [], total };
     const built = new Map((await this.views({ id: { in: ids } }, viewerId)).map((v) => [v.id, v]));
