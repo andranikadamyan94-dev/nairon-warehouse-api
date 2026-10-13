@@ -183,8 +183,16 @@ export class ItemsService {
   }
 
   /** GET /items/options — see the controller. Same pool and search fields as findAll. */
-  async options(query: { search?: string; take?: number; type?: string; includeVariants?: string } = {}) {
+  async options(query: { search?: string; take?: number; type?: string; includeVariants?: string; ids?: string } = {}) {
     const take = Math.min(Math.max(Math.trunc(Number(query.take) || 50), 1), 200);
+    const select = { id: true, code: true, name: true, secondaryName: true, type: true, unit: true } as const;
+    // ?ids= — the labels a picker needs for values it already holds (editing a
+    // saved record), whatever the search; variants included.
+    if (query.ids !== undefined) {
+      const ids = [...new Set(String(query.ids).split(',').map((x) => Math.trunc(Number(x))).filter((n) => n > 0))].slice(0, 200);
+      if (!ids.length) return [];
+      return this.prisma.item.findMany({ where: { id: { in: ids } }, select, orderBy: [{ name: 'asc' }, { id: 'asc' }] });
+    }
     const search = query.search?.trim();
     return this.prisma.item.findMany({
       where: {
@@ -200,7 +208,7 @@ export class ItemsService {
             }
           : {}),
       },
-      select: { id: true, code: true, name: true, secondaryName: true, type: true, unit: true },
+      select,
       orderBy: [{ name: 'asc' }, { id: 'asc' }],
       take,
     });
@@ -219,24 +227,23 @@ export class ItemsService {
     // company, and the CRM task screen reads this route with no warehouse
     // permission at all — which companies somebody's roles live in, or where a
     // category is filed, hides nothing from them.
-    const where: any = {
-      ...(categoryFilter ? { categoryId: { in: categoryFilter } } : {}),
-      ...(query?.uncategorized === '1' ? { categoryId: null } : {}),
-      ...(query?.type ? { type: query.type } : {}),
-      // Either name, or the code — people search by whichever they know.
-      ...(query?.search
-        ? {
-            OR: [
-              { name: { contains: query.search, mode: 'insensitive' } },
-              { secondaryName: { contains: query.search, mode: 'insensitive' } },
-              { code: { contains: query.search, mode: 'insensitive' } },
-            ],
-          }
-        : {}),
-      // Variants (child items) sit under their parent's card; the list shows
-      // them only when asked (?includeVariants=1).
-      ...(query?.includeVariants === '1' ? {} : { parentItemId: null }),
-    };
+    // Each condition is its own AND term: the search and a sub-warehouse's
+    // holdings are both OR-lists, and spreading one over the other silently
+    // dropped the search on a sub's page (performance audit 2026-10-13, bug 2).
+    const terms: Prisma.ItemWhereInput[] = [];
+    if (categoryFilter) terms.push({ categoryId: { in: categoryFilter } });
+    if (query?.uncategorized === '1') terms.push({ categoryId: null });
+    if (query?.type) terms.push({ type: query.type as any });
+    // Either name, or the code — people search by whichever they know.
+    if (query?.search) {
+      terms.push({
+        OR: [
+          { name: { contains: query.search, mode: 'insensitive' } },
+          { secondaryName: { contains: query.search, mode: 'insensitive' } },
+          { code: { contains: query.search, mode: 'insensitive' } },
+        ],
+      });
+    }
 
     // What the list carries per row beyond the item itself: the category, the
     // asset count, the cover picture, and the children the quantity sums over.
@@ -279,11 +286,13 @@ export class ItemsService {
       return { ...rest, quantity, _count: { assets }, coverUrl: images?.[0]?.url ?? null };
     };
 
-    // Sub-warehouse workspace (#1989 wave 2): the catalog is global, but a
-    // sub's Ապրանքներ page shows ITS holdings — quantity comes from the sub's
-    // stock row and the asset count from assets homed there; only items the
-    // sub actually holds are listed (a parent whose variant is held counts).
+    const own = (_id: number, value: number) => value;
+    let shapeAll: <T extends ListRow>(rows: T[]) => Promise<ReturnType<typeof shape<T>>[]>;
     if (query?.warehouseId && query.warehouseId !== 'main') {
+      // Sub-warehouse workspace (#1989 wave 2): the catalog is global, but a
+      // sub's Ապրանքներ page shows ITS holdings — quantity comes from the sub's
+      // stock row and the asset count from assets homed there; only items the
+      // sub actually holds are listed (a parent whose variant is held counts).
       const whId = Number(query.warehouseId);
       const [stocks, assetCounts] = await Promise.all([
         this.prisma.warehouseStock.findMany({
@@ -299,41 +308,96 @@ export class ItemsService {
       const stockOf = new Map(stocks.map((s) => [s.itemId, s.quantity]));
       const assetsOf = new Map(assetCounts.map((a) => [a.itemId, a._count.id]));
       const heldIds = [...new Set([...stockOf.keys(), ...assetsOf.keys()])];
-      const rows = await this.prisma.item.findMany({
-        where: { ...where, OR: [{ id: { in: heldIds } }, { variants: { some: { id: { in: heldIds } } } }] },
-        include: listInclude,
-        orderBy: { id: 'desc' },
-      });
-      return rows.map((r) =>
-        shape(
-          r,
-          (id) => stockOf.get(id) ?? 0,
-          (id) => assetsOf.get(id) ?? 0,
-        ),
-      );
+      terms.push({ OR: [{ id: { in: heldIds } }, { variants: { some: { id: { in: heldIds } } } }] });
+      shapeAll = async (rows) =>
+        rows.map((r) =>
+          shape(
+            r,
+            (id) => stockOf.get(id) ?? 0,
+            (id) => assetsOf.get(id) ?? 0,
+          ),
+        );
+    } else if (query?.warehouseId === 'main') {
+      // Main workspace: asset counts exclude rows homed in subs.
+      shapeAll = async (rows) => {
+        const ids = rows.flatMap((r) => [r.id, ...(r.variants ?? []).map((v) => v.id)]);
+        const mainCounts = ids.length
+          ? await this.prisma.asset.groupBy({
+              by: ['itemId'],
+              where: { warehouseId: null, itemId: { in: ids } },
+              _count: { id: true },
+            })
+          : [];
+        const mainOf = new Map(mainCounts.map((a) => [a.itemId, a._count.id]));
+        return rows.map((r) => shape(r, own, (id) => mainOf.get(id) ?? 0));
+      };
+    } else {
+      shapeAll = async (rows) => rows.map((r) => shape(r, own, own));
     }
 
-    const rows = await this.prisma.item.findMany({
-      where,
+    // Variants (child items) sit under their parent's card; the list shows
+    // them only when asked (?includeVariants=1).
+    const withVariants = query?.includeVariants === '1';
+    const matching: Prisma.ItemWhereInput = { AND: terms };
+    const where: Prisma.ItemWhereInput = withVariants ? matching : { AND: [...terms, { parentItemId: null }] };
 
-      include: listInclude,
+    if (query?.paged !== '1') {
+      const rows = await this.prisma.item.findMany({ where, include: listInclude, orderBy: { id: 'desc' } });
+      return shapeAll(rows);
+    }
 
-      orderBy: {
-        id: 'desc',
-      },
-    });
-
-    const own = (_id: number, value: number) => value;
-    if (query?.warehouseId !== 'main') return rows.map((r) => shape(r, own, own));
-    // Main workspace: asset counts exclude rows homed in subs.
-    const ids = rows.flatMap((r) => [r.id, ...(r.variants ?? []).map((v) => v.id)]);
-    const mainCounts = await this.prisma.asset.groupBy({
-      by: ['itemId'],
-      where: { warehouseId: null, itemId: { in: ids } },
-      _count: { id: true },
-    });
-    const mainOf = new Map(mainCounts.map((a) => [a.itemId, a._count.id]));
-    return rows.map((r) => shape(r, own, (id) => mainOf.get(id) ?? 0));
+    /*
+     * ?paged=1 (performance audit 2026-10-13, C10): one page of the
+     * Ռեսուրսներ list as `{ items, total }`. It pages by the rows the list
+     * shows — a parent or standalone item, or a variant the filters kept while
+     * leaving its parent out — newest first like the full list. A parent's
+     * matching variants come along under it as `variants`, the grouping the
+     * page used to do itself over the full list.
+     */
+    const skip = Math.max(0, Math.trunc(Number(query.skip) || 0));
+    const take = Math.min(Math.max(Math.trunc(Number(query.take) || 10), 1), 100);
+    // A variant is shown on its own when its parent does not match. Asked as
+    // "parent not among the matching parents" by id: a negated relation filter
+    // (`parent: { isNot }`) turns NULL — and drops the row — wherever the
+    // parent has a NULL column the search reads (secondaryName).
+    const matchingParents = withVariants
+      ? await this.prisma.item.findMany({
+          where: { AND: [matching, { variants: { some: matching } }] },
+          select: { id: true },
+        })
+      : [];
+    const shown: Prisma.ItemWhereInput = withVariants
+      ? {
+          AND: [
+            matching,
+            { OR: [{ parentItemId: null }, { parentItemId: { notIn: matchingParents.map((p) => p.id) } }] },
+          ],
+        }
+      : where;
+    const [total, pageRows] = await Promise.all([
+      this.prisma.item.count({ where: shown }),
+      this.prisma.item.findMany({ where: shown, include: listInclude, orderBy: { id: 'desc' }, skip, take }),
+    ]);
+    const children =
+      withVariants && pageRows.length
+        ? await this.prisma.item.findMany({
+            where: { AND: [matching, { parentItemId: { in: pageRows.map((r) => r.id) } }] },
+            include: listInclude,
+            orderBy: { id: 'desc' },
+          })
+        : [];
+    const shaped = await shapeAll([...pageRows, ...children]);
+    const childrenOf = new Map<number, typeof shaped>();
+    for (const c of shaped.slice(pageRows.length)) {
+      const parentId = c.parentItemId as number;
+      childrenOf.set(parentId, [...(childrenOf.get(parentId) ?? []), c]);
+    }
+    return {
+      items: shaped
+        .slice(0, pageRows.length)
+        .map((r) => (childrenOf.has(r.id) ? { ...r, variants: childrenOf.get(r.id) } : r)),
+      total,
+    };
   }
 
   /**

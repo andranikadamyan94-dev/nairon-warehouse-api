@@ -29,4 +29,10 @@ export class ItemOptionsQueryDto {
   @IsOptional()
   @IsString()
   includeVariants?: string;
+
+  /** Comma-separated ids: exactly these items, variants included (a picker showing the record it edits). */
+  @ApiPropertyOptional({ example: '12,40' })
+  @IsOptional()
+  @IsString()
+  ids?: string;
 }
