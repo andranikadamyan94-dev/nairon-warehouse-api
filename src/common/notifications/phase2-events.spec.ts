@@ -182,7 +182,7 @@ describe('purchase requisitions', () => {
     expect(c.n.sent).toHaveLength(0);
   });
 
-  it('org approval → procurement of the organisation + the requester; a catalog row leaves the submitter to the catalog', async () => {
+  it('org approval → procurement of the organisation + the requester; a catalog row: one notice to the submitter unless the catalog told them', async () => {
     const { svc, n } = world({ status: 'PENDING_APPROVAL' });
     await svc.orgApprove(5, 20);
     expect(n.sent[0]).toMatchObject({
@@ -192,9 +192,43 @@ describe('purchase requisitions', () => {
       userIds: [10],
       actorId: 20,
     });
+    expect(n.sent[0].path).toBe('/purchase-requisitions?requisition=5');
+    // 2026-10-14: the organisation decides on the purchase line in the queue (the route) —
+    // procurement opens its own page, the submitter hears it once, on «Իմ հարցումները».
     const cat = world({ status: 'PENDING_APPROVAL', submissionId: 3 });
     await cat.svc.orgApprove(5, 20);
-    expect(cat.n.sent[0].userIds).toEqual([]);
+    expect(cat.n.sent).toHaveLength(2);
+    expect(cat.n.sent[0]).toMatchObject({ permissions: ['manage_procurement'], entityIds: [7], excludeUserIds: [10], path: '/procurement?tab=requisitions' });
+    expect(cat.n.sent[0].userIds).toBeUndefined();
+    expect(cat.n.sent[1]).toMatchObject({ type: 'warehouse.requisition_approved', userIds: [10], path: '/goods-requests?tab=mine&id=3' });
+    expect(cat.n.sent[1].permissions).toBeUndefined();
+    // The catalog's own decision (CatalogService.approve) already told the submitter: procurement only.
+    const told = world({ status: 'PENDING_APPROVAL', submissionId: 3 });
+    await told.svc.orgApprove(5, 20, { submitterTold: true });
+    expect(told.n.sent).toHaveLength(1);
+    expect(told.n.sent[0].permissions).toEqual(['manage_procurement']);
+  });
+
+  it('a catalog requisition: the desks’ notices open the request in «Ապրանքների հարցումներ → Հաստատում»', async () => {
+    const sub = world({ status: 'DRAFT', submissionId: 3 });
+    await sub.svc.submit(5, 10);
+    expect(sub.n.sent[0]).toMatchObject({ type: 'warehouse.requisition_submitted', path: '/goods-requests?tab=approve&id=3' });
+    const rej = world({ status: 'PENDING_APPROVAL', submissionId: 3 });
+    await rej.svc.orgReject(5, 20, 'Թանկ է');
+    expect(rej.n.sent).toHaveLength(1);
+    expect(rej.n.sent[0]).toMatchObject({ type: 'warehouse.requisition_rejection_pending', path: '/goods-requests?tab=approve&id=3' });
+    const c = world({ status: 'REJECTION_PENDING', rejectionStage: 'ORG', rejectionRequestedBy: 20, rejectionReason: 'Թանկ է', submissionId: 3 });
+    await c.svc.confirmRejection(5, 40);
+    expect(c.n.sent.map((x: any) => [x.userIds, x.path])).toEqual([
+      [[10], '/goods-requests?tab=mine&id=3'],
+      [[20], '/goods-requests?tab=approve&id=3'],
+    ]);
+    const d = world({ status: 'REJECTION_PENDING', rejectionStage: 'PROCUREMENT', rejectionRequestedBy: 30, rejectionReturnStatus: 'SUBMITTED', submissionId: 3 });
+    await d.svc.declineRejection(5, 40, 'Պետք է');
+    expect(d.n.sent.map((x: any) => [x.userIds, x.path])).toEqual([
+      [[10], '/goods-requests?tab=mine&id=3'],
+      [[30], '/procurement?tab=requisitions'],
+    ]);
   });
 
   it('a rejection at either stage waits for confirm_requisition_rejection in the organisation', async () => {

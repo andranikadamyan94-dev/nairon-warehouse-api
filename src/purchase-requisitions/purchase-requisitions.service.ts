@@ -86,6 +86,24 @@ export const CONFIRM_REJECTION_PERMISSION = 'confirm_requisition_rejection';
 /** Orders whose lines still count as "coming" for the expected-quantity snapshot. */
 const OPEN_ORDER_STATUSES = ['PENDING_FINANCE_APPROVAL', 'FINANCE_APPROVED', 'ORDERED', 'PARTIALLY_RECEIVED'];
 
+type Linkable = { id: number; submissionId?: number | null; rejectionStage?: string | null };
+/**
+ * Where a notice about a requisition opens (2026-10-14). A catalog
+ * checkout's requisition is decided on its purchase line in «Ապրանքների
+ * հարցումներ → Հաստատում» — the CRM «Գնման հայտեր» desks are gone — so the
+ * organisation's approvers and confirmers open the request there, the
+ * submitter opens it in «Իմ հարցումները» and procurement on «Գնումներ →
+ * Գնման հայտեր». A requisition filed directly keeps its CRM link.
+ */
+export const requisitionLinks = {
+  desk: (req: Linkable) => (req.submissionId ? `/goods-requests?tab=approve&id=${req.submissionId}` : crmLinks.requisition(req.id)),
+  requester: (req: Linkable) => (req.submissionId ? `/goods-requests?tab=mine&id=${req.submissionId}` : crmLinks.requisition(req.id)),
+  procurement: (req: Linkable) => (req.submissionId ? '/procurement?tab=requisitions' : crmLinks.requisition(req.id)),
+  /** Whoever asked for a rejection: the organisation's desk, or procurement (stage PROCUREMENT). */
+  rejecter: (req: Linkable) => (req.rejectionStage === 'PROCUREMENT' ? requisitionLinks.procurement(req) : requisitionLinks.desk(req)),
+};
+const links = requisitionLinks;
+
 /**
  * #1885/#1888-#1894 purchase requisitions. Someone holding
  * create_purchase_requisition in their organization files one (their own are
@@ -629,27 +647,35 @@ export class PurchaseRequisitionsService {
 
   // ── Organization approval (approve_purchase_requisition in the requisition's organization) ──
 
-  /** Let the requisition through to procurement. */
-  async orgApprove(id: number, userId: number) {
+  /**
+   * Let the requisition through to procurement. `submitterTold`: the catalog's
+   * own decision (CatalogService.approve) tells the submitter with one catalog
+   * notice; the organisation desk on the purchase line (2026-10-14) calls the
+   * route, and then the submitter hears it from here — once either way.
+   */
+  async orgApprove(id: number, userId: number, opts?: { submitterTold?: boolean }) {
     const req = await this.getOrThrow(id);
     await this.assertMayDecide(req, userId);
     await this.prisma.purchaseRequisition.update({
       where: { id },
       data: { status: 'SUBMITTED', decidedBy: userId, decidedAt: new Date() },
     });
-    // Procurement now has it; the requester hears it went through — unless it
-    // is a catalog checkout's, whose submitter the catalog tells itself.
-    this.notify({
+    const base = {
       type: WAREHOUSE_TYPES.requisitionApproved,
-      permissions: ['manage_procurement'],
-      entityIds: [req.entityId],
-      userIds: req.submissionId ? [] : [req.createdBy],
       actorId: userId,
       title: 'Գնման հայտը հաստատվել է',
       body: `${this.label(req)} հաստատվել է կազմակերպության կողմից և փոխանցվել գնումների բաժին։`,
-      path: crmLinks.requisition(req.id),
       details: this.details(req),
-    });
+    };
+    if (!req.submissionId) {
+      // Procurement now has it; the requester hears it went through.
+      this.notify({ ...base, permissions: ['manage_procurement'], entityIds: [req.entityId], userIds: [req.createdBy], path: crmLinks.requisition(req.id) });
+    } else {
+      // A catalog checkout's: procurement opens it on their own page, the
+      // submitter on their request in «Իմ հարցումները».
+      this.notify({ ...base, permissions: ['manage_procurement'], entityIds: [req.entityId], excludeUserIds: [req.createdBy], path: links.procurement(req) });
+      if (!opts?.submitterTold) this.notify({ ...base, userIds: [req.createdBy], path: links.requester(req) });
+    }
     return this.findOne(id, userId, { permissionNames: [APPROVE_PERMISSION] });
   }
 
@@ -763,13 +789,11 @@ export class PurchaseRequisitionsService {
         ? { status: 'REJECTED', reviewedBy: by, reviewedAt: at, ...stamp }
         : { status: 'REJECTED', decidedBy: by, decidedAt: at, ...stamp },
     });
-    this.notify({
+    this.notifyRequesterAndRejecter(req, {
       type: WAREHOUSE_TYPES.requisitionRejectionDecided,
-      userIds: [req.createdBy, req.rejectionRequestedBy],
       actorId: userId,
       title: 'Գնման հայտը մերժվել է',
       body: `${this.label(req)} մերժվել է${req.rejectionReason ? `՝ ${req.rejectionReason}` : ''}։`,
-      path: crmLinks.requisition(req.id),
       details: [...this.details(req), ...(req.rejectionReason ? [{ label: 'Պատճառ', value: req.rejectionReason }] : [])],
     });
     return this.findOne(id, userId, { permissionNames: [CONFIRM_REJECTION_PERMISSION] });
@@ -794,16 +818,31 @@ export class PurchaseRequisitionsService {
     // The rejecter learns their rejection did not stand; the requester that
     // the requisition is alive again (they were never told it was rejected,
     // but the screen showed it as such — catalog.rules REJECTION_PENDING).
-    this.notify({
+    this.notifyRequesterAndRejecter(req, {
       type: WAREHOUSE_TYPES.requisitionRejectionDecided,
-      userIds: [req.createdBy, req.rejectionRequestedBy],
       actorId: userId,
       title: 'Գնման հայտի մերժումը չի հաստատվել',
       body: `${this.label(req)}՝ մերժումը չի հաստատվել, հայտը վերադարձել է մշակման${note?.trim() ? `․ ${note.trim()}` : ''}։`,
-      path: crmLinks.requisition(req.id),
       details: [...this.details(req), ...(note?.trim() ? [{ label: 'Նշում', value: note.trim() }] : [])],
     });
     return this.findOne(id, userId, { permissionNames: [CONFIRM_REJECTION_PERMISSION] });
+  }
+
+  /**
+   * The confirmer's word reaches the requester and whoever asked for the
+   * rejection. A catalog checkout's requisition (2026-10-14) sends each to
+   * their own screen — the submitter to «Իմ հարցումները», the rejecter to the
+   * desk they rejected from — one notice each.
+   */
+  private notifyRequesterAndRejecter(req: any, n: Omit<WarehouseNotification, 'userIds' | 'path'>) {
+    if (!req.submissionId) {
+      this.notify({ ...n, userIds: [req.createdBy, req.rejectionRequestedBy], path: crmLinks.requisition(req.id) });
+      return;
+    }
+    this.notify({ ...n, userIds: [req.createdBy], path: links.requester(req) });
+    if (req.rejectionRequestedBy && req.rejectionRequestedBy !== req.createdBy) {
+      this.notify({ ...n, userIds: [req.rejectionRequestedBy], path: links.rejecter(req) });
+    }
   }
 
   /** Procurement maps a free-text line onto a catalog item before approval. */
@@ -965,7 +1004,7 @@ export class PurchaseRequisitionsService {
    * catalog, which passes the people its own notice already reached.
    */
   announceSubmitted(
-    req: { id: number; title?: string | null; status: string; entityId: number | null; lines?: { itemName: string; quantity: number }[] },
+    req: { id: number; title?: string | null; status: string; entityId: number | null; submissionId?: number | null; lines?: { itemName: string; quantity: number }[] },
     actorId: number,
     excludeUserIds: number[] = [],
   ) {
@@ -979,7 +1018,7 @@ export class PurchaseRequisitionsService {
       excludeUserIds,
       title: 'Գնման հայտը սպասում է հաստատման',
       body: `${this.label(req)} սպասում է ձեր հաստատմանը${lines ? `՝ ${lines}` : ''}։`,
-      path: crmLinks.requisition(req.id),
+      path: links.desk(req),
       details: [...this.details(req), ...(lines ? [{ label: 'Ապրանքներ', value: lines }] : [])],
     });
   }
@@ -993,7 +1032,7 @@ export class PurchaseRequisitionsService {
       actorId,
       title: 'Գնման հայտի մերժումը սպասում է հաստատման',
       body: `${this.label(req)}՝ մերժման պատճառ՝ ${reason.trim()}։ Հաստատեք կամ մերժեք մերժումը։`,
-      path: crmLinks.requisition(req.id),
+      path: links.desk(req),
       details: [...this.details(req), { label: 'Պատճառ', value: reason.trim() }],
     });
   }
