@@ -1879,8 +1879,12 @@ export class CatalogService {
     const withdrawn: string[] = [];
     for (const r of loaded.reservations) {
       if (RESERVATION_LIVE.includes(r.status)) {
-        // Quiet: the desk hears of the whole withdrawal once, below.
-        await this.reservations.cancel(r.id, userId, 'Հարցումը չեղարկվել է ներկայացնողի կողմից', actor, { quiet: true });
+        // Quiet: the desk hears of the whole withdrawal once, below. No actor:
+        // the request's ownership and its all-pending lines (ownEditable) are
+        // the check — the reservation's two-party rule lets a requester act
+        // only through a task, and refused a plain employee's own «Չեղարկել»
+        // with «Սրա համար պահեստի թույլտվություն է պետք» (found 2026-10-14).
+        await this.reservations.cancel(r.id, userId, 'Հարցումը չեղարկվել է ներկայացնողի կողմից', undefined, { quiet: true });
         withdrawn.push(`${r.item?.name ?? `#${r.itemId}`} × ${r.quantity}`);
       }
     }
