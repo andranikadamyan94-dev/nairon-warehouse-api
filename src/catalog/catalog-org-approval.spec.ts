@@ -46,7 +46,7 @@ const at = (s: string) => new Date(s);
  * whose rejection waits for confirmation, one already with procurement, and a
  * stock-only one nobody has handed out.
  */
-function world() {
+function world(opts: { shortfall?: boolean } = {}) {
   const subs: any[] = [
     { id: 1, number: 'REQ-1001', createdBy: 7, entityId: 1, objectId: null, taskId: null, projectId: null, purpose: 'Գրասենյակ', neededBy: at('2099-12-01'), createdAt: at('2026-10-12T08:00:00Z'), cancelledAt: null, reminders: [] },
     { id: 2, number: 'REQ-1002', createdBy: 7, entityId: 1, objectId: null, taskId: null, projectId: null, purpose: 'Ներկ', neededBy: at('2099-12-01'), createdAt: at('2026-10-12T09:00:00Z'), cancelledAt: null, reminders: [] },
@@ -82,6 +82,16 @@ function world() {
     if (some && !requisitions.some((r) => r.submissionId === s.id && some.status.in.includes(r.status) && r.lines.length > 0)) return false;
     return true;
   };
+  if (opts.shortfall) {
+    // 2026-10-14: REQ-1005 asked for 9 kg of cement the shelf could not cover; the keeper raised «Գնման հայտ»
+    // #303 for the 9 (its line carries the reservation), linked to the request — it waits for the organisation.
+    subs.push({ id: 5, number: 'REQ-1005', createdBy: 8, entityId: 1, objectId: null, taskId: null, projectId: null, purpose: 'Հիմք', neededBy: at('2099-12-01'), createdAt: at('2026-10-12T12:00:00Z'), cancelledAt: null, reminders: [] });
+    rows.push({ id: 705, submissionId: 5, itemId: 7, quantity: 9, status: 'PENDING', acceptedQuantity: 0, warehouseId: null, warehouse: null, startDate: at('2026-10-12'), endDate: at('2099-12-01'),
+      item: { id: 7, name: 'Ցեմենտ', unit: 'KG', code: 'C-7', variantLabel: null, type: 'CONSUMABLE' }, allocations: [], allocationHistory: [], statusHistory: [] });
+    requisitions.push({ id: 303, submissionId: 5, entityId: 1, status: 'PENDING_APPROVAL', createdBy: KEEPER, createdAt: at('2026-10-12T12:30:00Z'), decidedBy: null, decidedAt: null, reviewedBy: null, reviewedAt: null,
+      rejectionStage: null, rejectionReason: null, rejectionRequestedBy: null, rejectionRequestedAt: null, rejectionConfirmedBy: null, rejectionConfirmedAt: null, rejectionDeclineNote: null,
+      comments: [], lines: [{ id: 3031, itemId: 7, itemName: 'Ցեմենտ', quantity: 9, unit: 'KG', code: 'C-7', reservationId: 705, item: { id: 7, name: 'Ցեմենտ', unit: 'KG', code: 'C-7', variantLabel: null } }] });
+  }
   const prisma: any = {
     catalogSubmission: {
       // Newest first, as the service orders; the page cut as the queue asks for it.
@@ -192,5 +202,32 @@ describe('what a purchase line says and carries', () => {
     expect(declined.text).toBe('Մերժումը չի հաստատվել, գնումը վերադարձվել է հաստատման — Գնումն անհրաժեշտ է');
     expect(view.timeline.find((t) => t.kind === 'requisition.approved')!.by).toEqual({ id: APPROVER, name: `Ա ${APPROVER}` });
     expect(view.approver).toEqual({ id: APPROVER, name: `Ա ${APPROVER}` });
+  });
+});
+
+describe('the keeper’s shortfall requisition is part of its request (2026-10-14)', () => {
+  it('shows on the request as a purchase line with the organisation desk, and counts for the status', async () => {
+    const w = world({ shortfall: true });
+    const view = await w.svc.getOne(5, actor(APPROVER));
+    expect(view.lines.map((l) => [l.id, l.kind, l.status])).toEqual([['r705', 'STOCK', 'PENDING'], ['l3031', 'PURCHASE', 'PENDING_APPROVAL']]);
+    const line = view.lines[1];
+    expect(line.statusLabel).toBe('Սպասում է կազմակերպության հաստատման');
+    expect(line.requisition).toMatchObject({ id: 303, status: 'PENDING_APPROVAL', entityId: 1, shortfall: true });
+    expect(view.status).toBe('SUBMITTED');
+    expect(view.timeline.find((t) => t.kind === 'shortfall.raised')).toMatchObject({ by: { id: KEEPER }, text: 'Գնման հայտ #303 (պակասող քանակի համար) ուղարկվել է կազմակերպության հաստատման' });
+  });
+
+  it('«Գնման հաստատում» lists the request; the organisation’s desk alone sees it', async () => {
+    const w = world({ shortfall: true });
+    expect((await w.svc.queue({ status: ORG_DESK_FILTER }, actor(KEEPER))).items.map((v) => v.number)).toEqual(['REQ-1005', 'REQ-1002', 'REQ-1001']);
+    expect((await w.svc.queue({}, actor(APPROVER))).items.map((v) => v.number)).toEqual(['REQ-1005', 'REQ-1002', 'REQ-1001']);
+  });
+
+  it('the request’s own decisions never act on it: it is not among the lines approve / reject / info / edit read', async () => {
+    const w = world({ shortfall: true });
+    const loaded = await (w.svc as any).loadOne(5);
+    expect(loaded.requisition).toBeNull();
+    expect(loaded.shortfalls.map((q: any) => q.id)).toEqual([303]);
+    expect((w.svc as any).linesOf(loaded, new Map()).map((l: any) => l.id)).toEqual(['r705']);
   });
 });

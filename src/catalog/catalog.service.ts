@@ -99,6 +99,17 @@ export function yerevanClock(d: Date): string {
   return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Yerevan', hour: '2-digit', minute: '2-digit', hour12: false }).format(d);
 }
 
+/**
+ * A request's requisitions (2026-10-14): its own — the checkout's purchase
+ * lines, none of which comes from a reservation — and the keeper's shortfall
+ * ones, whose lines do. The first own one is the request's requisition (as
+ * before); every shortfall one is listed.
+ */
+export function splitRequisitions<T extends { lines?: { reservationId?: number | null }[] }>(reqs: T[]): { own: T | null; shortfalls: T[] } {
+  const isShortfall = (r: T) => (r.lines ?? []).some((l) => l.reservationId != null);
+  return { own: reqs.find((r) => !isShortfall(r)) ?? null, shortfalls: reqs.filter(isShortfall) };
+}
+
 /** What a purchase-requisition status means to the person who asked through the catalog. */
 const REQUISITION_LABELS: Record<string, string> = {
   DRAFT: 'Տեղեկություն է պետք',
@@ -176,6 +187,8 @@ export type LineRequisition = {
   rejectionReason?: string | null;
   rejectionRequestedBy?: Person;
   rejectionDeclineNote?: string | null;
+  /** 2026-10-14: raised by the keeper for short stock lines — decided on the line only, not by the request's buttons. */
+  shortfall?: boolean;
 };
 
 export type SubmissionView = {
@@ -225,6 +238,14 @@ type Loaded = {
   sub: any;
   reservations: any[];
   requisition: any | null;
+  /**
+   * 2026-10-14: the keeper's «Գնման հայտ»s raised for this request's short
+   * stock lines (their lines carry the reservation). They show on the request
+   * as purchase lines with the organisation desk on them, and count for its
+   * status — but the request's own decisions (approve / reject / info / edit)
+   * act on its own requisition only.
+   */
+  shortfalls: any[];
 };
 
 type Directory = {
@@ -1104,7 +1125,7 @@ export class CatalogService {
       }),
       this.prisma.purchaseRequisition.findMany({
         where: { submissionId: { in: subIds } },
-        select: { id: true, submissionId: true, status: true, lines: { select: { itemId: true, itemName: true }, orderBy: { id: 'asc' } } },
+        select: { id: true, submissionId: true, status: true, lines: { select: { itemId: true, itemName: true, reservationId: true }, orderBy: { id: 'asc' } } },
         orderBy: { id: 'asc' },
       }),
     ]);
@@ -1122,8 +1143,11 @@ export class CatalogService {
       if (!resOf.has(r.submissionId)) resOf.set(r.submissionId, []);
       resOf.get(r.submissionId)!.push(r);
     }
-    const reqOf = new Map<number, any>();
-    for (const r of requisitions as any[]) if (!reqOf.has(r.submissionId)) reqOf.set(r.submissionId, r);
+    const reqsOf = new Map<number, any[]>();
+    for (const r of requisitions as any[]) {
+      if (!reqsOf.has(r.submissionId)) reqsOf.set(r.submissionId, []);
+      reqsOf.get(r.submissionId)!.push(r);
+    }
 
     const [userOf, objectOf] = opts.texts
       ? await Promise.all([
@@ -1136,7 +1160,7 @@ export class CatalogService {
 
     return subs.map((sub) => {
       const rows = resOf.get(sub.id) ?? [];
-      const req = reqOf.get(sub.id) ?? null;
+      const { own, shortfalls } = splitRequisitions<any>(reqsOf.get(sub.id) ?? []);
       const lines = [
         ...rows.map((r) => {
           const issued = roundQty((r.allocations ?? []).reduce((s: number, a: any) => s + (a.quantity ?? 0), 0));
@@ -1148,10 +1172,12 @@ export class CatalogService {
             stage: stageOf('STOCK', r.status, { issued }),
           };
         }),
-        ...((req?.lines ?? []) as any[]).map((line) => {
-          const kind: LineKind = line.itemId ? 'PURCHASE' : 'NEW';
-          return { kind, itemName: line.itemName, reclaimableQuantity: 0, stage: stageOf(kind, req.status) };
-        }),
+        ...[own, ...shortfalls].filter(Boolean).flatMap((req: any) =>
+          ((req.lines ?? []) as any[]).map((line) => {
+            const kind: LineKind = line.itemId ? 'PURCHASE' : 'NEW';
+            return { kind, itemName: line.itemName, reclaimableQuantity: 0, stage: stageOf(kind, req.status) };
+          }),
+        ),
       ];
       const direct =
         !!sub.objectId &&
@@ -1241,9 +1267,15 @@ export class CatalogService {
       if (!resOf.has(r.submissionId!)) resOf.set(r.submissionId!, []);
       resOf.get(r.submissionId!)!.push(r);
     }
-    const reqOf = new Map<number, any>();
-    for (const r of requisitions) if (!reqOf.has(r.submissionId!)) reqOf.set(r.submissionId!, r);
-    return subs.map((sub) => ({ sub, reservations: resOf.get(sub.id) ?? [], requisition: reqOf.get(sub.id) ?? null }));
+    const reqsOf = new Map<number, any[]>();
+    for (const r of requisitions) {
+      if (!reqsOf.has(r.submissionId!)) reqsOf.set(r.submissionId!, []);
+      reqsOf.get(r.submissionId!)!.push(r);
+    }
+    return subs.map((sub) => {
+      const { own, shortfalls } = splitRequisitions(reqsOf.get(sub.id) ?? []);
+      return { sub, reservations: resOf.get(sub.id) ?? [], requisition: own, shortfalls };
+    });
   }
 
   private async views(where: any, viewerId: number): Promise<SubmissionView[]> {
@@ -1251,7 +1283,7 @@ export class CatalogService {
     if (!loaded.length) return [];
     const itemIds = loaded.flatMap((l) => [
       ...l.reservations.map((r) => r.itemId),
-      ...((l.requisition?.lines ?? []) as any[]).map((x) => x.itemId).filter((x) => x != null),
+      ...[l.requisition, ...l.shortfalls].flatMap((q: any) => (q?.lines ?? []) as any[]).map((x) => x.itemId).filter((x) => x != null),
     ]);
     const userIds = loaded.flatMap((l) => [
       l.sub.createdBy,
@@ -1261,6 +1293,7 @@ export class CatalogService {
       l.requisition?.rejectionRequestedBy,
       l.requisition?.rejectionConfirmedBy,
       ...((l.requisition?.comments ?? []) as any[]).map((c) => c.userId),
+      ...l.shortfalls.flatMap((q: any) => [q.createdBy, q.decidedBy, q.rejectionRequestedBy, q.rejectionConfirmedBy]),
       ...l.reservations.flatMap((r) => (r.statusHistory as any[]).map((h) => h.performedBy)),
       ...l.reservations.flatMap((r) => ((r.allocationHistory ?? []) as any[]).map((h) => h.performedBy)),
       l.sub.lastReminderBy,
@@ -1482,11 +1515,21 @@ export class CatalogService {
   private linesOf(
     l: Loaded,
     free: Map<number, number>,
-    extra: { pool?: Map<string, number>; person?: (id: number | null | undefined) => Person; requisitionOf?: Map<number, { id: number; status: string }> } = {},
+    extra: { pool?: Map<string, number>; person?: (id: number | null | undefined) => Person; requisitionOf?: Map<number, { id: number; status: string }>; withShortfalls?: boolean } = {},
   ): SubmissionLine[] {
     return [
       ...l.reservations.map((r) => this.lineOfReservation(r, free, { pool: extra.pool, person: extra.person, requisition: extra.requisitionOf?.get(r.id) ?? null })),
       ...((l.requisition?.lines ?? []) as any[]).map((line) => this.lineOfRequisition(l.requisition, line, free, extra.person)),
+      // The keeper's shortfall requisitions (2026-10-14): on screen and in the
+      // status, never among the lines the request's own decisions act on.
+      ...(extra.withShortfalls
+        ? l.shortfalls.flatMap((q: any) =>
+            ((q.lines ?? []) as any[]).map((line) => {
+              const out = this.lineOfRequisition(q, line, free, extra.person);
+              return { ...out, requisition: { ...out.requisition!, shortfall: true } };
+            }),
+          )
+        : []),
     ];
   }
 
@@ -1505,7 +1548,7 @@ export class CatalogService {
     },
   ): SubmissionView {
     const { sub, requisition } = l;
-    const lines = this.linesOf(l, ctx.free, { pool: ctx.pool, person: ctx.person, requisitionOf: ctx.requisitionOf });
+    const lines = this.linesOf(l, ctx.free, { pool: ctx.pool, person: ctx.person, requisitionOf: ctx.requisitionOf, withShortfalls: true });
     const stages = lines.map((x) => x.stage);
     const cancelled = !!sub.cancelledAt;
     const infoOpen = !!sub.infoRequestAt;
@@ -1569,6 +1612,27 @@ export class CatalogService {
         timeline.push({ at: iso(requisition.reviewedAt)!, kind: 'requisition.ordered', by: ctx.person(requisition.reviewedBy), text: 'Գնումների բաժինը պատվեր է ձևակերպել' });
       }
     }
+    // The keeper's shortfall requisitions (2026-10-14): raised, and the organisation's word on them.
+    for (const q of l.shortfalls) {
+      const label = `Գնման հայտ #${q.id} (պակասող քանակի համար)`;
+      timeline.push({ at: iso(q.createdAt)!, kind: 'shortfall.raised', by: ctx.person(q.createdBy), text: `${label} ուղարկվել է կազմակերպության հաստատման` });
+      const rejectedByOrg = ['REJECTED', 'REJECTION_PENDING'].includes(q.status) && !q.reviewedBy;
+      if (q.decidedAt && !rejectedByOrg) {
+        timeline.push({ at: iso(q.decidedAt)!, kind: 'shortfall.decided', by: ctx.person(q.decidedBy), text: `${label}՝ հաստատվել է և փոխանցվել գնումների բաժին` });
+      }
+      if (q.rejectionRequestedAt) {
+        timeline.push({ at: iso(q.rejectionRequestedAt)!, kind: 'shortfall.rejection_requested', by: ctx.person(q.rejectionRequestedBy), text: `${label}՝ մերժվել է${q.rejectionReason ? ` — ${q.rejectionReason}` : ''}` });
+      }
+      if (q.rejectionConfirmedAt) {
+        const stood = q.status === 'REJECTED';
+        timeline.push({
+          at: iso(q.rejectionConfirmedAt)!,
+          kind: stood ? 'shortfall.rejection_confirmed' : 'shortfall.returned',
+          by: ctx.person(q.rejectionConfirmedBy),
+          text: stood ? `${label}՝ մերժումը հաստատվել է` : `${label}՝ մերժումը չի հաստատվել${q.rejectionDeclineNote ? ` — ${q.rejectionDeclineNote}` : ''}`,
+        });
+      }
+    }
     if (sub.infoRequestAt) {
       timeline.push({ at: iso(sub.infoRequestAt)!, kind: 'info_request', by: ctx.person(sub.infoRequestBy), text: sub.infoRequestText ?? '' });
     }
@@ -1630,7 +1694,7 @@ export class CatalogService {
       comment: sub.comment ?? null,
       attachmentUrl: sub.attachmentUrl ?? null,
       status,
-      rejectionAwaitsConfirmation: status === 'REJECTED' && requisition?.status === 'REJECTION_PENDING',
+      rejectionAwaitsConfirmation: status === 'REJECTED' && [requisition, ...l.shortfalls].some((q: any) => q?.status === 'REJECTION_PENDING'),
       progress: progressOf(stages),
       canEdit: editable,
       canCancel: editable,
