@@ -1198,6 +1198,8 @@ export class CatalogService {
         source: sourceOf({ taskId: sub.taskId, objectId: sub.objectId, direct }),
         status: deriveStatus(lines.map((l) => l.stage), { cancelled: !!sub.cancelledAt, infoOpen: !!sub.infoRequestAt }),
         lines,
+        // As views() says it (2026-10-15): the tabs file these under «Սպասում է հաստատման», not «Մերժված».
+        rejectionAwaitsConfirmation: [own, ...shortfalls].some((q: any) => q?.status === 'REJECTION_PENDING'),
       };
     });
   }
@@ -1213,7 +1215,11 @@ export class CatalogService {
   private filterViews(all: SubmissionView[], query: Record<string, string | undefined>) {
     let out = all;
     const status = query.status?.trim().toUpperCase();
-    if (status && (SUBMISSION_STATUSES as string[]).includes(status)) out = out.filter((v) => v.status === status);
+    // A rejection still awaiting confirmation (2026-10-15, owner) is not final: «Սպասում է հաստատման», not «Մերժված».
+    const awaits = (v: SubmissionView) => v.status === 'REJECTED' && !!v.rejectionAwaitsConfirmation;
+    if (status === 'REJECTED') out = out.filter((v) => v.status === 'REJECTED' && !awaits(v));
+    else if (status === 'SUBMITTED') out = out.filter((v) => v.status === 'SUBMITTED' || awaits(v));
+    else if (status && (SUBMISSION_STATUSES as string[]).includes(status)) out = out.filter((v) => v.status === status);
     // «Տրված» (2026-10-08): the former «Հատկացումներ» page / «Տրամադրում» filter —
     // requests with goods handed out and not yet confirmed received.
     if (status === 'ISSUED') out = out.filter((v) => v.lines.some((l) => l.kind === 'STOCK' && l.reclaimableQuantity > 0));

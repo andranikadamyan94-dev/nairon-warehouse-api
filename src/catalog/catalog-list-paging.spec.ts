@@ -342,6 +342,22 @@ describe('queue and «Իմ հարցումները» — the database-paged path 
     }
   });
 
+  it('a rejection awaiting confirmation is under «Սպասում է հաստատման», never «Մերժված» (2026-10-15)', async () => {
+    const { svc } = world();
+    const all: any[] = (await Promise.all(USERS.map((u) => (svc as any).views({ createdBy: u }, u)))).flat();
+    const awaiting = all.filter((v) => v.status === 'REJECTED' && v.rejectionAwaitsConfirmation).map((v) => v.id).sort();
+    const final = all.filter((v) => v.status === 'REJECTED' && !v.rejectionAwaitsConfirmation).map((v) => v.id).sort();
+    expect(awaiting.length).toBeGreaterThan(0);
+    expect(final.length).toBeGreaterThan(0);
+    const tab = async (status: string) =>
+      (await Promise.all(USERS.map((u) => svc.mine(u, { status, pageSize: '100' })))).flatMap((p: any) => p.items.map((v: any) => v.id));
+    const rejected = await tab('REJECTED');
+    const waiting = await tab('SUBMITTED');
+    expect([...rejected].sort()).toEqual(final);
+    for (const id of awaiting) expect(waiting).toContain(id);
+    for (const v of all.filter((x) => x.status === 'SUBMITTED')) expect(waiting).toContain(v.id);
+  });
+
   it('the fixture is not trivial: pages fill, every status and source occurs', async () => {
     const { svc } = world();
     const all = await (svc as any).views({}, 40);

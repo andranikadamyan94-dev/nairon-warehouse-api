@@ -155,8 +155,10 @@ describe('the «Գնման հաստատում» filter', () => {
   it('a keeper without the filter sees everything; the desk alone sees only its own rows, whatever status it names', async () => {
     const w = world();
     expect((await w.svc.queue({}, actor(KEEPER))).total).toBe(4);
-    // REQ-1002 reads as rejected, REQ-1003 is with procurement: two still await a decision.
-    expect((await w.svc.queue({ status: 'SUBMITTED' }, actor(KEEPER))).items.map((v) => v.number)).toEqual(['REQ-1004', 'REQ-1001']);
+    // REQ-1003 is with procurement; REQ-1002's rejection awaits confirmation, so since 2026-10-15 (owner) it
+    // waits here with the two undecided ones instead of sitting under «Մերժված».
+    expect((await w.svc.queue({ status: 'SUBMITTED' }, actor(KEEPER))).items.map((v) => v.number)).toEqual(['REQ-1004', 'REQ-1002', 'REQ-1001']);
+    expect((await w.svc.queue({ status: 'REJECTED' }, actor(KEEPER))).items.map((v) => v.number)).not.toContain('REQ-1002');
     expect((await w.svc.queue({}, actor(APPROVER))).items.map((v) => v.number)).toEqual(['REQ-1002', 'REQ-1001']);
     expect((await w.svc.queue({ status: 'SUBMITTED' }, actor(CONFIRMER))).items.map((v) => v.number)).toEqual(['REQ-1002', 'REQ-1001']);
     // Someone holding the catalog desk's right too is not confined to the filter.
