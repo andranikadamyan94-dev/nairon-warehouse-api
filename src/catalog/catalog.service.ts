@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 
 import { PrismaService } from 'prisma/prisma.service';
-import { WAREHOUSE_TYPES, WarehouseNotification, WarehouseNotificationsService } from '../common/notifications/notifications.service';
+import { WAREHOUSE_TYPES, WarehouseNotification, WarehouseNotificationsService, requisitionLinks } from '../common/notifications/notifications.service';
 
 import { WarehouseActor } from '../auth/actor';
 import { CategoriesService } from '../categories/categories.service';
@@ -127,6 +127,8 @@ const REQUISITION_LABELS: Record<string, string> = {
 
 const RESERVATION_LIVE = ['PENDING', 'APPROVED', 'PARTIALLY_ALLOCATED', 'ALLOCATED'];
 const REQUISITION_CANCELLABLE = ['DRAFT', 'PENDING_APPROVAL', 'SUBMITTED', 'IN_REVIEW'];
+/** Past cancelling — procurement has ordered (or received) the goods: what the cancel notice calls it. */
+const REQUISITION_ORDERED: Record<string, string> = { APPROVED: 'պատվիրված', FULFILLED: 'ստացված' };
 
 export type SubmissionLine = {
   id: string;
@@ -1554,6 +1556,10 @@ export class CatalogService {
     const infoOpen = !!sub.infoRequestAt;
     const status = deriveStatus(stages, { cancelled, infoOpen });
     const editable = sub.createdBy === ctx.viewerId && stillEditable(stages, { cancelled });
+    // Cancelling asks what cancel() asks (ownEditable): the request's own lines. The keeper's shortfall
+    // requisition does not hold it — cancel() withdraws it, or tells procurement once it is ordered (2026-10-14).
+    const ownStages = lines.filter((x) => !x.requisition?.shortfall).map((x) => x.stage);
+    const cancellable = sub.createdBy === ctx.viewerId && stillEditable(ownStages, { cancelled });
     const iso = (d: Date | string | null | undefined) => (d ? new Date(d).toISOString() : null);
 
     const timeline: SubmissionView['timeline'] = [
@@ -1697,7 +1703,7 @@ export class CatalogService {
       rejectionAwaitsConfirmation: status === 'REJECTED' && [requisition, ...l.shortfalls].some((q: any) => q?.status === 'REJECTION_PENDING'),
       progress: progressOf(stages),
       canEdit: editable,
-      canCancel: editable,
+      canCancel: cancellable,
       lines: lines.map(({ stage: _stage, ...rest }) => rest),
       timeline,
       infoRequest: sub.infoRequestAt
@@ -1888,9 +1894,32 @@ export class CatalogService {
         withdrawn.push(`${r.item?.name ?? `#${r.itemId}`} × ${r.quantity}`);
       }
     }
-    if (loaded.requisition && REQUISITION_CANCELLABLE.includes(loaded.requisition.status)) {
-      // Quiet: the cancelled submission below is the one notice.
-      await this.requisitions.cancel(loaded.requisition.id, userId, actor.isSuperAdmin, { quiet: true });
+    // Every requisition linked to the request — the catalog's own and, since
+    // 2026-10-14, the keeper's shortfall ones. Still undecided by procurement:
+    // withdrawn quietly (the cancelled submission below is the one notice); the
+    // keeper filed a shortfall, so for it the request's ownership — checked
+    // above — stands in for the requisition's. Already ordered: it stays, and
+    // procurement hears the request behind it is gone.
+    for (const req of [loaded.requisition, ...(loaded.shortfalls ?? [])].filter(Boolean)) {
+      if (REQUISITION_CANCELLABLE.includes(req.status)) {
+        const shortfall = req !== loaded.requisition;
+        await this.requisitions.cancel(req.id, userId, shortfall || actor.isSuperAdmin, { quiet: true });
+      } else if (REQUISITION_ORDERED[req.status]) {
+        this.notify({
+          type: WAREHOUSE_TYPES.requisitionCancelled,
+          permissions: ['manage_procurement'],
+          entityIds: [req.entityId],
+          userIds: [req.reviewedBy],
+          actorId: userId,
+          title: 'Գնման հայտի հարցումը չեղարկվել է',
+          body: `Գնման հայտ #${req.id}-ի հիմքում ընկած հարցումը (${loaded.sub.number}) չեղարկվել է ներկայացնողի կողմից։ Հայտն արդեն ${REQUISITION_ORDERED[req.status]} է և մնում է ուժի մեջ․ ստուգեք՝ արդյոք գնումը դեռ պետք է։`,
+          path: requisitionLinks.procurementOne(req),
+          details: [
+            { label: 'Գնման հայտ', value: `#${req.id}` },
+            { label: 'Հարցում', value: loaded.sub.number },
+          ],
+        });
+      }
     }
     await this.prisma.catalogSubmission.update({
       where: { id },

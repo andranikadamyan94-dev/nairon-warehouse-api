@@ -129,6 +129,8 @@ export const requisitionLinks = {
   requester: (req: ReqLinkable) =>
     req.submissionId ? `/goods-requests?tab=mine&id=${req.submissionId}` : `/goods-requests?tab=approve&requisition=${req.id}`,
   procurement: (_req?: ReqLinkable) => '/procurement?tab=requisitions',
+  /** The one requisition, its drawer open in «Գնումներ → Գնման հայտեր». */
+  procurementOne: (req: ReqLinkable) => `/procurement?tab=requisitions&requisition=${req.id}`,
   /** Whoever asked for a rejection: the organisation's desk, or procurement (stage PROCUREMENT). */
   rejecter: (req: ReqLinkable) => (req.rejectionStage === 'PROCUREMENT' ? requisitionLinks.procurement(req) : requisitionLinks.desk(req)),
 };

@@ -223,6 +223,18 @@ describe('the keeper’s shortfall requisition is part of its request (2026-10-1
     expect((await w.svc.queue({}, actor(APPROVER))).items.map((v) => v.number)).toEqual(['REQ-1005', 'REQ-1002', 'REQ-1001']);
   });
 
+  it('the requester may still cancel while it waits, or after procurement ordered it — not edit once it moved', async () => {
+    const w = world({ shortfall: true });
+    // Waiting for the organisation: the whole request is still the requester's to change.
+    expect(await w.svc.getOne(5, actor(8))).toMatchObject({ canEdit: true, canCancel: true });
+    // Ordered: «Չեղարկել» stays (cancel() leaves the order and tells procurement), «Խմբագրել» goes.
+    const [shortfall] = await w.prisma.purchaseRequisition.findMany({ where: { submissionId: { in: [5] } } });
+    Object.assign(shortfall, { status: 'APPROVED', reviewedBy: 50, reviewedAt: at('2026-10-13T09:00:00Z'), decidedBy: APPROVER, decidedAt: at('2026-10-13T08:00:00Z') });
+    expect(await w.svc.getOne(5, actor(8))).toMatchObject({ canEdit: false, canCancel: true });
+    // Somebody else's request: neither.
+    expect(await w.svc.getOne(5, actor(APPROVER))).toMatchObject({ canEdit: false, canCancel: false });
+  });
+
   it('the request’s own decisions never act on it: it is not among the lines approve / reject / info / edit read', async () => {
     const w = world({ shortfall: true });
     const loaded = await (w.svc as any).loadOne(5);
