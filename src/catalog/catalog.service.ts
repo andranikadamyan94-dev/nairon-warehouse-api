@@ -71,7 +71,19 @@ export const QUEUE_PERMISSION = 'view_catalog_requests';
  * each may DO inside is decided per action: manage_reservations hands out,
  * approve_purchase_requisition decides purchase lines, the desk reminds.
  */
-export const QUEUE_VIEWER_PERMISSIONS = [QUEUE_PERMISSION, 'view_reservations', 'manage_reservations', 'receive_reservation_alerts'];
+export const KEEPER_VIEWER_PERMISSIONS = [QUEUE_PERMISSION, 'view_reservations', 'manage_reservations', 'receive_reservation_alerts'];
+/**
+ * The organisation's purchase desk (owner 2026-10-12): the organisation
+ * approval of a catalog requisition — and the confirmation of its rejection —
+ * happen INSIDE the queue, on the purchase line, not on the CRM «Գնման
+ * հայտեր» page. The two rights open the queue; a holder of only these two
+ * sees the «Գնման հաստատում» filter alone (ORG_DESK_FILTER).
+ */
+export const ORG_DESK_PERMISSIONS = ['approve_purchase_requisition', 'confirm_requisition_rejection'];
+export const QUEUE_VIEWER_PERMISSIONS = [...KEEPER_VIEWER_PERMISSIONS, ...ORG_DESK_PERMISSIONS];
+/** `status=PURCHASE_APPROVAL`: requests with a purchase line the organisation still has to decide on (or whose rejection awaits confirmation). */
+export const ORG_DESK_FILTER = 'PURCHASE_APPROVAL';
+const ORG_DESK_STATUSES = ['PENDING_APPROVAL', 'REJECTION_PENDING'];
 /** Ordering from the catalog: the right that opens the warehouse app is enough (2026-10-08). */
 export const EMPLOYEE_PERMISSIONS = ['page_warehouse', 'view_warehouse'];
 
@@ -90,11 +102,13 @@ export function yerevanClock(d: Date): string {
 /** What a purchase-requisition status means to the person who asked through the catalog. */
 const REQUISITION_LABELS: Record<string, string> = {
   DRAFT: 'Տեղեկություն է պետք',
-  PENDING_APPROVAL: 'Սպասում է հաստատման',
+  // The two organisation stages name who the line waits for (2026-10-12): the
+  // keeper has nothing to do with a purchase line, the organisation decides.
+  PENDING_APPROVAL: 'Սպասում է կազմակերպության հաստատման',
   SUBMITTED: 'Հաստատված՝ գնումների բաժնում',
   IN_REVIEW: 'Դիտարկվում է գնումների կողմից',
   APPROVED: 'Պատվիրված',
-  REJECTION_PENDING: 'Մերժված (սպասում է հաստատման)',
+  REJECTION_PENDING: 'Մերժումը սպասում է հաստատման',
   REJECTED: 'Մերժված',
   CANCELLED: 'Չեղարկված',
   FULFILLED: 'Ստացված',
@@ -141,12 +155,28 @@ export type SubmissionLine = {
   allocations: { id: number; assetId: number | null; serialNumber: string | null; quantity: number }[];
   allocationHistory: { at: string; action: string; by: Person; serialNumber: string | null; notes: string | null }[];
   statusHistory: { at: string; from: string | null; to: string; by: Person; reason: string | null; previousQuantity: number | null; newQuantity: number | null }[];
-  requisition: { id: number; status: string } | null;
+  /**
+   * On a stock line: the requisition raised for a short line (id + status).
+   * On a purchase/new line (2026-10-12): the line's own requisition, with what
+   * the organisation desk shows — the pending rejection's stage, reason and
+   * author, and the note of a declined one.
+   */
+  requisition: LineRequisition | null;
   /** Internal: where the line stands for the derivation. Not part of the contract. */
   stage: LineStage;
 };
 
 type Person = { id: number; name: string } | null;
+
+export type LineRequisition = {
+  id: number;
+  status: string;
+  entityId?: number | null;
+  rejectionStage?: 'ORG' | 'PROCUREMENT' | null;
+  rejectionReason?: string | null;
+  rejectionRequestedBy?: Person;
+  rejectionDeclineNote?: string | null;
+};
 
 export type SubmissionView = {
   id: number;
@@ -173,6 +203,12 @@ export type SubmissionView = {
   comment: string | null;
   attachmentUrl: string | null;
   status: SubmissionStatus;
+  /**
+   * 2026-10-14: status is REJECTED but a purchase rejection still waits for
+   * confirm_requisition_rejection — the screens say «Մերժումը սպասում է
+   * հաստատման», not «Մերժված», until it is confirmed (or declined).
+   */
+  rejectionAwaitsConfirmation: boolean;
   progress: { ready: number; total: number };
   canEdit: boolean;
   canCancel: boolean;
@@ -955,6 +991,16 @@ export class CatalogService {
         ...(query.to ? { lt: new Date(this.dayOf(query.to, 'Ամսաթիվը սխալ է').getTime() + 86_400_000) } : {}),
       };
     }
+    // «Գնման հաստատում» (2026-10-12): requests whose purchase requisition the
+    // organisation still decides on, or whose rejection waits for
+    // confirm_requisition_rejection — a database condition, so the page and
+    // the total come straight from the query. The organisation's desk alone
+    // sees only that, whatever status it names; keepers and the catalog desk
+    // see everything and may pick the chip.
+    if (this.isOrgDeskOnly(actor) || query.status?.trim().toUpperCase() === ORG_DESK_FILTER) {
+      where.requisitions = { some: { status: { in: ORG_DESK_STATUSES }, lines: { some: {} } } };
+      query = { ...query, status: undefined };
+    }
     return this.listPage(where, actor.userId, query, {
       unitId: Number(query.unitId) > 0 ? Number(query.unitId) : undefined,
       oldest: query.sort === 'oldest',
@@ -1128,6 +1174,14 @@ export class CatalogService {
     });
   }
 
+  /** Holds a purchase-desk right and none of the keeper's / the catalog desk's: the queue is their approval desk only. */
+  isOrgDeskOnly(actor: WarehouseActor): boolean {
+    const names = actor.permissionNames ?? [];
+    if (actor.isSuperAdmin || names.includes('manage_warehouse')) return false;
+    if (KEEPER_VIEWER_PERMISSIONS.some((p) => names.includes(p))) return false;
+    return ORG_DESK_PERMISSIONS.some((p) => names.includes(p));
+  }
+
   private filterViews(all: SubmissionView[], query: Record<string, string | undefined>) {
     let out = all;
     const status = query.status?.trim().toUpperCase();
@@ -1205,6 +1259,7 @@ export class CatalogService {
       l.requisition?.decidedBy,
       l.requisition?.reviewedBy,
       l.requisition?.rejectionRequestedBy,
+      l.requisition?.rejectionConfirmedBy,
       ...((l.requisition?.comments ?? []) as any[]).map((c) => c.userId),
       ...l.reservations.flatMap((r) => (r.statusHistory as any[]).map((h) => h.performedBy)),
       ...l.reservations.flatMap((r) => ((r.allocationHistory ?? []) as any[]).map((h) => h.performedBy)),
@@ -1384,9 +1439,21 @@ export class CatalogService {
     requisition: null,
   };
 
-  private lineOfRequisition(req: any, line: any, free: Map<number, number>): SubmissionLine {
+  private lineOfRequisition(req: any, line: any, free: Map<number, number>, person: (id: number | null | undefined) => Person = () => null): SubmissionLine {
     const kind: LineKind = line.itemId ? 'PURCHASE' : 'NEW';
     const stage = stageOf(kind, req.status);
+    // The organisation desk reads the line (2026-10-12): which requisition it
+    // is, where it stands, and — while a rejection awaits confirmation — who
+    // asked for it and why; a declined rejection keeps the confirmer's note.
+    const requisition: LineRequisition = {
+      id: req.id,
+      status: req.status,
+      entityId: req.entityId ?? null,
+      rejectionStage: req.rejectionStage ?? null,
+      rejectionReason: req.rejectionReason ?? null,
+      rejectionRequestedBy: req.status === 'REJECTION_PENDING' ? person(req.rejectionRequestedBy) : null,
+      rejectionDeclineNote: req.rejectionDeclineNote ?? null,
+    };
     return {
       id: lineIdOf(kind, line.id),
       kind,
@@ -1407,6 +1474,7 @@ export class CatalogService {
       requisitionId: req.id,
       requisitionLineId: line.id,
       ...CatalogService.NO_STOCK_VIEW,
+      requisition,
       stage,
     };
   }
@@ -1418,7 +1486,7 @@ export class CatalogService {
   ): SubmissionLine[] {
     return [
       ...l.reservations.map((r) => this.lineOfReservation(r, free, { pool: extra.pool, person: extra.person, requisition: extra.requisitionOf?.get(r.id) ?? null })),
-      ...((l.requisition?.lines ?? []) as any[]).map((line) => this.lineOfRequisition(l.requisition, line, free)),
+      ...((l.requisition?.lines ?? []) as any[]).map((line) => this.lineOfRequisition(l.requisition, line, free, extra.person)),
     ];
   }
 
@@ -1481,6 +1549,20 @@ export class CatalogService {
           kind: 'requisition.rejection_requested',
           by: ctx.person(requisition.rejectionRequestedBy),
           text: `Գնման տողերը մերժվել են${requisition.rejectionReason ? ` — ${requisition.rejectionReason}` : ''}`,
+        });
+      }
+      // The confirmer's word (2026-10-12): the rejection stood, or it was sent
+      // back — the kind of the latter must not read as a rejection to the
+      // client's step labels (/reject/), hence «declined».
+      if (requisition.rejectionConfirmedAt) {
+        const stood = requisition.status === 'REJECTED';
+        timeline.push({
+          at: iso(requisition.rejectionConfirmedAt)!,
+          kind: stood ? 'requisition.rejection_confirmed' : 'requisition.declined',
+          by: ctx.person(requisition.rejectionConfirmedBy),
+          text: stood
+            ? 'Մերժումը հաստատվել է'
+            : `Մերժումը չի հաստատվել, գնումը վերադարձվել է հաստատման${requisition.rejectionDeclineNote ? ` — ${requisition.rejectionDeclineNote}` : ''}`,
         });
       }
       if (requisition.reviewedAt && requisition.status === 'APPROVED') {
@@ -1548,6 +1630,7 @@ export class CatalogService {
       comment: sub.comment ?? null,
       attachmentUrl: sub.attachmentUrl ?? null,
       status,
+      rejectionAwaitsConfirmation: status === 'REJECTED' && requisition?.status === 'REJECTION_PENDING',
       progress: progressOf(stages),
       canEdit: editable,
       canCancel: editable,
@@ -1942,7 +2025,8 @@ export class CatalogService {
             { quiet: true },
           );
         }
-        await this.requisitions.orgApprove(req.id, userId);
+        // The submitter hears it from announceToSubmitter below — once.
+        await this.requisitions.orgApprove(req.id, userId, { submitterTold: true });
       }
       changed++;
       // The approver has taken the open question over.

@@ -144,6 +144,10 @@ function memoryPrisma(data: ReturnType<typeof fixture>) {
       const wh = where.reservations.some.warehouseId;
       if (!data.rows.some((r) => r.submissionId === s.id && r.warehouseId === wh)) return false;
     }
+    if (where.requisitions?.some) {
+      const some = where.requisitions.some;
+      if (!data.reqs.some((r) => r.submissionId === s.id && some.status.in.includes(r.status) && r.lines.length > 0)) return false;
+    }
     if (where.createdAt?.gte && s.createdAt < where.createdAt.gte) return false;
     if (where.createdAt?.lt && s.createdAt >= where.createdAt.lt) return false;
     return true;
@@ -358,6 +362,27 @@ describe('queue and «Իմ հարցումները» — the database-paged path 
     const loads = prisma.catalogSubmission.findMany.mock.calls.map((c: any[]) => c[0]);
     expect(loads[0]).toMatchObject({ skip: PAGE, take: PAGE, select: { id: true } });
     expect(loads[1].where).toEqual({ id: { in: res.items.map((v) => v.id) } });
+  });
+
+  it('«Գնման հաստատում» (status=PURCHASE_APPROVAL, 2026-10-12) in the database answers what the built views say', async () => {
+    const { svc, prisma } = world();
+    // The reference: every view, kept where a purchase line awaits the organisation or a rejection's confirmation.
+    const awaiting = (v: any) => v.lines.some((l: any) => l.kind !== 'STOCK' && ['PENDING_APPROVAL', 'REJECTION_PENDING'].includes(l.status));
+    for (const f of [{}, { q: 'ցեմենտ' }, { sort: 'oldest' }, { unitId: '1' }, { entityId: '2' }, { kind: 'NEW' }]) {
+      for (const page of ['1', '2']) {
+        const query = { ...f, page, pageSize: '10' };
+        const all = await oldQueue(svc, { ...query, status: undefined, page: '1' }, 40, 10000);
+        const kept = all.items.filter(awaiting);
+        const expected = { items: kept.slice((Number(page) - 1) * 10, Number(page) * 10), total: kept.length };
+        const actual = await svc.queue({ ...query, status: 'PURCHASE_APPROVAL' }, { userId: 40 } as any);
+        expect({ query, result: plain(actual) }).toEqual({ query, result: plain(expected) });
+      }
+    }
+    expect((await svc.queue({ status: 'purchase_approval' }, { userId: 40 } as any)).total).toBeGreaterThan(3);
+    // No filter that needs a built view: the total is a count, not a light pass.
+    prisma.purchaseRequisition.findMany.mockClear();
+    await svc.queue({ status: 'PURCHASE_APPROVAL' }, { userId: 40 } as any);
+    expect(prisma.purchaseRequisition.findMany).toHaveBeenCalledTimes(1);
   });
 
   it('with a filter, the full views (histories, stock, CRM task titles) are built for the page only', async () => {

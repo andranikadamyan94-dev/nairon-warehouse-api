@@ -106,7 +106,8 @@ function world() {
 
 describe('who opens the queue', () => {
   it('GET /catalog/submissions is guarded by the desk right OR the keepers’ reservation rights (alert holders included)', () => {
-    expect(QUEUE_VIEWER_PERMISSIONS).toEqual(['view_catalog_requests', 'view_reservations', 'manage_reservations', 'receive_reservation_alerts']);
+    // 2026-10-12: the organisation's purchase desk opens the queue too (catalog-org-approval.spec.ts).
+    expect(QUEUE_VIEWER_PERMISSIONS).toEqual(['view_catalog_requests', 'view_reservations', 'manage_reservations', 'receive_reservation_alerts', 'approve_purchase_requisition', 'confirm_requisition_rejection']);
     expect(Reflect.getMetadata(PERMISSIONS_KEY, CatalogController.prototype.queue)).toEqual(QUEUE_VIEWER_PERMISSIONS);
     expect(Reflect.getMetadata(PERMISSIONS_KEY, CatalogController.prototype.issue)).toEqual(['manage_reservations']);
   });
