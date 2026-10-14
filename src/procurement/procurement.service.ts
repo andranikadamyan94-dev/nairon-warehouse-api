@@ -13,7 +13,7 @@ import { CreateProcurementDto } from './dto/create-procurement.dto';
 import { UpdateProcurementDto } from './dto/update-procurement.dto';
 import { FileService } from '../common/file.service';
 import { StockAlertService } from '../common/notifications/stock-alert.service';
-import { WAREHOUSE_TYPES, WarehouseNotificationsService, crmLinks, warehouseLinks } from '../common/notifications/notifications.service';
+import { WAREHOUSE_TYPES, WarehouseNotificationsService, requisitionLinks, warehouseLinks } from '../common/notifications/notifications.service';
 import { ReceiveDeliveryDto } from './dto/receive-delivery.dto';
 import { requireInternalSecret } from '../common/internal-headers';
 import { requireFinanceUrl } from '../common/finance-url';
@@ -345,9 +345,9 @@ export class ProcurementService {
   }
 
   /** The requisitions an order was raised for. Never throws. */
-  private async linkedRequisitions(orderId: number): Promise<{ id: number; title: string | null; createdBy: number }[]> {
+  private async linkedRequisitions(orderId: number): Promise<{ id: number; title: string | null; createdBy: number; submissionId: number | null }[]> {
     return this.prisma.purchaseRequisition
-      .findMany({ where: { orderId }, select: { id: true, title: true, createdBy: true } })
+      .findMany({ where: { orderId }, select: { id: true, title: true, createdBy: true, submissionId: true } })
       .catch(() => []);
   }
 
@@ -622,8 +622,8 @@ export class ProcurementService {
     // #1885: requisitions this order was raised for are now satisfied.
     if (complete) {
       const fulfilled = await this.prisma.purchaseRequisition
-        .findMany({ where: { orderId: id, status: 'APPROVED' }, select: { id: true, title: true, createdBy: true } })
-        .catch(() => [] as { id: number; title: string | null; createdBy: number }[]);
+        .findMany({ where: { orderId: id, status: 'APPROVED' }, select: { id: true, title: true, createdBy: true, submissionId: true } })
+        .catch(() => [] as { id: number; title: string | null; createdBy: number; submissionId: number | null }[]);
       await this.prisma.purchaseRequisition
         .updateMany({
           where: { orderId: id, status: 'APPROVED' },
@@ -637,7 +637,7 @@ export class ProcurementService {
           actorId: receivedBy ?? null,
           title: 'Գնման հայտը կատարվել է',
           body: `Գնման հայտ #${r.id}${r.title ? ` («${r.title}»)` : ''}՝ ապրանքները ստացվել են պահեստում (գնման պատվեր #${id})։`,
-          path: crmLinks.requisition(r.id),
+          path: requisitionLinks.requester(r),
           details: [
             { label: 'Հայտ', value: `#${r.id}` },
             { label: 'Գնման պատվեր', value: `#${id}` },
@@ -1719,7 +1719,7 @@ export class ProcurementService {
         (reqs.length ? `․ գնման հայտ(եր) ${reqs.map((r) => `#${r.id}`).join(', ')} այլևս պատվեր չունեն` : '') +
         (reachedFinance ? '․ ֆինանսական գործարքները չեղարկվել են' : '') +
         '։',
-      path: reqs.length === 1 ? crmLinks.requisition(reqs[0].id) : '/procurement',
+      path: reqs.length === 1 ? requisitionLinks.requester(reqs[0]) : '/procurement',
       details: [
         ...this.orderDetails(order),
         ...reqs.map((r) => ({ label: 'Գնման հայտ', value: `#${r.id}${r.title ? ` «${r.title}»` : ''}` })),

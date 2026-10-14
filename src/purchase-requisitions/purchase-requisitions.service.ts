@@ -14,7 +14,7 @@ import {
   WAREHOUSE_TYPES,
   WarehouseNotification,
   WarehouseNotificationsService,
-  crmLinks,
+  requisitionLinks,
 } from '../common/notifications/notifications.service';
 import { FileService } from '../common/file.service';
 import { TxClient } from '../common/operations/operations.service';
@@ -86,22 +86,8 @@ export const CONFIRM_REJECTION_PERMISSION = 'confirm_requisition_rejection';
 /** Orders whose lines still count as "coming" for the expected-quantity snapshot. */
 const OPEN_ORDER_STATUSES = ['PENDING_FINANCE_APPROVAL', 'FINANCE_APPROVED', 'ORDERED', 'PARTIALLY_RECEIVED'];
 
-type Linkable = { id: number; submissionId?: number | null; rejectionStage?: string | null };
-/**
- * Where a notice about a requisition opens (2026-10-14). A catalog
- * checkout's requisition is decided on its purchase line in «Ապրանքների
- * հարցումներ → Հաստատում» — the CRM «Գնման հայտեր» desks are gone — so the
- * organisation's approvers and confirmers open the request there, the
- * submitter opens it in «Իմ հարցումները» and procurement on «Գնումներ →
- * Գնման հայտեր». A requisition filed directly keeps its CRM link.
- */
-export const requisitionLinks = {
-  desk: (req: Linkable) => (req.submissionId ? `/goods-requests?tab=approve&id=${req.submissionId}` : crmLinks.requisition(req.id)),
-  requester: (req: Linkable) => (req.submissionId ? `/goods-requests?tab=mine&id=${req.submissionId}` : crmLinks.requisition(req.id)),
-  procurement: (req: Linkable) => (req.submissionId ? '/procurement?tab=requisitions' : crmLinks.requisition(req.id)),
-  /** Whoever asked for a rejection: the organisation's desk, or procurement (stage PROCUREMENT). */
-  rejecter: (req: Linkable) => (req.rejectionStage === 'PROCUREMENT' ? requisitionLinks.procurement(req) : requisitionLinks.desk(req)),
-};
+const isFlag = (v: unknown) => v === '1' || v === 'true' || v === true;
+
 const links = requisitionLinks;
 
 /**
@@ -290,6 +276,7 @@ export class PurchaseRequisitionsService {
    */
   async create(dto: CreateRequisitionInput, userId: number, entityId: number | null, tx?: TxClient, opts?: CreateOptions) {
     const lines = await this.assertMayCreate(dto, userId, entityId, opts);
+    const submissionId = opts?.catalog ? opts.catalog.submissionId : await this.submissionOfLines(lines, tx);
     const created = await (tx ?? this.prisma).purchaseRequisition.create({
       data: {
         status: dto.draft ? 'DRAFT' : 'PENDING_APPROVAL',
@@ -300,8 +287,9 @@ export class PurchaseRequisitionsService {
         entityId: entityId || null,
         createdBy: userId,
         ...(dto.taskId ? { taskId: Number(dto.taskId), taskOrigin: 'ATTACHED' } : {}),
-        // Catalog (2026-10-01): the checkout this requisition belongs to.
-        ...(opts?.catalog ? { submissionId: opts.catalog.submissionId } : {}),
+        // Catalog (2026-10-01): the checkout this requisition belongs to — or
+        // (2026-10-14) the request whose short stock lines the keeper raised it for.
+        ...(submissionId ? { submissionId } : {}),
         lines: { create: lines },
       },
       include: this.include,
@@ -311,6 +299,24 @@ export class PurchaseRequisitionsService {
     // announces its own requisition with the submission (CatalogService).
     if (!tx && !opts?.catalog) this.announceSubmitted(created, userId);
     return (await this.decorate([created]))[0];
+  }
+
+  /**
+   * The keeper's «Գնման հայտ» for a request's short stock lines (2026-10-14,
+   * owner: every requisition has a desk in the queue): when every line is a
+   * reservation's shortfall and all of them belong to one request, the
+   * requisition is that request's — it shows on it, and «Գնման հաստատում»
+   * lists it. Otherwise (a line without a reservation, reservations of
+   * several requests or of none) it stays request-less.
+   */
+  private async submissionOfLines(lines: { reservationId?: number | null }[], tx?: TxClient): Promise<number | null> {
+    if (!lines.length || lines.some((l) => !l.reservationId)) return null;
+    const ids = [...new Set(lines.map((l) => Number(l.reservationId)))];
+    const rows = await (tx ?? this.prisma).resourceReservation.findMany({ where: { id: { in: ids } }, select: { submissionId: true } });
+    const subs = new Set(rows.map((r: any) => r.submissionId));
+    if (rows.length !== ids.length || subs.size !== 1) return null;
+    const [only] = [...subs];
+    return only ?? null;
   }
 
   /**
@@ -415,11 +421,13 @@ export class PurchaseRequisitionsService {
    * the rest is the history of what they (or procurement) decided. Deciding
    * on a row still needs the right in that row's organisation (assertMayDecide).
    */
-  async findForApproval(userId: number, query: { status?: string; page?: string; limit?: string; search?: string }) {
+  async findForApproval(userId: number, query: { status?: string; page?: string; limit?: string; search?: string; standalone?: string }) {
     if (!(await this.holdsAnywhere(userId, APPROVE_PERMISSION))) {
       throw new ForbiddenException('Դուք գնման հայտերը հաստատելու թույլտվություն չունեք');
     }
     const where: any = { status: query.status ? query.status : { not: 'DRAFT' } };
+    // standalone=1 (2026-10-14): only the requisitions of no request — the queue's «Առանց հարցման» section.
+    if (isFlag(query.standalone)) where.submissionId = null;
     if (query.search?.trim()) {
       where.OR = [
         { title: { contains: query.search.trim(), mode: 'insensitive' } },
@@ -667,15 +675,10 @@ export class PurchaseRequisitionsService {
       body: `${this.label(req)} հաստատվել է կազմակերպության կողմից և փոխանցվել գնումների բաժին։`,
       details: this.details(req),
     };
-    if (!req.submissionId) {
-      // Procurement now has it; the requester hears it went through.
-      this.notify({ ...base, permissions: ['manage_procurement'], entityIds: [req.entityId], userIds: [req.createdBy], path: crmLinks.requisition(req.id) });
-    } else {
-      // A catalog checkout's: procurement opens it on their own page, the
-      // submitter on their request in «Իմ հարցումները».
-      this.notify({ ...base, permissions: ['manage_procurement'], entityIds: [req.entityId], excludeUserIds: [req.createdBy], path: links.procurement(req) });
-      if (!opts?.submitterTold) this.notify({ ...base, userIds: [req.createdBy], path: links.requester(req) });
-    }
+    // Procurement now has it and opens it on its own page; the requester hears
+    // it went through, on their request (2026-10-14: no CRM page any more).
+    this.notify({ ...base, permissions: ['manage_procurement'], entityIds: [req.entityId], excludeUserIds: [req.createdBy], path: links.procurement(req) });
+    if (!opts?.submitterTold) this.notify({ ...base, userIds: [req.createdBy], path: links.requester(req) });
     return this.findOne(id, userId, { permissionNames: [APPROVE_PERMISSION] });
   }
 
@@ -709,7 +712,7 @@ export class PurchaseRequisitionsService {
       actorId: userId,
       title: 'Գնման հայտը մշակման մեջ է',
       body: `${this.label(req)}՝ գնումների բաժինը վերցրել է այն մշակման։`,
-      path: crmLinks.requisition(req.id),
+      path: links.requester(req),
       details: this.details(req),
     });
     return this.findOne(id, userId, { permissionNames: ['manage_procurement'] });
@@ -761,11 +764,12 @@ export class PurchaseRequisitionsService {
    * anywhere (global, as findForApproval). Confirming one still needs the
    * right in that row's organisation (assertMayConfirm).
    */
-  async findRejections(userId: number, query: { status?: string; page?: string; limit?: string; search?: string }) {
+  async findRejections(userId: number, query: { status?: string; page?: string; limit?: string; search?: string; standalone?: string }) {
     if (!(await this.holdsAnywhere(userId, CONFIRM_REJECTION_PERMISSION))) {
       throw new ForbiddenException('Դուք գնման հայտերի մերժումը հաստատելու թույլտվություն չունեք');
     }
     const where: any = { status: query.status ? query.status : 'REJECTION_PENDING' };
+    if (isFlag(query.standalone)) where.submissionId = null;
     if (query.status === 'REJECTED') where.rejectionConfirmedBy = { not: null };
     if (query.search?.trim()) {
       where.OR = [
@@ -835,10 +839,6 @@ export class PurchaseRequisitionsService {
    * desk they rejected from — one notice each.
    */
   private notifyRequesterAndRejecter(req: any, n: Omit<WarehouseNotification, 'userIds' | 'path'>) {
-    if (!req.submissionId) {
-      this.notify({ ...n, userIds: [req.createdBy, req.rejectionRequestedBy], path: crmLinks.requisition(req.id) });
-      return;
-    }
     this.notify({ ...n, userIds: [req.createdBy], path: links.requester(req) });
     if (req.rejectionRequestedBy && req.rejectionRequestedBy !== req.createdBy) {
       this.notify({ ...n, userIds: [req.rejectionRequestedBy], path: links.rejecter(req) });
@@ -902,7 +902,7 @@ export class PurchaseRequisitionsService {
       actorId: userId,
       title: 'Գնման հայտից պատվեր է ստեղծվել',
       body: `${this.label(req)}՝ գնումների բաժինը ստեղծել է գնման պատվեր #${result.id}։`,
-      path: crmLinks.requisition(req.id),
+      path: links.requester(req),
       details: [...this.details(req), { label: 'Գնման պատվեր', value: `#${result.id}` }],
     });
     const out = await this.findOne(id, userId, { permissionNames: ['manage_procurement'] });
@@ -1057,7 +1057,7 @@ export class PurchaseRequisitionsService {
         actorId,
         title: type === WAREHOUSE_TYPES.requestAttachment ? 'Ֆայլ գնման հայտում' : 'Մեկնաբանություն գնման հայտում',
         body: `${this.label(req)}․ ${what}`,
-        path: crmLinks.requisition(req.id),
+        path: links.desk(req),
         details: this.details(req),
       };
       if (actorId !== req.createdBy) {
@@ -1098,7 +1098,7 @@ export class PurchaseRequisitionsService {
       actorId,
       title: 'Գնման հայտը չեղարկվել է',
       body: `${this.label(req)} չեղարկվել է${actorId === req.createdBy ? ' ներկայացնողի կողմից' : ''}։`,
-      path: crmLinks.requisition(req.id),
+      path: links.desk(req),
       details: this.details(req),
     });
   }

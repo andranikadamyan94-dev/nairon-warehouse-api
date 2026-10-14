@@ -95,7 +95,6 @@ export const crmLinks = {
   task: (projectId: number | null | undefined, taskId: number) =>
     projectId ? `/assignments/${projectId}?task=${taskId}` : null,
   object: (objectId: number) => `/objects/${objectId}`,
-  requisition: (id: number) => `/purchase-requisitions?requisition=${id}`,
 };
 
 /**
@@ -112,6 +111,26 @@ export const warehouseLinks = {
   stockRequest: (id: number) => `/stock-requests?request=${id}`,
   maintenance: (id: number) => `/maintenance?maintenance=${id}`,
   return: (id: number) => `/returns?return=${id}`,
+};
+
+type ReqLinkable = { id: number; submissionId?: number | null; rejectionStage?: string | null };
+/**
+ * Where a notice about a purchase requisition opens (2026-10-14). The CRM
+ * «Գնման հայտեր» page is gone: every requisition is decided in the warehouse
+ * queue «Ապրանքների հարցումներ → Հաստատում» — a request's requisition on the
+ * request (?id=<submission>), one of no request in the «Գնման հաստատում»
+ * section «Առանց հարցման» (?requisition=<id>, which the page also resolves to
+ * the request when there is one). The submitter of a request opens it in «Իմ
+ * հարցումները»; procurement on «Գնումներ → Գնման հայտեր».
+ */
+export const requisitionLinks = {
+  desk: (req: ReqLinkable) =>
+    req.submissionId ? `/goods-requests?tab=approve&id=${req.submissionId}` : `/goods-requests?tab=approve&requisition=${req.id}`,
+  requester: (req: ReqLinkable) =>
+    req.submissionId ? `/goods-requests?tab=mine&id=${req.submissionId}` : `/goods-requests?tab=approve&requisition=${req.id}`,
+  procurement: (_req?: ReqLinkable) => '/procurement?tab=requisitions',
+  /** Whoever asked for a rejection: the organisation's desk, or procurement (stage PROCUREMENT). */
+  rejecter: (req: ReqLinkable) => (req.rejectionStage === 'PROCUREMENT' ? requisitionLinks.procurement(req) : requisitionLinks.desk(req)),
 };
 
 export interface WarehouseNotification {

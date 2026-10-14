@@ -165,7 +165,8 @@ describe('purchase requisitions', () => {
       permissions: ['approve_purchase_requisition'],
       entityIds: [7],
       actorId: 10,
-      path: '/purchase-requisitions?requisition=5',
+      // 2026-10-14: a request-less requisition opens in the queue's «Առանց հարցման» section.
+      path: '/goods-requests?tab=approve&requisition=5',
     });
   });
 
@@ -185,14 +186,17 @@ describe('purchase requisitions', () => {
   it('org approval → procurement of the organisation + the requester; a catalog row: one notice to the submitter unless the catalog told them', async () => {
     const { svc, n } = world({ status: 'PENDING_APPROVAL' });
     await svc.orgApprove(5, 20);
+    // 2026-10-14 (no CRM page): procurement opens its own page, the requester the requisition in the queue.
+    expect(n.sent).toHaveLength(2);
     expect(n.sent[0]).toMatchObject({
       type: 'warehouse.requisition_approved',
       permissions: ['manage_procurement'],
       entityIds: [7],
-      userIds: [10],
+      excludeUserIds: [10],
       actorId: 20,
+      path: '/procurement?tab=requisitions',
     });
-    expect(n.sent[0].path).toBe('/purchase-requisitions?requisition=5');
+    expect(n.sent[1]).toMatchObject({ userIds: [10], path: '/goods-requests?tab=approve&requisition=5' });
     // 2026-10-14: the organisation decides on the purchase line in the queue (the route) —
     // procurement opens its own page, the submitter hears it once, on «Իմ հարցումները».
     const cat = world({ status: 'PENDING_APPROVAL', submissionId: 3 });
@@ -249,11 +253,14 @@ describe('purchase requisitions', () => {
   it('confirmed or declined rejection → requester + rejecter, never the confirmer', async () => {
     const c = world({ status: 'REJECTION_PENDING', rejectionStage: 'ORG', rejectionRequestedBy: 20, rejectionReason: 'Թանկ է' });
     await c.svc.confirmRejection(5, 40);
-    expect(c.n.sent[0]).toMatchObject({ type: 'warehouse.requisition_rejection_decided', userIds: [10, 20], actorId: 40 });
+    // One notice each, to their own screen (2026-10-14).
+    expect(c.n.sent.map((x: any) => x.userIds)).toEqual([[10], [20]]);
+    expect(c.n.sent[0]).toMatchObject({ type: 'warehouse.requisition_rejection_decided', actorId: 40, path: '/goods-requests?tab=approve&requisition=5' });
     expect(c.n.sent[0].body).toContain('Թանկ է');
     const d = world({ status: 'REJECTION_PENDING', rejectionStage: 'ORG', rejectionRequestedBy: 20, rejectionReturnStatus: 'PENDING_APPROVAL' });
     await d.svc.declineRejection(5, 40, 'Պետք է');
-    expect(d.n.sent[0]).toMatchObject({ type: 'warehouse.requisition_rejection_decided', userIds: [10, 20], actorId: 40 });
+    expect(d.n.sent.map((x: any) => x.userIds)).toEqual([[10], [20]]);
+    expect(d.n.sent[1]).toMatchObject({ type: 'warehouse.requisition_rejection_decided', actorId: 40 });
   });
 
   it('converted to an order → the requester', async () => {

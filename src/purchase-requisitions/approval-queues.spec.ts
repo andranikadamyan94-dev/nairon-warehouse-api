@@ -131,3 +131,36 @@ describe('A · GET /purchase-requisitions/rejections is every organisation’s d
     await expect(controller.rejections({}, as(APPROVER, '3'))).rejects.toBeInstanceOf(ForbiddenException);
   });
 });
+
+describe('2026-10-14 · standalone=1: the queue’s «Առանց հարցման» section', () => {
+  it('narrows either desk to the requisitions of no request; without the flag nothing changes', async () => {
+    const { controller, wheres } = build();
+    await controller.approvals({ status: 'PENDING_APPROVAL', standalone: '1' }, as(APPROVER, null));
+    expect(wheres[0]).toEqual({ status: 'PENDING_APPROVAL', submissionId: null });
+    await controller.rejections({ standalone: 'true' }, as(CONFIRMER, null));
+    expect(wheres[1]).toEqual({ status: 'REJECTION_PENDING', submissionId: null });
+    await controller.approvals({ status: 'PENDING_APPROVAL', standalone: '0' }, as(APPROVER, null));
+    expect(wheres[2]).toEqual({ status: 'PENDING_APPROVAL' });
+  });
+});
+
+describe('2026-10-14 · the keeper’s «Գնման հայտ» belongs to the request of its reservations', () => {
+  const svcWith = (reservations: { id: number; submissionId: number | null }[]) => {
+    const prisma: any = {
+      resourceReservation: { findMany: jest.fn(async ({ where }: any) => reservations.filter((r) => where.id.in.includes(r.id)).map((r) => ({ submissionId: r.submissionId }))) },
+    };
+    return new PurchaseRequisitionsService(prisma, {} as any, {} as any) as any;
+  };
+  it('every line a reservation of one request → that request', async () => {
+    const svc = svcWith([{ id: 1, submissionId: 9 }, { id: 2, submissionId: 9 }]);
+    await expect(svc.submissionOfLines([{ reservationId: 1 }, { reservationId: 2 }])).resolves.toBe(9);
+  });
+  it('a line without a reservation, two requests, a request-less reservation, or an unknown one → no request', async () => {
+    const svc = svcWith([{ id: 1, submissionId: 9 }, { id: 2, submissionId: 8 }, { id: 3, submissionId: null }]);
+    await expect(svc.submissionOfLines([{ reservationId: 1 }, { reservationId: null }])).resolves.toBeNull();
+    await expect(svc.submissionOfLines([{ reservationId: 1 }, { reservationId: 2 }])).resolves.toBeNull();
+    await expect(svc.submissionOfLines([{ reservationId: 3 }])).resolves.toBeNull();
+    await expect(svc.submissionOfLines([{ reservationId: 4 }])).resolves.toBeNull();
+    await expect(svc.submissionOfLines([])).resolves.toBeNull();
+  });
+});

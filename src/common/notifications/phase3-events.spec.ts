@@ -160,7 +160,7 @@ describe('procurement · order deleted (D2), placed, price amended', () => {
       type: 'warehouse.order_deleted',
       userIds: [12, 10],
       actorId: 50,
-      path: '/purchase-requisitions?requisition=31',
+      path: '/goods-requests?tab=approve&requisition=31',
     });
     expect(n.sent[0].permissions).toBeUndefined();
     expect(n.sent[0].body).toContain('#31');
@@ -593,7 +593,7 @@ describe('purchase requisitions · cancelled / in review / file', () => {
   it('taken into review → the requester (requisition_in_review), not the reviewer', async () => {
     const { svc, n } = world();
     await svc.review(5, 30);
-    expect(n.sent[0]).toMatchObject({ type: 'warehouse.requisition_in_review', userIds: [10], actorId: 30, path: '/purchase-requisitions?requisition=5' });
+    expect(n.sent[0]).toMatchObject({ type: 'warehouse.requisition_in_review', userIds: [10], actorId: 30, path: '/goods-requests?tab=approve&requisition=5' });
   });
 
   it('a file → request_attachment, the comment audience', async () => {
